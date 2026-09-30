@@ -29,6 +29,12 @@ public class MeleeActivity extends SDLActivity {
 
     @Override
     protected void onCreate(android.os.Bundle savedInstanceState) {
+        // Nothing else asks Android for the app-specific external directory,
+        // so /sdcard/Android/data/dev.melee.game/files never exists (or exists
+        // owned by adb's shell user if created by hand) and melee-env.txt,
+        // which pc_env_file_bootstrap reads from there, can never load.
+        // Asking once makes the system create it owned by this app.
+        getExternalFilesDir(null);
         super.onCreate(savedInstanceState);
         if (mBrokenLibraries) {
             return;
