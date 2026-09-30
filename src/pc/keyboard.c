@@ -14,6 +14,9 @@
  * logs one "pad: " line per change of the published pad, with the focus and
  * fifo state that produced it.
  */
+#ifdef AURORA_ENABLE_OPENXR
+#include <aurora/xr.h>
+#endif
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_thread.h>
 #include <SDL3/SDL_timer.h>
@@ -270,6 +273,28 @@ static void publish_locked(void) {
         memset(s_key_latched, 0, sizeof(s_key_latched));
         any_active = true;
     }
+
+#ifdef AURORA_ENABLE_OPENXR
+    /* Headset controllers in XR builds (extern/aurora/lib/xr): same merge as
+     * the touch overlay below. */
+    PADStatus xr_st = {0};
+    if (aurora_xr_get_pad(&xr_st)) {
+        st.button |= xr_st.button;
+        if (xr_st.stickX != 0 || xr_st.stickY != 0) {
+            st.stickX = xr_st.stickX;
+            st.stickY = xr_st.stickY;
+        }
+        if (xr_st.substickX != 0 || xr_st.substickY != 0) {
+            st.substickX = xr_st.substickX;
+            st.substickY = xr_st.substickY;
+        }
+        if (xr_st.triggerLeft > st.triggerLeft)
+            st.triggerLeft = xr_st.triggerLeft;
+        if (xr_st.triggerRight > st.triggerRight)
+            st.triggerRight = xr_st.triggerRight;
+        any_active = true;
+    }
+#endif
 
     PADStatus touch_st = {0};
     if (pc_touch_get_status(&touch_st)) {

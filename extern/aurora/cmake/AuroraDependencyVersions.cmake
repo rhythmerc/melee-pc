@@ -24,3 +24,6 @@ _aurora_dependency_version(AURORA_SDL3_REF "1ce4c5bc2916702e8e0f6df1f612dbd86330
         "refs/tags/release-3.4.10" "refs/tags/release-3.4.16") # Previous versions
 _aurora_dependency_version(AURORA_NOD_VERSION "v2.0.0-alpha.12" "nod version tag (https://github.com/encounter/nod/releases)"
         "v2.0.0-alpha.10" "v2.0.0-alpha.11") # Previous versions
+# OpenXR loader for Android (AURORA_ENABLE_OPENXR): Khronos AAR from Maven Central
+_aurora_dependency_version(AURORA_OPENXR_ANDROID_VERSION "1.1.63" "org.khronos.openxr:openxr_loader_for_android version")
+set(AURORA_OPENXR_ANDROID_SHA256 "622419d2f6741c3443a3beb4779af0764318edd01830de967f24c741ebcded73")

@@ -25,6 +25,9 @@
 #include "../internal.hpp"
 #include "../window.hpp"
 #include "gpu_prof.hpp"
+#ifdef AURORA_ENABLE_OPENXR
+#include "../xr/xr.hpp"
+#endif
 
 #ifdef WEBGPU_DAWN
 #include "../dawn/TracyPlatform.hpp"
@@ -1026,6 +1029,9 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
       }
 #endif
     }
+#ifdef AURORA_ENABLE_OPENXR
+    xr::add_required_features(g_adapter, requiredFeatures);
+#endif
     std::string featureList;
     for (auto featureName : requiredFeatures) {
       featureList += "\n  ";
@@ -1285,5 +1291,12 @@ void aurora_enable_vsync(const bool enabled) {
 }
 
 bool aurora_vsync_enabled(void) {
+#ifdef AURORA_ENABLE_OPENXR
+  // Frames go to the headset, not the window, so nothing blocks on the
+  // window's vsync; the caller must pace itself.
+  if (aurora::xr::active()) {
+    return false;
+  }
+#endif
   return aurora::webgpu::vsync_enabled();
 }

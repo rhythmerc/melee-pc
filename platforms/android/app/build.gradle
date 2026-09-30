@@ -6,6 +6,10 @@ plugins {
 // tools/build_android.sh requires one to exist before building.
 def releaseKeystore = rootProject.file('melee-release.keystore')
 
+// -Pmelee.xr=true (tools/build_android.sh with MELEE_XR=1): Meta Quest
+// mixed-reality build. Merges src/xr/AndroidManifest.xml over the main one.
+def meleeXr = (project.findProperty('melee.xr') ?: 'false').toString().toBoolean()
+
 android {
     namespace 'dev.melee.game'
     compileSdk 34
@@ -41,6 +45,13 @@ android {
         }
         debug {
             debuggable true
+        }
+    }
+
+    if (meleeXr) {
+        sourceSets {
+            debug.manifest.srcFile 'src/xr/AndroidManifest.xml'
+            release.manifest.srcFile 'src/xr/AndroidManifest.xml'
         }
     }
 

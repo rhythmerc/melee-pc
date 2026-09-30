@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Merged over src/main/AndroidManifest.xml in XR builds (-Pmelee.xr=true).
+     Launches immersive on Meta Quest and lets the Khronos OpenXR loader find
+     the system runtime. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-feature android:name="android.hardware.vr.headtracking" android:required="true" android:version="1" />
+    <!-- Meta only exposes XR_FB_passthrough to apps that declare this. -->
+    <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="false" />
+
+    <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
+    <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
+
+    <queries>
+        <provider android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker" />
+        <intent><action android:name="org.khronos.openxr.OpenXRRuntimeService" /></intent>
+        <intent><action android:name="org.khronos.openxr.OpenXRApiLayerService" /></intent>
+    </queries>
+
+    <application>
+        <meta-data android:name="com.oculus.supportedDevices" android:value="quest2|questpro|quest3|quest3s" />
+        <activity android:name="dev.melee.MeleeActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="com.oculus.intent.category.VR" />
+                <category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

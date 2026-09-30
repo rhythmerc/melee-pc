@@ -14,6 +14,7 @@ docs/*
 !docs/debugging.md
 !docs/porting-notes.md
 !docs/testing.md
+!docs/quest-xr.md
 !docs/site/
 
 # Android build outputs (CI builds these from source).

@@ -14,6 +14,9 @@
 #include "imgui.hpp"
 #include "webgpu/gpu.hpp"
 #include "webgpu/gpu_prof.hpp"
+#ifdef AURORA_ENABLE_OPENXR
+#include "xr/xr.hpp"
+#endif
 #include <webgpu/webgpu_cpp.h>
 #endif
 
@@ -262,6 +265,9 @@ void shutdown() noexcept {
 #ifdef AURORA_ENABLE_GX
   gx::fifo::shutdown();
   gfx::render_worker::synchronize();
+#ifdef AURORA_ENABLE_OPENXR
+  xr::shutdown();
+#endif
 #ifdef AURORA_ENABLE_RMLUI
   rmlui::shutdown();
 #endif
@@ -344,12 +350,27 @@ void end_frame() noexcept {
 #endif
 
   gfx::end_frame([rmlBindGroup = std::move(rmlBindGroup), rmlOverlay, viewport,
+                  contentWidth = presentSource.size.width, contentHeight = presentSource.size.height,
                   imguiDrawData = std::move(imguiDrawData)](
                      wgpu::CommandEncoder& encoder, std::vector<gfx::AfterSubmitCallback> afterSubmitCallbacks) {
     wgpu::Texture currentTexture;
     wgpu::TextureView currentView;
     auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
-    {
+    bool presentToXr = false;
+#ifdef AURORA_ENABLE_OPENXR
+    // The frame goes to the headset's virtual screen instead of the window
+    // when an OpenXR session is up; xr::begin_frame returns null otherwise.
+    if (xr::wanted()) {
+      uint32_t xrWidth = 0, xrHeight = 0;
+      xr::screen_size(contentWidth, contentHeight, xrWidth, xrHeight);
+      currentTexture = xr::begin_frame(xrWidth, xrHeight);
+      if (currentTexture) {
+        currentView = currentTexture.CreateView();
+        presentToXr = true;
+      }
+    }
+#endif
+    if (!presentToXr) {
       window::SurfaceLock surfaceLock;
       if (window::is_presentable() && g_surface) {
         ZoneScopedN("Acquire texture");
@@ -372,6 +393,11 @@ void end_frame() noexcept {
       }
     }
 
+    // The virtual screen has its own size, so lay the frame out for it.
+    const auto presentViewport =
+        presentToXr ? webgpu::calculate_present_viewport(currentTexture.GetWidth(), currentTexture.GetHeight(),
+                                                         contentWidth, contentHeight)
+                    : viewport;
     const bool canPresent = currentTexture && currentView &&
                             webgpu::g_graphicsConfig.surfaceConfiguration.width > 0 &&
                             webgpu::g_graphicsConfig.surfaceConfiguration.height > 0;
@@ -382,7 +408,7 @@ void end_frame() noexcept {
       } else if (webgpu::get_resampler() == SAMPLER_BILINEAR) {
         presentBindGroup = webgpu::g_CopyBindGroup;
       } else {
-        const auto& resampledSource = webgpu::resample_present_source(encoder, viewport);
+        const auto& resampledSource = webgpu::resample_present_source(encoder, presentViewport);
         presentBindGroup = webgpu::create_copy_bind_group(resampledSource);
       }
       {
@@ -408,7 +434,7 @@ void end_frame() noexcept {
          * a texture of the new size before the resize event reconfigures the
          * surface, and a scissor outside it is a fatal validation error.
          * Natively the two sizes are always equal. */
-        set_present_viewport(pass, viewport, currentTexture.GetWidth(), currentTexture.GetHeight());
+        set_present_viewport(pass, presentViewport, currentTexture.GetWidth(), currentTexture.GetHeight());
 
         pass.Draw(3);
         if (rmlBindGroup && rmlOverlay) {
@@ -433,8 +459,14 @@ void end_frame() noexcept {
             .timestampWrites = webgpu::gpu_prof::pass_writes("ImGui"),
         };
         const auto pass = encoder.BeginRenderPass(&renderPassDescriptor);
-        pass.SetViewport(0.f, 0.f, static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.width),
-                         static_cast<float>(webgpu::g_graphicsConfig.surfaceConfiguration.height), 0.f, 1.f);
+        // ImGui lays out in window coordinates; on the virtual screen they
+        // are scaled to the texture.
+        pass.SetViewport(0.f, 0.f,
+                         static_cast<float>(presentToXr ? currentTexture.GetWidth()
+                                                        : webgpu::g_graphicsConfig.surfaceConfiguration.width),
+                         static_cast<float>(presentToXr ? currentTexture.GetHeight()
+                                                        : webgpu::g_graphicsConfig.surfaceConfiguration.height),
+                         0.f, 1.f);
         imgui::render(pass, imguiDrawData);
         pass.End();
       }
@@ -449,6 +481,12 @@ void end_frame() noexcept {
       g_queue.Submit(1, &buffer);
     }
     webgpu::gpu_prof::after_submit();
+#ifdef AURORA_ENABLE_OPENXR
+    if (presentToXr) {
+      xr::end_frame();
+      gfx::after_present();
+    } else
+#endif
     if (canPresent && g_surface) {
       ZoneScopedN("Present");
       wgpu::ConvertibleStatus status = wgpu::Status::Error;

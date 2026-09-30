@@ -4,7 +4,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 ANDROID_DIR="${ROOT_DIR}/platforms/android"
-BUILD_DIR="${BUILD_DIR:-${ROOT_DIR}/build/android-arm64}"
+# MELEE_XR=1: Meta Quest mixed-reality build. The game is shown on a virtual
+# screen over passthrough through OpenXR (extern/aurora/lib/xr); it builds in
+# its own directory and packages the Khronos OpenXR loader and the XR manifest
+# overlay (platforms/android/app/src/xr).
+MELEE_XR="${MELEE_XR:-0}"
+XR_CMAKE_ARGS=()
+XR_GRADLE_ARGS=()
+APK_NAME=Melee-Android-arm64.apk
+DEFAULT_BUILD_DIR="${ROOT_DIR}/build/android-arm64"
+if [[ "${MELEE_XR}" == 1 ]]; then
+    XR_CMAKE_ARGS=(-DAURORA_ENABLE_OPENXR=ON)
+    XR_GRADLE_ARGS=(-Pmelee.xr=true)
+    APK_NAME=Melee-Quest-XR-arm64.apk
+    DEFAULT_BUILD_DIR="${ROOT_DIR}/build/android-arm64-xr"
+fi
+BUILD_DIR="${BUILD_DIR:-${DEFAULT_BUILD_DIR}}"
 
 # Honour a preconfigured SDK/NDK (CI sets these); fall back to the local layout.
 export ANDROID_HOME="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-${HOME}/Android}}"
@@ -43,7 +58,8 @@ cmake -B "${BUILD_DIR}" -G Ninja \
     -DANDROID_ABI=arm64-v8a \
     -DANDROID_PLATFORM=android-26 \
     -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-z,max-page-size=16384" \
-    -DCMAKE_DISABLE_FIND_PACKAGE_PkgConfig=ON
+    -DCMAKE_DISABLE_FIND_PACKAGE_PkgConfig=ON \
+    "${XR_CMAKE_ARGS[@]}"
 SDL_JAVA_SOURCE_DIR="$(sed -n 's/^AURORA_SDL3_JAVA_SOURCE_DIR:INTERNAL=//p' "${BUILD_DIR}/CMakeCache.txt")"
 SDL_VERSION_PATTERN='private static final int SDL_(MAJOR|MINOR|MICRO)_VERSION ='
 SDL_NATIVE_VERSION="$(grep -E "${SDL_VERSION_PATTERN}" "${SDL_JAVA_SOURCE_DIR}/org/libsdl/app/SDLActivity.java")"
@@ -67,6 +83,11 @@ rm -f "${ANDROID_DIR}/app/src/main/assets/initial_pipeline_cache.db" \
 
 mkdir -p "${ANDROID_DIR}/app/src/main/jniLibs/arm64-v8a"
 "${STRIP_TOOL}" --strip-unneeded -o "${ANDROID_DIR}/app/src/main/jniLibs/arm64-v8a/libmelee.so" "${BUILD_DIR}/libmelee.so"
+# The OpenXR loader only ships in XR builds; drop one a previous XR build staged.
+rm -f "${ANDROID_DIR}/app/src/main/jniLibs/arm64-v8a/libopenxr_loader.so"
+if [[ -f "${BUILD_DIR}/libopenxr_loader.so" ]]; then
+    cp "${BUILD_DIR}/libopenxr_loader.so" "${ANDROID_DIR}/app/src/main/jniLibs/arm64-v8a/"
+fi
 if [[ -f "${BUILD_DIR}/_deps/png-build/libpng16.so" ]]; then
     "${STRIP_TOOL}" --strip-unneeded -o "${ANDROID_DIR}/app/src/main/jniLibs/arm64-v8a/libpng16.so" "${BUILD_DIR}/_deps/png-build/libpng16.so"
 fi
@@ -88,13 +109,13 @@ export MELEE_KEYSTORE_PASSWORD MELEE_KEY_ALIAS MELEE_KEY_PASSWORD
 
 echo "=== Building Melee Android APK ==="
 cd "${ANDROID_DIR}"
-./gradlew --no-daemon :app:assembleRelease || {
+./gradlew --no-daemon :app:assembleRelease "${XR_GRADLE_ARGS[@]}" || {
     echo "Gradle assembleRelease failed, retrying once after 5s..."
     sleep 5
-    ./gradlew --no-daemon :app:assembleRelease --stacktrace
+    ./gradlew --no-daemon :app:assembleRelease --stacktrace "${XR_GRADLE_ARGS[@]}"
 }
 
-APK="${ROOT_DIR}/dist/Melee-Android-arm64.apk"
+APK="${ROOT_DIR}/dist/${APK_NAME}"
 mkdir -p "${ROOT_DIR}/dist"
 cp "${ANDROID_DIR}/app/build/outputs/apk/release/app-release.apk" "${APK}"
 
