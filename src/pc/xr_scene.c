@@ -67,10 +67,11 @@ typedef struct {
 
 /* Pokémon Stadium's big screen stands far behind the stage (its frame,
  * joint 2, is based at z -215). Pull it in to just behind the stage and
- * shrink it. MELEE_XR_JUMBOTRON="scale,x,y,z" overrides. */
+ * shrink it. Moved at joint 1, the parent of everything the screen shows:
+ * the frame (2), the picture (3), and the overlays the game unhides during
+ * a transformation (4-10). MELEE_XR_JUMBOTRON="scale,x,y,z" overrides. */
 static MoveRule s_moves[] = {
-    {GRKIND_PSTADIUM, PSTYPE_DISPLAY, 2, {0, -30, -215}, {0, -10, -75}, 0.55f},
-    {GRKIND_PSTADIUM, PSTYPE_DISPLAY, 3, {0, -30, -215}, {0, -10, -75}, 0.55f},
+    {GRKIND_PSTADIUM, PSTYPE_DISPLAY, 1, {0, -30, -215}, {0, -10, -75}, 0.55f},
 };
 #define MOVE_COUNT ((int)(sizeof s_moves / sizeof s_moves[0]))
 
