@@ -138,8 +138,12 @@ void ftPk_SpecialLw_Enter(HSD_GObj* gobj)
     Fighter* fp = GET_FIGHTER(gobj);
     fp->cmd_vars[0] = 0;
     fp->throw_flags = 0;
-    fp->mv.pk.specialhi.x4 = 1;
-    fp->mv.pk.specialhi.x0 = 0;
+    /* Thunder's own view: x0 (the thunder gobj) lives at host +08 on PC
+     * (ftPikachu/types.h), so clearing it through specialhi.x0 left a stale
+     * pointer that SpawnEffect took for a live bolt and 8012765C then
+     * dereferenced. */
+    fp->mv.pk.speciallw.x4 = 1;
+    fp->mv.pk.speciallw.x0 = NULL;
     Fighter_ChangeMotionState(gobj, 359, Ft_MF_None, 0.0f, 1.0f, 0.0f, 0);
     ftAnim_8006EBA4(gobj);
 }
@@ -149,8 +153,12 @@ void ftPk_SpecialAirLw_Enter(HSD_GObj* gobj)
     Fighter* fp = GET_FIGHTER(gobj);
     fp->cmd_vars[0] = 0;
     fp->throw_flags = 0;
-    fp->mv.pk.specialhi.x4 = 1;
-    fp->mv.pk.specialhi.x0 = 0;
+    /* Thunder's own view: x0 (the thunder gobj) lives at host +08 on PC
+     * (ftPikachu/types.h), so clearing it through specialhi.x0 left a stale
+     * pointer that SpawnEffect took for a live bolt and 8012765C then
+     * dereferenced. */
+    fp->mv.pk.speciallw.x4 = 1;
+    fp->mv.pk.speciallw.x0 = NULL;
     Fighter_ChangeMotionState(gobj, 363, Ft_MF_None, 0.0f, 1.0f, 0.0f, 0);
     ftAnim_8006EBA4(gobj);
 }
