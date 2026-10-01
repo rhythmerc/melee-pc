@@ -5,6 +5,27 @@ passthrough. It is the regular Android build with OpenXR presentation added in
 aurora (`extern/aurora/lib/xr`). The game renders exactly as it does for a
 window, and only the present step changes.
 
+## Hybrid app: launcher panel, immersive game
+
+It's a hybrid app, following Meta's
+[hybrid apps guide](https://developers.meta.com/horizon/documentation/spatial-sdk/hybrid-apps-overview/):
+
+- **Launcher.** `MeleeActivity` is a 2D panel in the Home environment, with
+  the `com.oculus.intent.category.2D` category. Disc selection, Verify, and
+  settings work with the controller pointer like any panel app.
+- **Play.** It starts `MeleeXrActivity` with the chosen disc as the `disc`
+  extra, then closes the panel (`src/pc/main.c`,
+  `pc_android_launch_xr`).
+- **Game.** `MeleeXrActivity` is immersive, with the `VR` category, and runs
+  in its own `:xr` process, because SDL keeps process-wide state. Before SDL
+  starts, it sets `AURORA_XR=1` and `MELEE_XR_ACTIVITY=1`. The disc extra
+  skips the launcher, so it boots straight into the game.
+- **No disc.** If the immersive activity starts without one, it reopens the
+  launcher panel in Home instead of showing the launcher in the headset.
+
+XR is off in the panel's process, so the launcher renders to its window as
+on a phone.
+
 ## How the frame gets to the headset
 
 Dawn can't adopt a Vulkan device someone else created and doesn't expose its
@@ -68,7 +89,7 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 
 | Variable | Default | Effect |
 |---|---|---|
-| `AURORA_XR` | on in Quest builds, off on desktop | Present to the headset |
+| `AURORA_XR` | set by `MeleeXrActivity`; off otherwise | Present to the headset |
 | `AURORA_XR_PASSTHROUGH` | 1 | Passthrough behind the screen |
 | `AURORA_XR_SCREEN_WIDTH` | 1.6 | Screen width in meters |
 | `AURORA_XR_SCREEN_DISTANCE` | 1.5 | Meters in front of the starting head position |
@@ -86,6 +107,7 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 
 ## Known gaps
 
+- Leaving the game doesn't reopen the launcher panel yet.
 - There's no recentering beyond the system's own.
 - There's no controller haptics.
 - The screen texture size is fixed at the first frame.

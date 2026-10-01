@@ -40,6 +40,20 @@ const char* pc_android_device_name(void);
  * through, nothing is drawn) while active. Safe to call from any thread. */
 void pc_android_set_launcher_active(bool active);
 
+/* Meta Quest hybrid builds (MELEE_XR=1, platforms/android/app/src/xr): the
+ * launcher is a 2D panel (MeleeActivity) and the game runs in the immersive
+ * MeleeXrActivity, in its own process.
+ *
+ * pc_android_is_xr_activity: true in the immersive activity's process.
+ * pc_android_launch_xr: from the panel, start the immersive activity with
+ *   this disc (path or content:// URI) and close the panel. False if it could
+ *   not be asked to.
+ * pc_android_launch_panel: from the immersive activity, reopen the launcher
+ *   panel in the Home environment and close this activity. */
+bool pc_android_is_xr_activity(void);
+bool pc_android_launch_xr(const char* disc);
+void pc_android_launch_panel(void);
+
 #ifdef __cplusplus
 }
 #endif

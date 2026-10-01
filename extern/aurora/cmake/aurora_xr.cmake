@@ -2,7 +2,8 @@
 # the headset. Linux uses the system OpenXR loader (e.g. Monado for desktop
 # testing, enabled at runtime with AURORA_XR=1). Android fetches Khronos'
 # loader AAR, links it, stages libopenxr_loader.so next to the build output
-# for packaging, and turns XR on by default.
+# for packaging. XR stays off unless AURORA_XR=1; melee-pc's immersive
+# activity sets it (platforms/android/.../MeleeXrActivity.java).
 include("${CMAKE_CURRENT_LIST_DIR}/AuroraDependencyVersions.cmake")
 
 target_sources(aurora_core PRIVATE lib/xr/xr.cpp)
@@ -29,7 +30,6 @@ if (ANDROID)
           INTERFACE_INCLUDE_DIRECTORIES "${_xr_dir}/prefab/modules/headers/include")
   # tools/build_android.sh copies it into jniLibs beside libmelee.so.
   configure_file("${_xr_so}" "${CMAKE_BINARY_DIR}/libopenxr_loader.so" COPYONLY)
-  target_compile_definitions(aurora_core PRIVATE AURORA_XR_DEFAULT_ON)
   target_link_libraries(aurora_core PRIVATE aurora_openxr_loader vulkan nativewindow android)
 else ()
   find_package(OpenXR REQUIRED CONFIG)

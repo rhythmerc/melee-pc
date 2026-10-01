@@ -92,6 +92,50 @@ public class MeleeActivity extends SDLActivity {
         });
     }
 
+    /* Meta Quest hybrid builds (MELEE_XR=1): the launcher runs in this 2D
+     * panel activity and the game in the immersive MeleeXrActivity, which has
+     * its own process. Called from native (src/pc/android_compat.cpp) once the
+     * launcher's Play button has picked a disc. */
+    public void launchXrGame(final String disc) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                android.content.Intent intent =
+                    new android.content.Intent(MeleeActivity.this, MeleeXrActivity.class);
+                intent.setAction(android.content.Intent.ACTION_MAIN);
+                intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                intent.putExtra("disc", disc);
+                startActivity(intent);
+                finishAndRemoveTask();
+            }
+        });
+    }
+
+    /* The reverse, for an immersive activity that has nothing to show (started
+     * without a disc): reopen the launcher panel in the Home environment,
+     * the way Meta's hybrid-app guide does it. */
+    public void launchPanel() {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                android.content.Context context = getApplicationContext();
+                android.content.Intent panel =
+                    new android.content.Intent(context, MeleeActivity.class);
+                panel.setAction(android.content.Intent.ACTION_MAIN);
+                panel.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                android.app.PendingIntent pending = android.app.PendingIntent.getActivity(context, 0,
+                    panel, android.app.PendingIntent.FLAG_UPDATE_CURRENT
+                        | android.app.PendingIntent.FLAG_IMMUTABLE);
+                android.content.Intent home = new android.content.Intent(android.content.Intent.ACTION_MAIN);
+                home.addCategory(android.content.Intent.CATEGORY_HOME);
+                home.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                home.putExtra("extra_launch_in_home_pending_intent", pending);
+                startActivity(home);
+                finishAndRemoveTask();
+            }
+        });
+    }
+
     public static native void nativeDisconnect();
 
     @Override

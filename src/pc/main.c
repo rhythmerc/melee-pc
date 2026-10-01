@@ -675,11 +675,34 @@ MELEE_EXPORT int main(int argc, char* argv[]) {
     /* The launcher is an RmlUi UI on the same surface, and the touch overlay
      * sits on top of it: leave the overlay inert until the game itself is
      * running, or it eats the taps meant for the disc picker. */
+#if defined(__ANDROID__) && defined(AURORA_ENABLE_OPENXR)
+    /* Meta Quest hybrid build (docs/quest-xr.md): the launcher is a 2D panel
+     * and the game runs in the immersive MeleeXrActivity. Nobody can use the
+     * launcher inside the headset, so an immersive start with no disc goes
+     * back to the panel instead. */
+    const bool xr_activity = pc_android_is_xr_activity();
+    if (xr_activity && disc == NULL) {
+        pc_log_line("xr: no disc for the immersive activity; returning to the launcher panel");
+        pc_android_launch_panel();
+        return 0;
+    }
+#endif
     pc_android_set_launcher_active(true);
     const int launched = pc_launcher_run(disc, info.window);
     if (launched != 1)
         return launched == 0 ? 0 : 1;
     pc_android_set_launcher_active(false);
+#if defined(__ANDROID__) && defined(AURORA_ENABLE_OPENXR)
+    /* The panel's work ends at Play: hand the disc to the immersive activity,
+     * which boots straight into the game in its own process. */
+    if (!xr_activity) {
+        if (pc_android_launch_xr(pc_launcher_selected_disc())) {
+            pc_log_line("xr: launching the immersive game with %s", pc_launcher_selected_disc());
+            return 0;
+        }
+        pc_log_line("xr: could not start the immersive activity; playing in the panel");
+    }
+#endif
 
     pc_menu_init(info.window);
     pc_platform_init();

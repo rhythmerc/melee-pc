@@ -15,6 +15,7 @@ docs/*
 !docs/porting-notes.md
 !docs/testing.md
 !docs/quest-xr.md
+!docs/xr-3d-plan.md
 !docs/site/
 
 # Android build outputs (CI builds these from source).

@@ -1,8 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Merged over src/main/AndroidManifest.xml in XR builds (-Pmelee.xr=true).
-     Launches immersive on Meta Quest and lets the Khronos OpenXR loader find
-     the system runtime. -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<!-- Merged over src/main/AndroidManifest.xml in XR builds (-Pmelee.xr=true):
+     a Meta Quest hybrid app whose launcher is a 2D panel and whose game is
+     immersive, and the entries the Khronos OpenXR loader needs to find the
+     system runtime. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:metavr="http://schemas.meta.com/metavr-sdk">
+
+    <!-- Hybrid (2D panel + immersive) apps need Horizon OS v69+. -->
+    <metavr:uses-metavr-sdk
+        metavr:minSdkVersion="69"
+        metavr:targetSdkVersion="207" />
 
     <uses-feature android:name="android.hardware.vr.headtracking" android:required="true" android:version="1" />
     <!-- Meta only exposes XR_FB_passthrough to apps that declare this. -->
@@ -19,9 +26,34 @@
 
     <application>
         <meta-data android:name="com.oculus.supportedDevices" android:value="quest2|questpro|quest3|quest3s" />
+        <!-- Hybrid app (Meta's hybrid-apps guide): the launcher is a 2D panel;
+             Play starts MeleeXrActivity and closes the panel. The main
+             manifest's MAIN/LAUNCHER filter stays as the required fallback. -->
         <activity android:name="dev.melee.MeleeActivity">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="com.oculus.intent.category.2D" />
+            </intent-filter>
+            <layout
+                android:defaultWidth="1280dp"
+                android:defaultHeight="800dp"
+                android:minWidth="800dp"
+                android:minHeight="500dp" />
+        </activity>
+
+        <!-- The game, immersive, in its own process: SDL keeps process-wide
+             state, so it cannot share one with the launcher panel. -->
+        <activity
+            android:name="dev.melee.MeleeXrActivity"
+            android:process=":xr"
+            android:launchMode="singleTask"
+            android:exported="true"
+            android:screenOrientation="landscape"
+            android:configChanges="layoutDirection|locale|grammaticalGender|fontScale|fontWeightAdjustment|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="com.oculus.intent.category.VR" />
                 <category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" />
             </intent-filter>

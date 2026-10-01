@@ -10,6 +10,7 @@
 
 #include <SDL3/SDL_system.h>
 #include <jni.h>
+#include <cstdlib>
 #include <mutex>
 
 /* Every signature below was taken from android-34 android.jar with
@@ -244,6 +245,48 @@ void pc_android_set_launcher_active(bool active) {
     env->DeleteLocalRef(activity);
 }
 
+/* Call a void method on the current activity (it posts to its UI thread). */
+static bool call_activity(const char* name, const char* sig, const char* arg) {
+    JNIEnv* env = (JNIEnv*)SDL_GetAndroidJNIEnv();
+    jobject activity = env != nullptr ? (jobject)SDL_GetAndroidActivity() : nullptr;
+    if (env == nullptr || activity == nullptr) {
+        return false;
+    }
+    bool ok = false;
+    jclass cls = env->GetObjectClass(activity);
+    jmethodID method = cls != nullptr ? env->GetMethodID(cls, name, sig) : nullptr;
+    if (method != nullptr) {
+        if (arg != nullptr) {
+            jstring jarg = env->NewStringUTF(arg);
+            env->CallVoidMethod(activity, method, jarg);
+            env->DeleteLocalRef(jarg);
+        } else {
+            env->CallVoidMethod(activity, method);
+        }
+        ok = !threw(env, name);
+    } else {
+        env->ExceptionClear();
+    }
+    if (cls != nullptr) {
+        env->DeleteLocalRef(cls);
+    }
+    env->DeleteLocalRef(activity);
+    return ok;
+}
+
+bool pc_android_is_xr_activity(void) {
+    const char* v = getenv("MELEE_XR_ACTIVITY");
+    return v != nullptr && v[0] == '1';
+}
+
+bool pc_android_launch_xr(const char* disc) {
+    return disc != nullptr && disc[0] != '\0' && call_activity("launchXrGame", "(Ljava/lang/String;)V", disc);
+}
+
+void pc_android_launch_panel(void) {
+    call_activity("launchPanel", "()V", nullptr);
+}
+
 const char* pc_android_device_name(void) {
     static char s_label[64];
     static bool s_done;
@@ -275,6 +318,17 @@ void pc_android_multicast_lock_release(void) {}
 void pc_android_set_launcher_active(bool active) {
     (void)active;
 }
+
+bool pc_android_is_xr_activity(void) {
+    return false;
+}
+
+bool pc_android_launch_xr(const char* disc) {
+    (void)disc;
+    return false;
+}
+
+void pc_android_launch_panel(void) {}
 
 const char* pc_android_device_name(void) {
     return nullptr;

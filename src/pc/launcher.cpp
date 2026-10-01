@@ -1139,6 +1139,8 @@ static std::filesystem::path pc_resources_path() {
 #endif
 }
 
+extern "C" const char* pc_launcher_selected_disc(void) { return prefs.disc.c_str(); }
+
 extern "C" int pc_launcher_run(const char* command_line_disc, SDL_Window* window) {
     try {
         std::string error;
