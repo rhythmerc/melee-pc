@@ -17,7 +17,24 @@ if [[ "${MELEE_XR}" == 1 ]]; then
     # The XR build renders into OpenXR's swapchain images on Dawn's own device,
     # which needs Dawn built from the melee-xr fork (single-device hooks; see
     # docs/quest-xr.md). MELEE_DAWN_SOURCE: a checkout of that branch.
-    MELEE_DAWN_SOURCE="${MELEE_DAWN_SOURCE:-${HOME}/projects/dawn}"
+    # Without one, the pinned commit of github.com/rhythmerc/dawn (branch
+    # melee-xr) is cloned into build/dawn-src with its dependencies.
+    MELEE_DAWN_REPO="${MELEE_DAWN_REPO:-https://github.com/rhythmerc/dawn.git}"
+    MELEE_DAWN_REF="${MELEE_DAWN_REF:-c56ed00628a22cc0dccf5614a98d79dcaab6160b}"
+    if [[ -z "${MELEE_DAWN_SOURCE:-}" ]]; then
+        if [[ -d "${HOME}/projects/dawn/.git" ]]; then
+            MELEE_DAWN_SOURCE="${HOME}/projects/dawn"
+        else
+            MELEE_DAWN_SOURCE="${ROOT_DIR}/build/dawn-src"
+            if [[ ! -d "${MELEE_DAWN_SOURCE}/.git" ]]; then
+                echo "=== Fetching Dawn (${MELEE_DAWN_REPO} @ ${MELEE_DAWN_REF}) ==="
+                git init -q "${MELEE_DAWN_SOURCE}"
+                git -C "${MELEE_DAWN_SOURCE}" fetch -q --depth 1 "${MELEE_DAWN_REPO}" "${MELEE_DAWN_REF}"
+                git -C "${MELEE_DAWN_SOURCE}" checkout -q FETCH_HEAD
+                (cd "${MELEE_DAWN_SOURCE}" && python3 tools/fetch_dawn_dependencies.py)
+            fi
+        fi
+    fi
     if [[ ! -f "${MELEE_DAWN_SOURCE}/include/dawn/native/VulkanBackend.h" ]] ||
         ! grep -q SetExternalVulkanHooks "${MELEE_DAWN_SOURCE}/include/dawn/native/VulkanBackend.h"; then
         echo "error: MELEE_DAWN_SOURCE (${MELEE_DAWN_SOURCE}) is not a melee-xr Dawn checkout" >&2

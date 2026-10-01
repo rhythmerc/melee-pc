@@ -263,10 +263,14 @@ For a debug build without the release key, run the native step, then
 build uses the same package id as the flat build, so it replaces it on the
 device.
 
-`MELEE_XR=1` builds Dawn from source, from the `melee-xr` fork checkout at
-`MELEE_DAWN_SOURCE` (default `~/projects/dawn`). Before the first build,
-fetch its dependencies with `python3 tools/fetch_dawn_dependencies.py`. Dawn
-is built with C++ modules and protobuf turned off.
+`MELEE_XR=1` builds Dawn from source, from the fork at
+[rhythmerc/dawn](https://github.com/rhythmerc/dawn), branch `melee-xr`.
+- **Which checkout:** `MELEE_DAWN_SOURCE` if set, else `~/projects/dawn` if
+  it exists, else the pinned commit (`MELEE_DAWN_REF`), cloned into
+  `build/dawn-src` with its dependencies.
+- **Your own checkout:** fetch its dependencies first with
+  `python3 tools/fetch_dawn_dependencies.py`.
+- **Build settings:** Dawn is built with C++ modules and protobuf turned off.
 
 Desktop testing against Monado, with the same fork:
 
