@@ -432,13 +432,15 @@ void ftCo_800D41C4(Fighter_GObj* gobj)
 void ftCo_DeadUpStar_Anim(Fighter_GObj* gobj)
 {
     Fighter* fp = GET_FIGHTER(gobj);
-    s32 x504 = p_ftCommonData->x504;
-    s32* data = &x504;
+    /* Named fields, not offsets from a local copy of x504: the decomp sync
+     * in d8f2384 read data[1..6] past that copy, i.e. stack garbage, which
+     * sent star-KO'd fighters to z ~ 4e10 and tripped the range assert in
+     * lbVector_WorldToScreen. */
 
     switch (fp->mv.co.unk_deadup.x44) {
     case 1:
         if (fp->mv.co.unk_deadup.x68 != 0) {
-            f32 rot_speed = *(f32*) (data + 6);
+            f32 rot_speed = p_ftCommonData->x51C_radians;
             HSD_JObj* jobj =
                 fp->parts[ftParts_GetBoneIndex(fp, FtPart_XRotN)].joint;
             HSD_JObjAddRotationX(jobj, rot_speed);
@@ -454,11 +456,12 @@ void ftCo_DeadUpStar_Anim(Fighter_GObj* gobj)
         switch (fp->mv.co.unk_deadup.x44) {
         case 0:
             fp->self_vel.y =
-                (*(f32*) (data + 4) * Stage_GetCamBoundsTopOffset() -
+                (p_ftCommonData->x514 * Stage_GetCamBoundsTopOffset() -
                  fp->cur_pos.y) /
-                (f32) data[1];
-            fp->self_vel.z = *(f32*) (data + 3) / (f32) data[1];
-            fp->mv.co.unk_deadup.x40 = data[1];
+                (f32) p_ftCommonData->x508;
+            fp->self_vel.z =
+                p_ftCommonData->x510 / (f32) p_ftCommonData->x508;
+            fp->mv.co.unk_deadup.x40 = p_ftCommonData->x508;
             fp->mv.co.unk_deadup.x44 = 1;
             return;
         case 1:
@@ -477,7 +480,7 @@ void ftCo_DeadUpStar_Anim(Fighter_GObj* gobj)
             ft_PlaySFX(fp, 0x83, 0x7F, 0x40);
             ft_8008805C(fp, 0x83);
             ftCo_800D34E0(gobj);
-            fp->mv.co.unk_deadup.x40 = data[2];
+            fp->mv.co.unk_deadup.x40 = p_ftCommonData->x50C;
             fp->mv.co.unk_deadup.x44 = 2;
             return;
         case 2:

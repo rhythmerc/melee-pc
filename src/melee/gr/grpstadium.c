@@ -1928,18 +1928,16 @@ bool grStadium_801D42B8(void)
 {
     HSD_GObj* map_gobj;
     Ground* gp;
-    bool result;
 
     map_gobj = Ground_GetMapGObj(2);
     HSD_ASSERT(0x978, map_gobj);
     gp = grStadium_801D4354(map_gobj);
     HSD_ASSERT(0x979, gp);
+    /* Still loading. (The decomp sync in d8f2384 parsed here too, before the
+     * PC fix-up below and then again after it; relocating the archive in
+     * place twice corrupts it and hangs the match.) */
     if (gp->u.stadium.xC4_b1) {
-        result = false;
-    } else {
-        gp->u.stadium.xD0 =
-            grDatFiles_801C6478(gp->u.stadium.xCC, gp->u.stadium.xC8);
-        result = true;
+        return false;
     }
 #ifdef TARGET_PC
     /* The parse relocates the archive in place, and the buffer may be
@@ -2144,7 +2142,7 @@ void grStadium_801D4548(Ground_GObj* gobj)
                 int sp60[] = { 3, 4, 6, 9 };
                 int idx;
                 do {
-                    kind = HSD_Randi(ARRAY_SIZE(sp60));
+                    kind = sp60[HSD_Randi(ARRAY_SIZE(sp60))];
                 } while (gp->u.stadium.xE2 == kind);
             } else {
                 kind = 5;
