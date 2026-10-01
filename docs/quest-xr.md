@@ -61,10 +61,17 @@ and the investigation behind it are in docs/xr-3d-plan.md.
   rules in `xr_scene.c` can name a whole part, one joint of a part (and
   everything under it), or one mesh of a joint. Hidden geometry still draws
   into the flat frame, because the Pokémon Stadium screen copies it.
-  - **Pokémon Stadium:** shows only the big screen (part 1), the light rings
-    beside it, and the stage. It hides the city and sky (part 1 joints 11
-    and 12) and the bowl's stands, walls and floor (part 2 joint 2, meshes
-    14-27).
+  - **Pokémon Stadium:** shows only the big screen and the stage.
+    - **Hidden:** the city and sky (part 1, joints 11 and 12), the whole
+      stadium bowl with its stands, walls, floor and light rings (part 2,
+      joint 2), and the column under the platform (part 2, joint 3, meshes
+      28-31).
+    - **Moved:** the big screen is pulled in from z -215 to just behind the
+      stage and shrunk to 0.55, in 3D only (`MELEE_XR_JUMBOTRON`).
+- **Moving pieces.** A rule can also move a joint in the 3D view only.
+  `aurora_xr_world_transform` gives the following world draws an extra
+  world-space placement, and the replay binds a separate eye matrix for
+  each one.
 - **Background colour.** The fight camera fills the screen with the stage's
   background colour before it draws. That fill stays out of the 3D view.
   Before, it was a card behind the arena, a blue one on Green Greens.
@@ -283,6 +290,7 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `MELEE_XR_STAGE_LAYERS` | `0xB` | Stage layers shown in 3D, as a bitmask |
 | `MELEE_XR_PARTS` | unset | Overrides, e.g. `16:1,-16:1/12,-16:2/2.27` (`stage:part[/joint[.mesh]]`, `-` hides) |
 | `MELEE_XR_STAGE_LOG` | unset | Log each stage part's id and layer once |
+| `MELEE_XR_JUMBOTRON` | `0.55,0,-10,-75` | Pokémon Stadium big screen in 3D: `scale,x,y,z` (game units) for its base |
 | `MELEE_XR_JOINT_LOG` | unset | Log each part's joints (index, depth, meshes, position) once |
 | `AURORA_XR_DUMP_AFTER` | 300 | Stream frames to wait before `AURORA_XR_DUMP` writes |
 

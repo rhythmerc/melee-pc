@@ -826,7 +826,11 @@ void handle_aurora(ByteReader& reader) noexcept {
     for (auto& v : view) {
       v = std::bit_cast<float>(reader.read<u32>());
     }
-    gfx::xr_set_category(static_cast<gfx::XrCategory>(category <= 2 ? category : 0), hasView ? view.data() : nullptr);
+    if (category == 3) { // aurora_xr_world_transform
+      gfx::xr_set_world_transform(hasView ? view.data() : nullptr);
+    } else {
+      gfx::xr_set_category(static_cast<gfx::XrCategory>(category <= 2 ? category : 0), hasView ? view.data() : nullptr);
+    }
   } else if (subCmd == GX_AURORA_BEGIN_OFFSCREEN) {
     const u32 width = reader.read<u32>();
     const u32 height = reader.read<u32>();

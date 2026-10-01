@@ -55,6 +55,7 @@ struct FrameRecorder {
   bool suppressRenderWorker = false;
   bool normalRequested = false;
   XrCategory xrCategory = XrCategory::Mono;
+  uint8_t xrTransform = 0;
 #ifdef AURORA_GFX_DEBUG_GROUPS
   std::vector<std::string> debugGroupStack;
 #endif
@@ -328,6 +329,7 @@ void push_command(CommandType type, const Command::Data& data) {
   renderPass.commands.push_back({
       .type = type,
       .xrCategory = g_recorder.xrCategory,
+      .xrTransform = g_recorder.xrTransform,
 #ifdef AURORA_GFX_DEBUG_GROUPS
       .debugGroupStack = g_recorder.debugGroupStack,
 #endif
@@ -576,8 +578,10 @@ void begin_recording(FramePacket& packet, size_t frameSlot) {
   g_recorder.mergedDrawCallCount = 0;
   g_recorder.suspendedEfbPass.reset();
   g_recorder.xrCategory = XrCategory::Mono;
+  g_recorder.xrTransform = 0;
   packet.xrHasWorld = false;
   packet.xrHasHud = false;
+  packet.xrTransforms.clear();
 
   current_render_passes().emplace_back();
   auto& pass = current_render_passes()[0];
@@ -1242,6 +1246,31 @@ void xr_set_category(XrCategory category, const float* view3x4) {
     }
   } else if (category == XrCategory::Hud) {
     frame.xrHasHud = true;
+  }
+}
+
+void xr_set_world_transform(const float* m3x4) {
+  if (!g_recorder.active()) {
+    return;
+  }
+  uint8_t index = 0;
+  if (m3x4 != nullptr) {
+    auto& list = g_recorder.frame().xrTransforms;
+    std::array<float, 12> m;
+    std::copy_n(m3x4, 12, m.begin());
+    const auto it = std::find(list.begin(), list.end(), m);
+    if (it != list.end()) {
+      index = static_cast<uint8_t>(it - list.begin() + 1);
+    } else if (list.size() + 1 < XrMaxTransforms) {
+      list.push_back(m);
+      index = static_cast<uint8_t>(list.size());
+    }
+  }
+  if (index != g_recorder.xrTransform) {
+    g_recorder.xrTransform = index;
+    if (g_recorder.currentRenderPass != UINT32_MAX) {
+      push_command(CommandType::XrMarker, Command::Data{}); // keeps draws from merging across it
+    }
   }
 }
 

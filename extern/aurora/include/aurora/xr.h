@@ -42,6 +42,13 @@ bool aurora_xr_pace(void);
 void aurora_xr_set_paused(bool paused);
 void aurora_xr_camera(int category, const float view[3][4]);
 
+/* Extra placement for the following AURORA_XR_WORLD draws in the 3D view
+ * only: a world-space transform (GX Mtx layout, game units) applied before
+ * the arena's, e.g. to pull a far background piece in. NULL = none. Up to
+ * three distinct transforms a frame; the rest draw unmoved. Same thread and
+ * FIFO ordering as aurora_xr_camera. */
+void aurora_xr_world_transform(const float m[3][4]);
+
 #ifdef __cplusplus
 }
 #endif

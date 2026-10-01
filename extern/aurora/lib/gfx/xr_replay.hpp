@@ -12,10 +12,11 @@
 namespace aurora::gfx {
 
 // One replay of the frame's draws within the pass: its GX bind group 3 (the
-// projection; null = the game's own) and, for fullViewport targets, the
+// projection; null = the game's own), one per world transform index (0 =
+// none; a null entry falls back to 0), and, for fullViewport targets, the
 // rectangle it draws into (zero size = the whole target).
 struct XrReplayView {
-  wgpu::BindGroup xrBindGroup;
+  std::array<wgpu::BindGroup, XrMaxTransforms> xrBindGroups{};
   float x = 0.f, y = 0.f, width = 0.f, height = 0.f;
 };
 

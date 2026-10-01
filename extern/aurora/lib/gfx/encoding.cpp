@@ -524,7 +524,12 @@ void encode_xr_replay(const wgpu::CommandEncoder& cmd, FramePacket& frame, XrCat
   const float h = static_cast<float>(target.size.height);
   for (uint32_t v = 0; v < std::max(target.viewCount, 1u); ++v) {
     const auto& view = target.views[v];
-    pass.SetBindGroup(3, view.xrBindGroup ? view.xrBindGroup : gx::g_xrDisabledBindGroup);
+    const auto group = [&](uint32_t t) -> const wgpu::BindGroup& {
+      const auto& g = t < XrMaxTransforms && view.xrBindGroups[t] ? view.xrBindGroups[t] : view.xrBindGroups[0];
+      return g ? g : gx::g_xrDisabledBindGroup;
+    };
+    uint32_t boundTransform = 0;
+    pass.SetBindGroup(3, group(0));
     if (target.fullViewport) {
       const bool whole = view.width <= 0.f || view.height <= 0.f;
       const float vx = whole ? 0.f : view.x, vy = whole ? 0.f : view.y;
@@ -564,6 +569,10 @@ void encode_xr_replay(const wgpu::CommandEncoder& cmd, FramePacket& frame, XrCat
           break;
         case CommandType::Draw:
           if (c.xrCategory == category && c.data.draw.encoder != nullptr) {
+            if (c.xrTransform != boundTransform) {
+              boundTransform = c.xrTransform;
+              pass.SetBindGroup(3, group(boundTransform));
+            }
             c.data.draw.encoder(c.data.draw.payload.data(), pass, info);
           }
           break;

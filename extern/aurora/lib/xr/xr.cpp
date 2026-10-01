@@ -2470,8 +2470,9 @@ struct Renderer3D {
   uint64_t layoutKey = 0;
   uint32_t sampleCount = 0;
   std::array<ReplayTarget, 3> targets; // eye 0, eye 1, HUD
-  std::array<wgpu::Buffer, 2> eyeUniforms;
-  std::array<wgpu::BindGroup, 2> eyeGroups;
+  // Per eye, per world transform index (0 = none).
+  std::array<std::array<wgpu::Buffer, gfx::XrMaxTransforms>, 2> eyeUniforms;
+  std::array<std::array<wgpu::BindGroup, gfx::XrMaxTransforms>, 2> eyeGroups;
   wgpu::RenderPipeline compose;
   wgpu::BindGroupLayout composeLayout;
   std::array<wgpu::Buffer, 3> params;
@@ -2651,11 +2652,13 @@ bool ensure_renderer(const gfx::RenderTargetLayout& layout) {
   R.targets[2].target.fullViewport = false; // the HUD keeps the game's viewports
 
   for (int i = 0; i < 2; ++i) {
-    R.eyeUniforms[i] = make_buffer(gx::XrEyeUniformSize, wgpu::BufferUsage::Uniform, "XR eye matrix");
-    const wgpu::BindGroupEntry e{.binding = 0, .buffer = R.eyeUniforms[i], .size = gx::XrEyeUniformSize};
-    const wgpu::BindGroupDescriptor bg{.layout = gx::g_xrEyeBindGroupLayout, .entryCount = 1, .entries = &e};
-    R.eyeGroups[i] = device.CreateBindGroup(&bg);
-    R.targets[i].target.views[0].xrBindGroup = R.eyeGroups[i];
+    for (uint32_t t = 0; t < gfx::XrMaxTransforms; ++t) {
+      R.eyeUniforms[i][t] = make_buffer(gx::XrEyeUniformSize, wgpu::BufferUsage::Uniform, "XR eye matrix");
+      const wgpu::BindGroupEntry e{.binding = 0, .buffer = R.eyeUniforms[i][t], .size = gx::XrEyeUniformSize};
+      const wgpu::BindGroupDescriptor bg{.layout = gx::g_xrEyeBindGroupLayout, .entryCount = 1, .entries = &e};
+      R.eyeGroups[i][t] = device.CreateBindGroup(&bg);
+    }
+    R.targets[i].target.views[0].xrBindGroups = R.eyeGroups[i];
   }
 
   // Composite pipeline into the shared images (RGBA8Unorm).
@@ -2846,14 +2849,27 @@ void render_3d(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame)
   if (!ensure_renderer(layout))
     return;
 
-  const Mat4 cameraToArena = mul(arena_transform(), inverse_affine(frame.xrWorldView));
+  // C = P_eye · V_eye · A · T · V_game⁻¹, with T a draw's extra placement
+  // (aurora_xr_world_transform; identity for index 0).
+  const Mat4 cameraToWorld = inverse_affine(frame.xrWorldView);
+  const Mat4 arena = arena_transform();
+  const size_t transforms = std::min<size_t>(frame.xrTransforms.size() + 1, gfx::XrMaxTransforms);
   for (int eye = 0; eye < 2; ++eye) {
-    struct {
-      Mat4 m;
-      uint32_t enabled[4];
-    } u{mul(mul(projection(views[eye].fov, 0.05f), view_from_pose(views[eye].pose)), cameraToArena), {1, 0, 0, 0}};
-    static_assert(sizeof(u) == gx::XrEyeUniformSize);
-    webgpu::g_queue.WriteBuffer(R.eyeUniforms[eye], 0, &u, sizeof(u));
+    const Mat4 eyeToClip = mul(projection(views[eye].fov, 0.05f), view_from_pose(views[eye].pose));
+    for (size_t t = 0; t < transforms; ++t) {
+      Mat4 world = cameraToWorld;
+      if (t > 0) {
+        const auto& m = frame.xrTransforms[t - 1];
+        world = mul(Mat4{m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], 0.f, 0.f, 0.f, 1.f},
+                    cameraToWorld);
+      }
+      struct {
+        Mat4 m;
+        uint32_t enabled[4];
+      } u{mul(mul(eyeToClip, arena), world), {1, 0, 0, 0}};
+      static_assert(sizeof(u) == gx::XrEyeUniformSize);
+      webgpu::g_queue.WriteBuffer(R.eyeUniforms[eye][t], 0, &u, sizeof(u));
+    }
   }
 
   // Direct path: the framebuffer's format matches the shared 3D image and

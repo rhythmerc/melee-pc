@@ -28,12 +28,13 @@ struct HSD_JObj;
 bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, struct HSD_JObj* root);
 void pc_xr_stage_part_end(bool hidden);
 /* Around one joint's geometry (HSD_JObjDisp): leaves joints a part rule
- * hides out of the 3D view. Returns true when hidden; hand that to
- * pc_xr_jobj_end. Cheap when no stage part with joint rules is drawing. */
-bool pc_xr_jobj_begin(struct HSD_JObj* jobj);
-/* Same, for one mesh (the joint's dobj_index'th DObj). */
-bool pc_xr_dobj_begin(struct HSD_JObj* jobj, int dobj_index);
-void pc_xr_jobj_end(bool hidden);
+ * hides out of the 3D view, and places joints a rule moves. Returns what
+ * it changed; hand that to pc_xr_jobj_end. Cheap when no stage part with
+ * joint rules is drawing. */
+int pc_xr_jobj_begin(struct HSD_JObj* jobj);
+/* Same, for one mesh (the joint's dobj_index'th DObj); hides only. */
+int pc_xr_dobj_begin(struct HSD_JObj* jobj, int dobj_index);
+void pc_xr_jobj_end(int changed);
 #else
 static inline void pc_xr_world_camera(const float view[3][4]) { (void)view; }
 static inline void pc_xr_hud_camera(void) {}
@@ -47,16 +48,16 @@ static inline bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, str
     return false;
 }
 static inline void pc_xr_stage_part_end(bool hidden) { (void)hidden; }
-static inline bool pc_xr_jobj_begin(struct HSD_JObj* jobj) {
+static inline int pc_xr_jobj_begin(struct HSD_JObj* jobj) {
     (void)jobj;
-    return false;
+    return 0;
 }
-static inline bool pc_xr_dobj_begin(struct HSD_JObj* jobj, int dobj_index) {
+static inline int pc_xr_dobj_begin(struct HSD_JObj* jobj, int dobj_index) {
     (void)jobj;
     (void)dobj_index;
-    return false;
+    return 0;
 }
-static inline void pc_xr_jobj_end(bool hidden) { (void)hidden; }
+static inline void pc_xr_jobj_end(int changed) { (void)changed; }
 #endif
 
 #ifdef __cplusplus

@@ -50,6 +50,7 @@ enum class CommandType {
 struct Command {
   CommandType type;
   XrCategory xrCategory = XrCategory::Mono;
+  uint8_t xrTransform = 0; // index into FramePacket::xrTransforms + 1; 0 = none
 #ifdef AURORA_GFX_DEBUG_GROUPS
   std::vector<std::string> debugGroupStack;
 #endif
@@ -213,6 +214,9 @@ struct FramePacket {
   bool xrHasWorld = false;
   bool xrHasHud = false;
   std::array<float, 12> xrWorldView{};
+  // World-space placements for tagged world draws (row-major 3x4, game
+  // world units); Command::xrTransform - 1 indexes this.
+  std::vector<std::array<float, 12>> xrTransforms;
 };
 
 } // namespace aurora::gfx::detail

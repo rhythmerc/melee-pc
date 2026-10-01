@@ -25,6 +25,9 @@ enum class XrCategory : uint8_t {
   World = 1, // 3D fight geometry: also replayed per eye
   Hud = 2,   // HUD: also replayed onto the HUD plane
 };
+// World draws can carry an extra placement in the 3D view
+// (aurora_xr_world_transform): index 0 is none, 1.. index the frame's list.
+constexpr uint32_t XrMaxTransforms = 4;
 
 using BindGroupRef = HashType;
 using PipelineRef = HashType;

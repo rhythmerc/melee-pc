@@ -11,6 +11,7 @@
 #include <sysdolphin/baselib/dobj.h>
 #include <sysdolphin/baselib/jobj.h>
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -40,24 +41,38 @@ static const PartRule s_builtin_rules[] = {
      * buildings, joint 12 the sky, mountains and city lights. */
     {GRKIND_PSTADIUM, PSTYPE_DISPLAY, 11, -1, false},
     {GRKIND_PSTADIUM, PSTYPE_DISPLAY, 12, -1, false},
-    /* Part 2 joint 2 is the stadium bowl. Meshes 14-27 are the stands,
-     * walls, entrance tunnels (25) and dark floor (27, a black void under
-     * the arena); the light rings beside the big screen (0-13) stay. */
-    {GRKIND_PSTADIUM, 2, 2, 14, false},
-    {GRKIND_PSTADIUM, 2, 2, 15, false},
-    {GRKIND_PSTADIUM, 2, 2, 16, false},
-    {GRKIND_PSTADIUM, 2, 2, 17, false},
-    {GRKIND_PSTADIUM, 2, 2, 18, false},
-    {GRKIND_PSTADIUM, 2, 2, 19, false},
-    {GRKIND_PSTADIUM, 2, 2, 20, false},
-    {GRKIND_PSTADIUM, 2, 2, 21, false},
-    {GRKIND_PSTADIUM, 2, 2, 22, false},
-    {GRKIND_PSTADIUM, 2, 2, 23, false},
-    {GRKIND_PSTADIUM, 2, 2, 24, false},
-    {GRKIND_PSTADIUM, 2, 2, 25, false},
-    {GRKIND_PSTADIUM, 2, 2, 26, false},
-    {GRKIND_PSTADIUM, 2, 2, 27, false},
+    /* Part 2 joint 2 is the stadium bowl: stands, walls, entrance tunnels,
+     * a dark floor that read as a black void under the arena, and the
+     * light rings beside the big screen. */
+    {GRKIND_PSTADIUM, 2, 2, -1, false},
+    /* Part 2 joint 3 is the stage body: meshes 28-31 are the column under
+     * the platform, which reached down to the old floor. */
+    {GRKIND_PSTADIUM, 2, 3, 28, false},
+    {GRKIND_PSTADIUM, 2, 3, 29, false},
+    {GRKIND_PSTADIUM, 2, 3, 30, false},
+    {GRKIND_PSTADIUM, 2, 3, 31, false},
 };
+
+/* Joints moved in the 3D view only: the joint and everything under it are
+ * scaled by `scale` about `pivot` (game units) and the pivot is put at
+ * `to`. */
+typedef struct {
+    int grkind;
+    int map_id;
+    int jobj;
+    float pivot[3];
+    float to[3];
+    float scale;
+} MoveRule;
+
+/* Pokémon Stadium's big screen stands far behind the stage (its frame,
+ * joint 2, is based at z -215). Pull it in to just behind the stage and
+ * shrink it. MELEE_XR_JUMBOTRON="scale,x,y,z" overrides. */
+static MoveRule s_moves[] = {
+    {GRKIND_PSTADIUM, PSTYPE_DISPLAY, 2, {0, -30, -215}, {0, -10, -75}, 0.55f},
+    {GRKIND_PSTADIUM, PSTYPE_DISPLAY, 3, {0, -30, -215}, {0, -10, -75}, 0.55f},
+};
+#define MOVE_COUNT ((int)(sizeof s_moves / sizeof s_moves[0]))
 
 #define MAX_RULES 64
 static PartRule s_rules[MAX_RULES];
@@ -72,14 +87,17 @@ static bool s_log_joints;
 static int s_category = AURORA_XR_MONO;
 
 /* The stage part being drawn, when it has joint rules: the joints with
- * anything hidden, sorted by pointer for bsearch, with a mask of their
- * hidden meshes (all bits: the whole joint). */
+ * anything hidden or moved, sorted by pointer for bsearch, with a mask of
+ * their hidden meshes (all bits: the whole joint) and their move (-1:
+ * none). */
 #define MAX_HIDDEN_JOINTS 1024
 #define ALL_DOBJS 0xFFFFFFFFu
 typedef struct {
     HSD_JObj* jobj;
     unsigned dobjs;
+    int move;
 } HiddenJoint;
+enum { CHANGED_MONO = 1, CHANGED_MOVE = 2 };
 static bool s_joint_mode;
 static HiddenJoint s_hidden_joints[MAX_HIDDEN_JOINTS];
 static int s_hidden_joint_count;
@@ -95,6 +113,18 @@ static void load_rules(void) {
     }
     s_log_parts = getenv("MELEE_XR_STAGE_LOG") != NULL;
     s_log_joints = getenv("MELEE_XR_JOINT_LOG") != NULL;
+    const char* jumbo = getenv("MELEE_XR_JUMBOTRON");
+    float js, jx, jy, jz;
+    if (jumbo != NULL && sscanf(jumbo, "%f,%f,%f,%f", &js, &jx, &jy, &jz) == 4) {
+        for (int i = 0; i < MOVE_COUNT; i++) {
+            if (s_moves[i].grkind == GRKIND_PSTADIUM && s_moves[i].map_id == PSTYPE_DISPLAY) {
+                s_moves[i].scale = js;
+                s_moves[i].to[0] = jx;
+                s_moves[i].to[1] = jy;
+                s_moves[i].to[2] = jz;
+            }
+        }
+    }
     const char* spec = getenv("MELEE_XR_PARTS");
     while (spec != NULL && *spec != '\0' && s_rule_count < MAX_RULES) {
         bool show = true;
@@ -178,15 +208,27 @@ static bool has_joint_rules(int grkind, int map_id) {
             return true;
         }
     }
+    for (int i = 0; i < MOVE_COUNT; i++) {
+        if (s_moves[i].grkind == grkind && s_moves[i].map_id == map_id) {
+            return true;
+        }
+    }
     return false;
 }
 
 /* Depth-first, in the order HSD_JObjDispAll draws: a joint, its children,
  * then its next sibling. */
-static void walk_joints(HSD_JObj* jobj, int grkind, int map_id, int depth, bool visible, int* index, bool log) {
+static void walk_joints(HSD_JObj* jobj, int grkind, int map_id, int depth, bool visible, int move, int* index,
+    bool log) {
     for (; jobj != NULL; jobj = jobj->next) {
         const int idx = (*index)++;
         bool vis = visible;
+        int mv = move;
+        for (int i = 0; i < MOVE_COUNT; i++) {
+            if (s_moves[i].grkind == grkind && s_moves[i].map_id == map_id && s_moves[i].jobj == idx) {
+                mv = i;
+            }
+        }
         unsigned dobjs = 0; /* meshes hidden while the joint is shown */
         for (int i = 0; i < s_rule_count; i++) {
             const PartRule* r = &s_rules[i];
@@ -203,8 +245,8 @@ static void walk_joints(HSD_JObj* jobj, int grkind, int map_id, int depth, bool 
             }
         }
         const unsigned hidden = vis ? dobjs : ALL_DOBJS;
-        if (hidden != 0 && s_hidden_joint_count < MAX_HIDDEN_JOINTS) {
-            s_hidden_joints[s_hidden_joint_count++] = (HiddenJoint){jobj, hidden};
+        if ((hidden != 0 || mv >= 0) && s_hidden_joint_count < MAX_HIDDEN_JOINTS) {
+            s_hidden_joints[s_hidden_joint_count++] = (HiddenJoint){jobj, hidden, mv};
         }
         if (log) {
             int meshes = 0;
@@ -217,7 +259,7 @@ static void walk_joints(HSD_JObj* jobj, int grkind, int map_id, int depth, bool 
                 map_id, idx, depth, meshes, (jobj->flags & JOBJ_HIDDEN) ? " (hidden)" : "", jobj->mtx[0][3],
                 jobj->mtx[1][3], jobj->mtx[2][3], vis ? (dobjs ? "3D, some meshes hidden" : "3D") : "hidden");
         }
-        walk_joints(jobj->child, grkind, map_id, depth + 1, vis, index, log);
+        walk_joints(jobj->child, grkind, map_id, depth + 1, vis, mv, index, log);
     }
 }
 
@@ -226,14 +268,12 @@ static int compare_joint(const void* a, const void* b) {
     return x < y ? -1 : x > y;
 }
 
-static unsigned hidden_dobjs(HSD_JObj* jobj) {
+static const HiddenJoint* find_joint(HSD_JObj* jobj) {
     if (!s_joint_mode || s_hidden_joint_count == 0) {
-        return 0;
+        return NULL;
     }
-    const HiddenJoint key = {jobj, 0};
-    const HiddenJoint* h =
-        bsearch(&key, s_hidden_joints, (size_t)s_hidden_joint_count, sizeof s_hidden_joints[0], compare_joint);
-    return h != NULL ? h->dobjs : 0;
+    const HiddenJoint key = {jobj, 0, -1};
+    return bsearch(&key, s_hidden_joints, (size_t)s_hidden_joint_count, sizeof s_hidden_joints[0], compare_joint);
 }
 
 /* MELEE_XR_JOINT_LOG: each part's joints, once, on the part's 60th draw so
@@ -256,7 +296,7 @@ bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {
     if (has_joint_rules(grkind, map_id) || log) {
         s_hidden_joint_count = 0;
         int index = 0;
-        walk_joints(root, grkind, map_id, 0, visible, &index, log);
+        walk_joints(root, grkind, map_id, 0, visible, -1, &index, log);
         qsort(s_hidden_joints, (size_t)s_hidden_joint_count, sizeof s_hidden_joints[0], compare_joint);
         s_joint_mode = true;
         return false;
@@ -277,27 +317,45 @@ void pc_xr_stage_part_end(bool hidden) {
     }
 }
 
-bool pc_xr_jobj_begin(HSD_JObj* jobj) {
-    if (hidden_dobjs(jobj) != ALL_DOBJS) {
-        return false;
+int pc_xr_jobj_begin(HSD_JObj* jobj) {
+    const HiddenJoint* h = find_joint(jobj);
+    if (h == NULL) {
+        return 0;
     }
-    aurora_xr_camera(AURORA_XR_MONO, NULL);
-    return true;
+    if (h->dobjs == ALL_DOBJS) {
+        aurora_xr_camera(AURORA_XR_MONO, NULL);
+        return CHANGED_MONO;
+    }
+    if (h->move < 0) {
+        return 0;
+    }
+    const MoveRule* m = &s_moves[h->move];
+    const float s = m->scale;
+    const float t[3][4] = {
+        {s, 0, 0, m->to[0] - s * m->pivot[0]},
+        {0, s, 0, m->to[1] - s * m->pivot[1]},
+        {0, 0, s, m->to[2] - s * m->pivot[2]},
+    };
+    aurora_xr_world_transform(t);
+    return CHANGED_MOVE;
 }
 
-bool pc_xr_dobj_begin(HSD_JObj* jobj, int dobj_index) {
-    const unsigned hidden = hidden_dobjs(jobj);
+int pc_xr_dobj_begin(HSD_JObj* jobj, int dobj_index) {
+    const HiddenJoint* h = find_joint(jobj);
     /* A wholly hidden joint is already out of the 3D view. */
-    if (hidden == ALL_DOBJS || dobj_index > 31 || !(hidden & (1u << dobj_index))) {
-        return false;
+    if (h == NULL || h->dobjs == ALL_DOBJS || dobj_index > 31 || !(h->dobjs & (1u << dobj_index))) {
+        return 0;
     }
     aurora_xr_camera(AURORA_XR_MONO, NULL);
-    return true;
+    return CHANGED_MONO;
 }
 
-void pc_xr_jobj_end(bool hidden) {
-    if (hidden) {
+void pc_xr_jobj_end(int changed) {
+    if (changed & CHANGED_MONO) {
         aurora_xr_camera(AURORA_XR_WORLD, NULL);
+    }
+    if (changed & CHANGED_MOVE) {
+        aurora_xr_world_transform(NULL);
     }
 }
 

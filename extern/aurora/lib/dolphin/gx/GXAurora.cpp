@@ -47,6 +47,8 @@ void aurora_xr_camera(int category, const float view[3][4]) {
     GX_WRITE_U32(view != nullptr ? std::bit_cast<u32>(view[i / 4][i % 4]) : 0u);
   }
 }
+
+void aurora_xr_world_transform(const float m[3][4]) { aurora_xr_camera(3, m); }
 #endif
 
 void AuroraSetViewportPolicy(AuroraViewportPolicy policy) {

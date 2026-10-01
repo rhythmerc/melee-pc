@@ -309,9 +309,9 @@ void HSD_JObjDispSub(HSD_JObj* jobj, MtxPtr vmtx, MtxPtr pmtx,
         if (dobj->flags & dobj_trsp) {
             HSD_DObjSetCurrent(dobj);
 #ifdef TARGET_PC
-            const bool xr_hidden = pc_xr_dobj_begin(jobj, xr_dobj);
+            const int xr_changed = pc_xr_dobj_begin(jobj, xr_dobj);
             HSD_DOBJ_METHOD(dobj)->disp(dobj, vmtx, pmtx, rendermode);
-            pc_xr_jobj_end(xr_hidden);
+            pc_xr_jobj_end(xr_changed);
 #else
             HSD_DOBJ_METHOD(dobj)->disp(dobj, vmtx, pmtx, rendermode);
 #endif
@@ -502,9 +502,9 @@ void HSD_JObjDisp(HSD_JObj* jobj, MtxPtr vmtx, HSD_TrspMask trsp_mask,
 #ifdef TARGET_PC
             /* XR build: stage joints a rule hides stay out of the 3D view
              * (pc/xr_scene.c). */
-            const bool xr_hidden = pc_xr_jobj_begin(jobj);
+            const int xr_changed = pc_xr_jobj_begin(jobj);
             HSD_JObjDispDObj(jobj, vmtx, trsp_mask, rendermode);
-            pc_xr_jobj_end(xr_hidden);
+            pc_xr_jobj_end(xr_changed);
 #else
             HSD_JObjDispDObj(jobj, vmtx, trsp_mask, rendermode);
 #endif
