@@ -57,9 +57,27 @@ and the investigation behind it are in docs/xr-3d-plan.md.
 - **HUD.** HUD draws are replayed onto their own plane above the arena.
   Bright text and icons are opaque, and black areas are see-through.
 - **Stage backgrounds.** Stage parts on layer 2, the far background, are
-  left out of the 3D view, with per-stage exceptions (`xr_scene.c`). Pokémon
-  Stadium's big screen (`map_id` 1) is always shown. Layers 0 and 1 are the
-  stage itself.
+  left out of the 3D view. Layers 0 and 1 are the stage itself. Per-stage
+  rules in `xr_scene.c` can name a whole part, one joint of a part (and
+  everything under it), or one mesh of a joint. Hidden geometry still draws
+  into the flat frame, because the Pokémon Stadium screen copies it.
+  - **Pokémon Stadium:** shows only the big screen (part 1), the light rings
+    beside it, and the stage. It hides the city and sky (part 1 joints 11
+    and 12) and the bowl's stands, walls and floor (part 2 joint 2, meshes
+    14-27).
+- **Background colour.** The fight camera fills the screen with the stage's
+  background colour before it draws. That fill stays out of the 3D view.
+  Before, it was a card behind the arena, a blue one on Green Greens.
+
+To survey a stage on desktop:
+- **Boot into it:** `MELEE_BOOT_SCENE=vs MELEE_DEBUG_VS_STAGE=<StKind>`.
+- **List its contents:** `MELEE_XR_STAGE_LOG` logs every part with its
+  layer, and `MELEE_XR_JOINT_LOG` adds each part's joints with their mesh
+  counts and positions.
+- **Try rules:** with `MELEE_XR_PARTS`.
+- **Capture the result:** `AURORA_XR_DUMP` writes the eye images,
+  `AURORA_XR_DUMP_AFTER` picks the frame, and `AURORA_XR_ARENA_POS` and
+  `AURORA_XR_ARENA_YAW` frame the view.
 
 Checked on desktop against Monado (`AURORA_XR_DUMP` images):
 - **Final Destination** (VS boot scene) and **Battlefield** (training boot
@@ -158,9 +176,8 @@ From the first headset playtest (2026-10-01):
 
 - **Crash on KO.** The game flashes the 2D viewport and then crashes when a
   character dies. It's reproducible and not yet investigated.
-- **Stage parts.** They need a per-stage pass. Final Destination is right.
-  Pokémon Stadium still shows its cityscape and skybox. Go stage by stage
-  with `MELEE_XR_STAGE_LOG` and `MELEE_XR_PARTS`.
+- **Stage parts.** They need a per-stage pass. Final Destination, Pokémon
+  Stadium, Dream Land and Green Greens have been checked.
 - **Full VR mode for fights (pinned).** An option for fights in full VR, not
   over passthrough, alongside the mixed-reality arena.
 
@@ -257,14 +274,17 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_TIMING` | 1 | Log GPU pass and copy times every 10 s |
 | `AURORA_PIPELINE_INLINE` | 0 | Compile pipelines on the render thread instead of the compile thread |
 | `AURORA_XR_ARENA_SCALE` | 0.006 | Starting meters per game unit (grab with two hands to change) |
+| `AURORA_XR_ARENA_YAW` | 0 | Starting arena turn in degrees (counter-clockwise from above) |
 | `AURORA_XR_ARENA_POS` | `0,-0.45,-1.0` | Starting arena center, in meters, in the starting head space |
 | `AURORA_XR_HUD_WIDTH` | 0.9 | HUD plane width in meters |
 | `AURORA_XR_HUD_HEIGHT` | 0.55 | HUD plane height above the arena in meters |
 | `AURORA_XR_HUD_BACKDROP` | 0 | Minimum HUD alpha, as a translucent panel behind it |
 | `AURORA_XR_DUMP` | unset | Directory to write each stream's image once (PPM, plus alpha as PGM) |
 | `MELEE_XR_STAGE_LAYERS` | `0xB` | Stage layers shown in 3D, as a bitmask |
-| `MELEE_XR_PARTS` | unset | Per-part overrides, e.g. `16:1,-36:6` (`stage:map_id`) |
+| `MELEE_XR_PARTS` | unset | Overrides, e.g. `16:1,-16:1/12,-16:2/2.27` (`stage:part[/joint[.mesh]]`, `-` hides) |
 | `MELEE_XR_STAGE_LOG` | unset | Log each stage part's id and layer once |
+| `MELEE_XR_JOINT_LOG` | unset | Log each part's joints (index, depth, meshes, position) once |
+| `AURORA_XR_DUMP_AFTER` | 300 | Stream frames to wait before `AURORA_XR_DUMP` writes |
 
 ## Measured: virtual screen only (Quest 3, 72 Hz, before 120 Hz lock-step)
 

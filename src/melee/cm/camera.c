@@ -4036,10 +4036,6 @@ static void fn_800301D0(HSD_GObj* gobj, intptr_t arg1)
     Camera_8002A4AC(gobj);
     lbShadow_8000F38C(game_camera.x399_b7);
     if (HSD_CObjSetCurrent(cobj) != 0) {
-#ifdef TARGET_PC
-        /* XR build: everything this camera draws is the 3D fight. */
-        pc_xr_world_camera((const float(*)[4]) cobj->view_mtx);
-#endif
         if (!game_camera.x398_b5) {
             HSD_SetEraseColor(game_camera.background_color.r,
                               game_camera.background_color.g,
@@ -4048,6 +4044,13 @@ static void fn_800301D0(HSD_GObj* gobj, intptr_t arg1)
             HSD_SetEraseColor(0, 0, 0, 0xFF);
         }
         HSD_CObjEraseScreen(cobj, 1, 0, 0);
+#ifdef TARGET_PC
+        /* XR build: everything this camera draws from here is the 3D fight.
+         * Not the erase above: it fills the screen with the stage's
+         * background colour, which in 3D became a card behind the arena
+         * (Green Greens' blue sky). */
+        pc_xr_world_camera((const float(*)[4]) cobj->view_mtx);
+#endif
         Ground_801C4FAC(cobj);
         HSD_LObjDeleteCurrentAll(NULL);
 

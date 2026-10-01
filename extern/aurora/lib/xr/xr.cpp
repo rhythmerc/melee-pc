@@ -1209,7 +1209,7 @@ bool copy_latest(Stream& st, bool& copied) {
     vkCmdResetQueryPool(s.cmd, B.timestamps, tsQuery, 2);
   // Dump frames read the swapchain image back after the copy, so the dump
   // shows exactly what the runtime gets.
-  const bool dumpNow = !B.dumpDir.empty() && !st.dumped && st.dumpSlot < 0 && st.copies >= 300 &&
+  const bool dumpNow = !B.dumpDir.empty() && !st.dumped && st.dumpSlot < 0 && st.copies >= static_cast<uint64_t>(env_float("AURORA_XR_DUMP_AFTER", 300.f)) &&
                        (st.dumpBuf || create_dump_buffer(st));
   const bool shaderCopy = st.copyPipeline != VK_NULL_HANDLE;
   // The layout the shared image is used in here, and handed back to Dawn
@@ -1468,6 +1468,7 @@ ArenaPose arena_pose() {
     if (const char* v = std::getenv("AURORA_XR_ARENA_POS"))
       std::sscanf(v, "%f,%f,%f", &g_arena.pos.x, &g_arena.pos.y, &g_arena.pos.z);
     g_arena.scale = g_defaultArenaScale = env_float("AURORA_XR_ARENA_SCALE", 0.006f);
+    g_arena.yaw = env_float("AURORA_XR_ARENA_YAW", 0.f) * 3.14159265f / 180.f; // degrees
   }
   return g_arena;
 }

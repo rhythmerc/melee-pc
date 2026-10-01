@@ -1,3 +1,6 @@
+#ifdef TARGET_PC
+#include "pc/xr_scene.h"
+#endif
 #include "displayfunc.h"
 
 #include <string.h>
@@ -292,14 +295,26 @@ void HSD_JObjDispSub(HSD_JObj* jobj, MtxPtr vmtx, MtxPtr pmtx,
     }
 
     HSD_PObjClearMtxMark(NULL, 0);
+#ifdef TARGET_PC
+    int dobj_index = 0;
+#endif
     for (dobj = jobj->u.dobj; dobj; dobj = dobj->next) {
+#ifdef TARGET_PC
+        const int xr_dobj = dobj_index++;
+#endif
         if (dobj->flags & DOBJ_HIDDEN) {
             continue;
         }
 
         if (dobj->flags & dobj_trsp) {
             HSD_DObjSetCurrent(dobj);
+#ifdef TARGET_PC
+            const bool xr_hidden = pc_xr_dobj_begin(jobj, xr_dobj);
             HSD_DOBJ_METHOD(dobj)->disp(dobj, vmtx, pmtx, rendermode);
+            pc_xr_jobj_end(xr_hidden);
+#else
+            HSD_DOBJ_METHOD(dobj)->disp(dobj, vmtx, pmtx, rendermode);
+#endif
         }
     }
     HSD_DObjSetCurrent(NULL);
@@ -484,7 +499,15 @@ void HSD_JObjDisp(HSD_JObj* jobj, MtxPtr vmtx, HSD_TrspMask trsp_mask,
 {
     if (jobj != NULL) {
         if (union_type_dobj(jobj)) {
+#ifdef TARGET_PC
+            /* XR build: stage joints a rule hides stay out of the 3D view
+             * (pc/xr_scene.c). */
+            const bool xr_hidden = pc_xr_jobj_begin(jobj);
             HSD_JObjDispDObj(jobj, vmtx, trsp_mask, rendermode);
+            pc_xr_jobj_end(xr_hidden);
+#else
+            HSD_JObjDispDObj(jobj, vmtx, trsp_mask, rendermode);
+#endif
         } else if (union_type_ptcl(jobj) && sptcl_callback != NULL) {
             HSD_DiscSList* sp;
             for (sp = jobj->u.ptcl; sp != NULL; sp = DP(HSD_DiscSList, sp->next)) {

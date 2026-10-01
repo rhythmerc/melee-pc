@@ -21,22 +21,42 @@ void pc_xr_world_camera(const float view[3][4]);
 void pc_xr_hud_camera(void);
 /* After the camera's HSD_CObjEndCurrent. */
 void pc_xr_mono_camera(void);
-/* Around one stage part's draw (gr/grdisplay.c). Returns true when the part
- * is left out of the 3D view; hand that to pc_xr_stage_part_end. Only acts
- * under the fight camera. */
-bool pc_xr_stage_part_begin(int grkind, int map_id, int layer);
+struct HSD_JObj;
+/* Around one stage part's draw (gr/grdisplay.c); `root` is the part's joint
+ * tree. Returns true when the whole part is left out of the 3D view; hand
+ * that to pc_xr_stage_part_end. Only acts under the fight camera. */
+bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, struct HSD_JObj* root);
 void pc_xr_stage_part_end(bool hidden);
+/* Around one joint's geometry (HSD_JObjDisp): leaves joints a part rule
+ * hides out of the 3D view. Returns true when hidden; hand that to
+ * pc_xr_jobj_end. Cheap when no stage part with joint rules is drawing. */
+bool pc_xr_jobj_begin(struct HSD_JObj* jobj);
+/* Same, for one mesh (the joint's dobj_index'th DObj). */
+bool pc_xr_dobj_begin(struct HSD_JObj* jobj, int dobj_index);
+void pc_xr_jobj_end(bool hidden);
 #else
 static inline void pc_xr_world_camera(const float view[3][4]) { (void)view; }
 static inline void pc_xr_hud_camera(void) {}
 static inline void pc_xr_mono_camera(void) {}
-static inline bool pc_xr_stage_part_begin(int grkind, int map_id, int layer) {
+struct HSD_JObj;
+static inline bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, struct HSD_JObj* root) {
     (void)grkind;
     (void)map_id;
     (void)layer;
+    (void)root;
     return false;
 }
 static inline void pc_xr_stage_part_end(bool hidden) { (void)hidden; }
+static inline bool pc_xr_jobj_begin(struct HSD_JObj* jobj) {
+    (void)jobj;
+    return false;
+}
+static inline bool pc_xr_dobj_begin(struct HSD_JObj* jobj, int dobj_index) {
+    (void)jobj;
+    (void)dobj_index;
+    return false;
+}
+static inline void pc_xr_jobj_end(bool hidden) { (void)hidden; }
 #endif
 
 #ifdef __cplusplus
