@@ -17,6 +17,9 @@ EM_JS(void, browser_graphics_progress, (unsigned done, unsigned total), {
 #include "../rmlui/pipeline.hpp"
 #endif
 #include "../sqlite_utils.hpp"
+#if defined(__ANDROID__) && defined(AURORA_ENABLE_OPENXR)
+#include "../xr/xr.hpp"
+#endif
 #include "../webgpu/gpu.hpp"
 
 #include <algorithm>
@@ -1401,7 +1404,20 @@ void initialize_pipeline_cache() {
   g_pipelineThreadEnd = false;
   g_gpuCachePrunePending = false;
 
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) && defined(AURORA_ENABLE_OPENXR)
+  /* Quest builds: one low-priority compile thread. Inline compiles cost the
+   * Quest 3 (Adreno 740) 10-85 ms each on the render thread, and nothing
+   * built the known-pipeline queue in the immersive process, so every stage
+   * opened with ~15 s of stutter. The Adreno 750 failures that made Android
+   * inline-only came from desktop-seed configs, and Android now warms only
+   * configs this device has built (DeviceBuiltRowsOnly); creation stays
+   * serialized (create_timed). AURORA_PIPELINE_INLINE=1 restores the inline
+   * path. Only the immersive process gets the thread: the launcher panel's
+   * pipelines die with it, and one that warmed the queue too competed with
+   * the game at startup and then pruned the shared Dawn cache to its own
+   * keys. */
+  const bool inlineOnly = !xr::wanted() || env_flag("AURORA_PIPELINE_INLINE");
+#elif defined(__ANDROID__)
   /* Some Android Vulkan drivers crash when pipelines are created off the
    * draw thread. Keep the v0.2 inline path for every GPU. */
   const bool inlineOnly = true;

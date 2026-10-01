@@ -128,6 +128,30 @@ What changed:
 - **Measurement.** `AURORA_XR_TIMING` logs per-pass GPU time (Dawn
   timestamps) and per-stream bridge copy time (Vulkan timestamps) every 10 s.
 
+### Shaders
+
+The immersive process builds pipelines on one low-priority compile thread.
+At boot it builds every config this device has built before, and a draw
+whose pipeline isn't ready yet is skipped for a frame instead of stalling the
+render thread. The launcher panel builds and waits for nothing, because its
+pipelines would die with it.
+
+Both processes request the same Dawn device features, so they share one
+Dawn blob cache. Before, the game process missed every entry the panel had
+written, and the panel's prune deleted the game's entries on every launch.
+
+On a Quest 3 (2026-10-01):
+
+| | Before | After, cold cache | After, warm cache |
+|---|---|---|---|
+| Pipelines built by the game | ~470 | 1,584 in the background | 1,596 in the background, 9.3 s |
+| Average per pipeline | ~85 ms | 61 ms | 5.8 ms |
+| Built while a draw waited | 467 | 20 | 0 |
+
+`AURORA_PIPELINE_INLINE=1` brings back inline compiles (Android's default
+elsewhere, after an Adreno 750 rejected desktop-seed configs off the draw
+thread).
+
 ### Known gaps in 3D
 
 From the first headset playtest (2026-10-01):
@@ -231,6 +255,7 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_FIGHT_SCREEN` | 0 | Keep presenting the flat screen during fights (debugging) |
 | `AURORA_XR_HUD_SCALE` | 0.5 | HUD texture resolution, relative to the screen |
 | `AURORA_XR_TIMING` | 1 | Log GPU pass and copy times every 10 s |
+| `AURORA_PIPELINE_INLINE` | 0 | Compile pipelines on the render thread instead of the compile thread |
 | `AURORA_XR_ARENA_SCALE` | 0.006 | Starting meters per game unit (grab with two hands to change) |
 | `AURORA_XR_ARENA_POS` | `0,-0.45,-1.0` | Starting arena center, in meters, in the starting head space |
 | `AURORA_XR_HUD_WIDTH` | 0.9 | HUD plane width in meters |

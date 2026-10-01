@@ -2932,9 +2932,12 @@ bool wanted() noexcept {
   return want;
 }
 
+// Requested whether or not this process presents to XR: Dawn keys its blob
+// cache on the device's enabled features, and the Quest launcher panel and
+// the immersive game process share one cache. With different feature sets,
+// every game pipeline missed what the panel built (about 85 ms each on the
+// Quest instead of about 10) and the panel's prune deleted the game's entries.
 void add_required_features(const wgpu::Adapter& adapter, std::vector<wgpu::FeatureName>& features) noexcept {
-  if (!wanted())
-    return;
 #ifdef __ANDROID__
   const std::array needed{wgpu::FeatureName::SharedTextureMemoryAHardwareBuffer, wgpu::FeatureName::SharedFenceSyncFD};
 #else

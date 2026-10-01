@@ -172,7 +172,14 @@ void dialog_done(void* userdata, const char* const* files, int) {
  * a match that pops and one that does not. The launcher is the one screen
  * where the player is already waiting; spend it there. */
 static uint32_t pending_pipelines() {
+#if defined(__ANDROID__) && defined(AURORA_ENABLE_OPENXR)
+    /* Quest: the game runs in its own process (MeleeXrActivity), which warms
+     * its pipelines on a compile thread; pipelines built here die with this
+     * panel. Neither wait for nor build them. */
+    return 0;
+#else
     return aurora_wait_pipelines(0);
+#endif
 }
 
 class Launcher final : public Rml::EventListener {
@@ -1027,7 +1034,9 @@ public:
              * without them (Android) it builds queued pipelines here, the only
              * place they are built before a match. */
             const uint64_t idle_start = SDL_GetTicks();
+#if !(defined(__ANDROID__) && defined(AURORA_ENABLE_OPENXR))
             aurora_wait_pipelines(8);
+#endif
             const uint64_t idle = SDL_GetTicks() - idle_start;
             if (idle < 8)
                 SDL_Delay(uint32_t(8 - idle));
