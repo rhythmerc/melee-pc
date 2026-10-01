@@ -35,6 +35,11 @@ enum { AURORA_XR_MONO = 0, AURORA_XR_WORLD = 1, AURORA_XR_HUD = 2 };
  * 60 Hz timer. Returns false at once when there is nothing to pace to (no
  * session, a non-multiple rate, AURORA_XR_LOCKSTEP=0). */
 bool aurora_xr_pace(void);
+
+/* Whether the fight on screen is paused. Call every frame the fight camera
+ * draws. While paused, the controllers show lasers and the grips grab the
+ * arena to move, turn and scale it instead of pressing Z. */
+void aurora_xr_set_paused(bool paused);
 void aurora_xr_camera(int category, const float view[3][4]);
 
 #ifdef __cplusplus

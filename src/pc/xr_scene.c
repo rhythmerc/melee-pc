@@ -10,6 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* gm/gmscene.h; its headers need the game's platform prelude. */
+bool gm_GetDbPauseFlag(int bit);
+
 /* Stage parts shown in 3D regardless of layer, or hidden regardless of it.
  * Keyed by GrKind (gr/forward.h) and the part's map_id (its index in the
  * stage's part table). Extend with MELEE_XR_PARTS while surveying stages:
@@ -94,6 +97,8 @@ static bool part_visible(int grkind, int map_id, int layer) {
 }
 
 void pc_xr_world_camera(const float view[3][4]) {
+    /* Pause flags 1 and 2: a player paused the match (gm_DoPauseChecksAndRoutine). */
+    aurora_xr_set_paused(gm_GetDbPauseFlag(1) || gm_GetDbPauseFlag(2));
     s_category = AURORA_XR_WORLD;
     aurora_xr_camera(AURORA_XR_WORLD, view);
 }

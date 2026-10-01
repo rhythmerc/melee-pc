@@ -66,6 +66,31 @@ Checked on desktop against Monado (`AURORA_XR_DUMP` images):
   scene) render in 3D at 60 frames per second.
 - **The title screen** stays on the virtual screen.
 
+### Placing the arena
+
+Pause the fight to move the arena. Each controller shows a laser, and the
+grips grab instead of pressing Z. In some modes Z on the pause screen retries
+the match, so the grips don't pass it through while paused. Triggers, A and
+Start work as usual, so L+R+A+Start still quits.
+
+- **One hand.** Point at the arena and squeeze a grip. The arena hangs off
+  the laser at the point you grabbed, and its front turns to face you. Let
+  go and it stays there, facing the way it was.
+- **Two hands.** While holding with one hand, squeeze the other grip
+  anywhere. Spreading or closing your hands scales the arena, and turning
+  them turns it about the vertical axis, around the point between your
+  hands. Letting go of either hand ends the grab, so the turn is kept.
+
+The HUD moves, turns and scales with the arena. The placement lasts for the
+session and is logged when you let go (`Arena placed at x,y,z, yaw, scale`),
+which is handy for `AURORA_XR_ARENA_POS` and `AURORA_XR_ARENA_SCALE`.
+
+The lasers are quad layers with static textures, drawn at display rate from
+the latest controller poses. Coloring them needs
+`XR_KHR_composition_layer_color_scale_bias`. A laser is cyan on the arena,
+amber while grabbing, and faint white otherwise. The arena moves at the
+game's frame rate.
+
 ### Performance
 
 On a Quest 3 (2026-10-01), a VS match on Final Destination at full eye
@@ -123,8 +148,8 @@ From the first headset playtest (2026-10-01):
 - **Frame rate.** The 3D view updates at the game's 60 Hz. Every second
   display frame reuses the previous image and relies on the runtime's
   reprojection; re-rendering it with the newer head pose isn't done.
-- **Placement.** The arena is fixed in the starting head space. There's no
-  grab-to-move or table anchoring.
+- **Placement.** It isn't saved between sessions, and there's no table or
+  floor anchoring.
 - **Coverage.** Only the static stages have been looked at.
 
 ## How the frame gets to the headset
@@ -182,7 +207,7 @@ AURORA_XR=1 build/linux-xr/melee disc.rvz
 | A / B | A / B |
 | X / Y | X / Y |
 | Triggers | Analog L / R, digital past 90% |
-| Either grip | Z |
+| Either grip | Z (grabs the arena while paused) |
 | Left menu button | Start |
 
 ## Knobs
@@ -206,8 +231,8 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_FIGHT_SCREEN` | 0 | Keep presenting the flat screen during fights (debugging) |
 | `AURORA_XR_HUD_SCALE` | 0.5 | HUD texture resolution, relative to the screen |
 | `AURORA_XR_TIMING` | 1 | Log GPU pass and copy times every 10 s |
-| `AURORA_XR_ARENA_SCALE` | 0.006 | Meters per game unit |
-| `AURORA_XR_ARENA_POS` | `0,-0.45,-1.0` | Arena center, in meters, in the starting head space |
+| `AURORA_XR_ARENA_SCALE` | 0.006 | Starting meters per game unit (grab with two hands to change) |
+| `AURORA_XR_ARENA_POS` | `0,-0.45,-1.0` | Starting arena center, in meters, in the starting head space |
 | `AURORA_XR_HUD_WIDTH` | 0.9 | HUD plane width in meters |
 | `AURORA_XR_HUD_HEIGHT` | 0.55 | HUD plane height above the arena in meters |
 | `AURORA_XR_HUD_BACKDROP` | 0 | Minimum HUD alpha, as a translucent panel behind it |

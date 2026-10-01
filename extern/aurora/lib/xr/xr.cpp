@@ -187,6 +187,24 @@ std::condition_variable g_paceCv;
 uint64_t g_paceTick = 0;
 std::atomic<int> g_displayPerGameFrame{0};
 
+// Where the arena sits in the room (meters, starting head space): A =
+// T(pos) · R_y(yaw) · S(scale) takes game units to the room. The XR thread
+// moves it while the player drags the arena during a pause; the render
+// worker reads it for every 3D frame. Kept for the whole session.
+struct ArenaPose {
+  XrVector3f pos{0.f, -0.45f, -1.f};
+  float yaw = 0.f;
+  float scale = 0.006f;
+};
+std::mutex g_arenaMutex;
+ArenaPose g_arena;
+bool g_arenaInit = false;
+float g_defaultArenaScale = 0.006f;
+
+// Set by the game every fight frame (aurora_xr_set_paused): the fight is
+// paused, so the controllers point and grab instead of playing.
+std::atomic<bool> g_fightPaused{false};
+
 // Controller input, written by the XR thread, read by the game thread.
 std::mutex g_padMutex;
 PADStatus g_pad{};
@@ -244,7 +262,16 @@ struct Bridge {
   XrAction btnA = XR_NULL_HANDLE, btnB = XR_NULL_HANDLE, btnX = XR_NULL_HANDLE, btnY = XR_NULL_HANDLE;
   XrAction btnZ = XR_NULL_HANDLE, btnStart = XR_NULL_HANDLE;
   XrAction trigL = XR_NULL_HANDLE, trigR = XR_NULL_HANDLE;
+  // Pointing and grabbing the arena while a fight is paused.
+  std::array<XrAction, 2> aim{}, grab{};
+  std::array<XrSpace, 2> aimSpace{};
+  bool pointerMode = false; // last frame: paused fight, the grips grab instead of pressing Z
+  XrVector3f head{};        // between the eyes, from the latest views
   bool focused = false;
+
+  // Laser layers: static textures, drawn as quads at display rate.
+  XrSwapchain beamSwapchain = XR_NULL_HANDLE, dotSwapchain = XR_NULL_HANDLE;
+  bool hasColorScaleBias = false;
 
   uint64_t framesShown = 0, fightFrames = 0;
   std::array<uint64_t, kStreamCount> copiedSinceStats{};
@@ -377,6 +404,7 @@ bool create_instance() {
     hasVk2 |= !std::strcmp(p.extensionName, XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME);
     B.hasPassthroughExt |= !std::strcmp(p.extensionName, XR_FB_PASSTHROUGH_EXTENSION_NAME);
     B.hasRefreshRateExt |= !std::strcmp(p.extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+    B.hasColorScaleBias |= !std::strcmp(p.extensionName, XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME);
   }
   if (!hasVk2) {
     Log.error("OpenXR runtime lacks XR_KHR_vulkan_enable2");
@@ -387,6 +415,8 @@ bool create_instance() {
     exts.push_back(XR_FB_PASSTHROUGH_EXTENSION_NAME);
   if (B.hasRefreshRateExt)
     exts.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+  if (B.hasColorScaleBias)
+    exts.push_back(XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME);
   XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
 #ifdef __ANDROID__
   exts.push_back(XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME);
@@ -922,6 +952,8 @@ void write_dump(const Stream& st) {
 //   A / B (right) -> A / B          X / Y (left) -> X / Y
 //   left / right trigger -> analog L / R (digital past 90%)
 //   either grip -> Z                left menu button -> Start
+// While a fight is paused the grips grab the arena instead (Z would retry the
+// match in some modes), and each controller shows a laser.
 
 bool create_action(XrAction& action, const char* name, const char* localized, XrActionType type) {
   XrActionCreateInfo ai{XR_TYPE_ACTION_CREATE_INFO};
@@ -966,7 +998,11 @@ bool create_input() {
       !create_action(B.btnZ, "z", "Z", XR_ACTION_TYPE_BOOLEAN_INPUT) ||
       !create_action(B.btnStart, "start", "Start", XR_ACTION_TYPE_BOOLEAN_INPUT) ||
       !create_action(B.trigL, "l", "L", XR_ACTION_TYPE_FLOAT_INPUT) ||
-      !create_action(B.trigR, "r", "R", XR_ACTION_TYPE_FLOAT_INPUT))
+      !create_action(B.trigR, "r", "R", XR_ACTION_TYPE_FLOAT_INPUT) ||
+      !create_action(B.aim[0], "aim_left", "Left pointer", XR_ACTION_TYPE_POSE_INPUT) ||
+      !create_action(B.aim[1], "aim_right", "Right pointer", XR_ACTION_TYPE_POSE_INPUT) ||
+      !create_action(B.grab[0], "grab_left", "Left grab", XR_ACTION_TYPE_FLOAT_INPUT) ||
+      !create_action(B.grab[1], "grab_right", "Right grab", XR_ACTION_TYPE_FLOAT_INPUT))
     return false;
 
   const bool touch = suggest("/interaction_profiles/oculus/touch_controller",
@@ -982,6 +1018,10 @@ bool create_input() {
                                  {B.btnStart, "/user/hand/left/input/menu/click"},
                                  {B.trigL, "/user/hand/left/input/trigger/value"},
                                  {B.trigR, "/user/hand/right/input/trigger/value"},
+                                 {B.aim[0], "/user/hand/left/input/aim/pose"},
+                                 {B.aim[1], "/user/hand/right/input/aim/pose"},
+                                 {B.grab[0], "/user/hand/left/input/squeeze/value"},
+                                 {B.grab[1], "/user/hand/right/input/squeeze/value"},
                              });
   // Minimal fallback for runtimes and simulators without Touch controllers
   // (Monado's keyboard/mouse controllers): select is A, menu is Start.
@@ -990,11 +1030,21 @@ bool create_input() {
                                                              {B.btnB, "/user/hand/left/input/select/click"},
                                                              {B.btnStart, "/user/hand/left/input/menu/click"},
                                                              {B.btnStart, "/user/hand/right/input/menu/click"},
+                                                             {B.aim[0], "/user/hand/left/input/aim/pose"},
+                                                             {B.aim[1], "/user/hand/right/input/aim/pose"},
+                                                             {B.grab[0], "/user/hand/left/input/select/click"},
+                                                             {B.grab[1], "/user/hand/right/input/select/click"},
                                                          });
   XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
   attach.countActionSets = 1;
   attach.actionSets = &B.actionSet;
   XR_TRY(xrAttachSessionActionSets(B.session, &attach));
+  for (int h = 0; h < 2; ++h) {
+    XrActionSpaceCreateInfo asci{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+    asci.action = B.aim[h];
+    asci.poseInActionSpace.orientation.w = 1.f;
+    XR_TRY(xrCreateActionSpace(B.session, &asci, &B.aimSpace[h]));
+  }
   Log.info("Controller input ready ({})", touch ? "Touch controller bindings" : "simple controller only");
   return true;
 }
@@ -1052,7 +1102,7 @@ void update_input() {
   buttons |= action_bool(B.btnB) ? PAD_BUTTON_B : 0;
   buttons |= action_bool(B.btnX) ? PAD_BUTTON_X : 0;
   buttons |= action_bool(B.btnY) ? PAD_BUTTON_Y : 0;
-  buttons |= action_bool(B.btnZ) ? PAD_TRIGGER_Z : 0;
+  buttons |= !B.pointerMode && action_bool(B.btnZ) ? PAD_TRIGGER_Z : 0;
   buttons |= action_bool(B.btnStart) ? PAD_BUTTON_START : 0;
   buttons |= l > 0.9f ? PAD_TRIGGER_L : 0;
   buttons |= r > 0.9f ? PAD_TRIGGER_R : 0;
@@ -1342,17 +1392,441 @@ void publish_views(XrTime displayTime) {
   if (valid) {
     g_latestViews = views;
     g_viewsValid = true;
+    const XrVector3f &l = views[0].pose.position, &r = views[1].pose.position;
+    B.head = {(l.x + r.x) * 0.5f, (l.y + r.y) * 0.5f, (l.z + r.z) * 0.5f};
   }
 }
 
-// Where the arena sits in the room: AURORA_XR_ARENA_POS ("x,y,z" meters in
-// the starting head space; default a little below eye level, 1 m ahead).
-XrVector3f arena_position() {
-  XrVector3f pos{0.f, -0.45f, -1.0f};
-  if (const char* v = std::getenv("AURORA_XR_ARENA_POS")) {
-    std::sscanf(v, "%f,%f,%f", &pos.x, &pos.y, &pos.z);
+// ---------------------------------------------------------------- XR thread: arena placement
+//
+// While a fight is paused each controller shows a laser. Squeezing a grip
+// while its laser is on the arena grabs it:
+//   one hand   the arena hangs off the laser at the grabbed point and turns
+//              its front (the game camera's side) to the player; letting go
+//              leaves it there
+//   two hands  squeezing the other grip too scales the arena and turns it
+//              about the vertical axis, around the point between the hands;
+//              letting go of either hand ends the grab
+// Starting position and scale: AURORA_XR_ARENA_POS, AURORA_XR_ARENA_SCALE.
+
+XrVector3f operator+(XrVector3f a, XrVector3f b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
+XrVector3f operator-(XrVector3f a, XrVector3f b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+XrVector3f operator*(XrVector3f a, float k) { return {a.x * k, a.y * k, a.z * k}; }
+float vdot(XrVector3f a, XrVector3f b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+XrVector3f vcross(XrVector3f a, XrVector3f b) {
+  return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+float vlen(XrVector3f a) { return std::sqrt(vdot(a, a)); }
+XrVector3f vnorm(XrVector3f a) {
+  const float l = vlen(a);
+  return l > 1e-6f ? a * (1.f / l) : a;
+}
+// v rotated by the unit quaternion q.
+XrVector3f qrot(const XrQuaternionf& q, XrVector3f v) {
+  const XrVector3f u{q.x, q.y, q.z};
+  const XrVector3f t = vcross(u, v) * 2.f;
+  return v + t * q.w + vcross(u, t);
+}
+// Rotation by `a` radians about +Y (counter-clockwise seen from above).
+XrVector3f rot_y(XrVector3f v, float a) {
+  const float c = std::cos(a), s = std::sin(a);
+  return {c * v.x + s * v.z, v.y, -s * v.x + c * v.z};
+}
+XrQuaternionf yaw_quat(float a) { return {0.f, std::sin(a / 2.f), 0.f, std::cos(a / 2.f)}; }
+// The rotation whose local axes are x, y, z (orthonormal).
+XrQuaternionf quat_from_axes(XrVector3f x, XrVector3f y, XrVector3f z) {
+  const float tr = x.x + y.y + z.z;
+  XrQuaternionf q;
+  if (tr > 0.f) {
+    const float s = std::sqrt(tr + 1.f) * 2.f;
+    q = {(y.z - z.y) / s, (z.x - x.z) / s, (x.y - y.x) / s, s / 4.f};
+  } else if (x.x > y.y && x.x > z.z) {
+    const float s = std::sqrt(1.f + x.x - y.y - z.z) * 2.f;
+    q = {s / 4.f, (y.x + x.y) / s, (z.x + x.z) / s, (y.z - z.y) / s};
+  } else if (y.y > z.z) {
+    const float s = std::sqrt(1.f + y.y - x.x - z.z) * 2.f;
+    q = {(y.x + x.y) / s, s / 4.f, (z.y + y.z) / s, (z.x - x.z) / s};
+  } else {
+    const float s = std::sqrt(1.f + z.z - x.x - y.y) * 2.f;
+    q = {(z.x + x.z) / s, (z.y + y.z) / s, s / 4.f, (x.y - y.x) / s};
   }
-  return pos;
+  return q;
+}
+float wrap_angle(float a) {
+  constexpr float kPi = 3.14159265f;
+  while (a > kPi)
+    a -= 2.f * kPi;
+  while (a < -kPi)
+    a += 2.f * kPi;
+  return a;
+}
+
+ArenaPose arena_pose() {
+  std::lock_guard lock{g_arenaMutex};
+  if (!g_arenaInit) {
+    g_arenaInit = true;
+    if (const char* v = std::getenv("AURORA_XR_ARENA_POS"))
+      std::sscanf(v, "%f,%f,%f", &g_arena.pos.x, &g_arena.pos.y, &g_arena.pos.z);
+    g_arena.scale = g_defaultArenaScale = env_float("AURORA_XR_ARENA_SCALE", 0.006f);
+  }
+  return g_arena;
+}
+
+void set_arena_pose(const ArenaPose& a) {
+  std::lock_guard lock{g_arenaMutex};
+  g_arena = a;
+}
+
+// What the lasers can grab, in game units around the stage's origin: wider
+// and taller than any stage's main platform, so pointing near it is enough.
+constexpr XrVector3f kGrabBoxMin{-120.f, -80.f, -60.f};
+constexpr XrVector3f kGrabBoxMax{120.f, 100.f, 60.f};
+// Meters per game unit: Final Destination from about 25 cm to 8.5 m wide.
+constexpr float kMinArenaScale = 0.0015f, kMaxArenaScale = 0.05f;
+
+// Distance along the ray (meters) to the arena's grab box, or -1 for a miss.
+float hit_arena(const ArenaPose& a, XrVector3f origin, XrVector3f dir) {
+  const XrVector3f o = rot_y(origin - a.pos, -a.yaw) * (1.f / a.scale);
+  const XrVector3f d = rot_y(dir, -a.yaw) * (1.f / a.scale);
+  const float os[3] = {o.x, o.y, o.z}, ds[3] = {d.x, d.y, d.z};
+  const float lo[3] = {kGrabBoxMin.x, kGrabBoxMin.y, kGrabBoxMin.z};
+  const float hi[3] = {kGrabBoxMax.x, kGrabBoxMax.y, kGrabBoxMax.z};
+  float t0 = -1e30f, t1 = 1e30f;
+  for (int i = 0; i < 3; ++i) {
+    if (std::abs(ds[i]) < 1e-9f) {
+      if (os[i] < lo[i] || os[i] > hi[i])
+        return -1.f;
+      continue;
+    }
+    float ta = (lo[i] - os[i]) / ds[i], tb = (hi[i] - os[i]) / ds[i];
+    if (ta > tb)
+      std::swap(ta, tb);
+    t0 = std::max(t0, ta);
+    t1 = std::min(t1, tb);
+  }
+  if (t0 > t1 || t1 < 0.f)
+    return -1.f;
+  return std::max(t0, 0.f);
+}
+
+struct Hand {
+  bool valid = false;
+  XrVector3f origin{};
+  XrVector3f dir{0.f, 0.f, -1.f};
+  bool held = false, wasHeld = false; // grip past its threshold, with hysteresis
+  float hit = -1.f;                   // meters along the laser to the arena, -1 = none
+};
+
+struct Grab {
+  std::array<Hand, 2> hands;
+  int oneHand = -1; // the hand dragging the arena alone
+  bool twoHands = false;
+  ArenaPose start;
+  float dist = 0.f;  // one hand: the grabbed point's distance along the laser
+  XrVector3f offset; // one hand: arena center minus grabbed point, unrotated by the arena's yaw
+  XrVector3f mid0;   // two hands: midpoint, span and heading at the start
+  float span0 = 1.f, heading0 = 0.f;
+  std::chrono::steady_clock::time_point last;
+};
+Grab G;
+
+void locate_hands(XrTime time) {
+  for (int h = 0; h < 2; ++h) {
+    Hand& hand = G.hands[h];
+    hand.wasHeld = hand.held;
+    hand.valid = false;
+    if (!B.aimSpace[h] || !B.focused) {
+      hand.held = false;
+      continue;
+    }
+    XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+    constexpr XrSpaceLocationFlags kValid = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+    if (XR_SUCCEEDED(xrLocateSpace(B.aimSpace[h], B.space, time, &loc)) && (loc.locationFlags & kValid) == kValid) {
+      hand.valid = true;
+      hand.origin = loc.pose.position;
+      hand.dir = vnorm(qrot(loc.pose.orientation, {0.f, 0.f, -1.f}));
+    }
+    const float grip = action_float(B.grab[h]);
+    hand.held = hand.held ? grip > 0.35f : grip > 0.65f;
+  }
+}
+
+void end_grab() {
+  if (G.oneHand < 0 && !G.twoHands)
+    return;
+  G.oneHand = -1;
+  G.twoHands = false;
+  const ArenaPose a = arena_pose();
+  Log.info("Arena placed at {:.2f},{:.2f},{:.2f}, yaw {:.0f} deg, scale {:.4f}", a.pos.x, a.pos.y, a.pos.z,
+           a.yaw * 57.2958f, a.scale);
+}
+
+void begin_one_hand(int h, const ArenaPose& a) {
+  const Hand& hand = G.hands[h];
+  G.oneHand = h;
+  G.twoHands = false;
+  G.start = a;
+  G.dist = hand.hit;
+  G.offset = rot_y(a.pos - (hand.origin + hand.dir * hand.hit), -a.yaw);
+}
+
+void begin_two_hands(const ArenaPose& a) {
+  const XrVector3f l = G.hands[0].origin, r = G.hands[1].origin;
+  const XrVector3f span = r - l;
+  G.oneHand = -1;
+  G.twoHands = true;
+  G.start = a;
+  G.mid0 = (l + r) * 0.5f;
+  G.span0 = std::max(vlen(span), 0.05f);
+  G.heading0 = std::atan2(-span.z, span.x);
+}
+
+// Per display frame. `active`: a fight is paused and on the headset.
+void update_grab(bool active) {
+  const auto now = std::chrono::steady_clock::now();
+  const float dt = std::clamp(std::chrono::duration<float>(now - G.last).count(), 0.f, 0.1f);
+  G.last = now;
+  ArenaPose a = arena_pose();
+  for (Hand& hand : G.hands)
+    hand.hit = hand.valid ? hit_arena(a, hand.origin, hand.dir) : -1.f;
+  if (!active) {
+    end_grab();
+    return;
+  }
+  const auto pressed = [](const Hand& h) { return h.valid && h.held && !h.wasHeld; };
+  const auto released = [](const Hand& h) { return !h.valid || !h.held; };
+
+  if (G.twoHands) {
+    if (released(G.hands[0]) || released(G.hands[1]))
+      end_grab();
+  } else if (G.oneHand >= 0) {
+    if (released(G.hands[G.oneHand]))
+      end_grab();
+    else if (pressed(G.hands[1 - G.oneHand]))
+      begin_two_hands(a);
+  } else {
+    for (int h = 0; h < 2; ++h) {
+      if (pressed(G.hands[h]) && G.hands[h].hit >= 0.f) {
+        begin_one_hand(h, a);
+        break;
+      }
+    }
+  }
+
+  if (G.oneHand >= 0) {
+    const Hand& hand = G.hands[G.oneHand];
+    const XrVector3f point = hand.origin + hand.dir * G.dist;
+    // Ease the front of the stage (+Z) round to face the player.
+    const float facing = std::atan2(B.head.x - a.pos.x, B.head.z - a.pos.z);
+    a.yaw += wrap_angle(facing - a.yaw) * (1.f - std::exp(-dt * 12.f));
+    a.pos = point + rot_y(G.offset, a.yaw);
+    set_arena_pose(a);
+  } else if (G.twoHands) {
+    const XrVector3f span = G.hands[1].origin - G.hands[0].origin;
+    a.scale = std::clamp(G.start.scale * vlen(span) / G.span0, kMinArenaScale, kMaxArenaScale);
+    const float ratio = a.scale / G.start.scale;
+    const float turn = std::atan2(-span.z, span.x) - G.heading0;
+    a.yaw = G.start.yaw + turn;
+    a.pos = G.mid0 + rot_y((G.start.pos - G.mid0) * ratio, turn);
+    set_arena_pose(a);
+  }
+}
+
+// ---------------------------------------------------------------- XR thread: lasers
+
+// Fill a one-image swapchain once; the runtime keeps showing it.
+bool create_static_swapchain(XrSwapchain& out, uint32_t w, uint32_t h, const std::vector<uint8_t>& rgba) {
+  XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+  ci.createFlags = XR_SWAPCHAIN_CREATE_STATIC_IMAGE_BIT;
+  ci.usageFlags = XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+  ci.format = B.swapFormat;
+  ci.sampleCount = 1;
+  ci.width = w;
+  ci.height = h;
+  ci.faceCount = 1;
+  ci.arraySize = 1;
+  ci.mipCount = 1;
+  if (XR_FAILED(xrCreateSwapchain(B.session, &ci, &out))) {
+    ci.createFlags = 0;
+    XR_TRY(xrCreateSwapchain(B.session, &ci, &out));
+  }
+  uint32_t n = 0;
+  XR_TRY(xrEnumerateSwapchainImages(out, 0, &n, nullptr));
+  std::vector<XrSwapchainImageVulkan2KHR> imgs(n, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
+  XR_TRY(xrEnumerateSwapchainImages(out, n, &n, reinterpret_cast<XrSwapchainImageBaseHeader*>(imgs.data())));
+
+  VkBuffer buf = VK_NULL_HANDLE;
+  VkDeviceMemory mem = VK_NULL_HANDLE;
+  VkCommandBuffer cmd = VK_NULL_HANDLE;
+  VkFence fence = VK_NULL_HANDLE;
+  const auto upload = [&]() -> bool {
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size = rgba.size();
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    VK_TRY(vkCreateBuffer(B.dev, &bci, nullptr, &buf));
+    VkMemoryRequirements req;
+    vkGetBufferMemoryRequirements(B.dev, buf, &req);
+    VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    mai.allocationSize = req.size;
+    mai.memoryTypeIndex =
+        find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (mai.memoryTypeIndex == UINT32_MAX)
+      return false;
+    VK_TRY(vkAllocateMemory(B.dev, &mai, nullptr, &mem));
+    VK_TRY(vkBindBufferMemory(B.dev, buf, mem, 0));
+    void* p = nullptr;
+    VK_TRY(vkMapMemory(B.dev, mem, 0, rgba.size(), 0, &p));
+    std::memcpy(p, rgba.data(), rgba.size());
+    vkUnmapMemory(B.dev, mem);
+
+    uint32_t index = 0;
+    XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    XR_TRY(xrAcquireSwapchainImage(out, &ai, &index));
+    XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+    wi.timeout = XR_INFINITE_DURATION;
+    XR_TRY(xrWaitSwapchainImage(out, &wi));
+
+    VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    cai.commandPool = B.pool;
+    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cai.commandBufferCount = 1;
+    VK_TRY(vkAllocateCommandBuffers(B.dev, &cai, &cmd));
+    VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    VK_TRY(vkBeginCommandBuffer(cmd, &cbi));
+    VkImageMemoryBarrier bar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    bar.srcQueueFamilyIndex = bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.image = imgs[index].image;
+    bar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                         nullptr, 1, &bar);
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {w, h, 1};
+    vkCmdCopyBufferToImage(cmd, buf, imgs[index].image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    // The layout OpenXR expects a released color swapchain image in.
+    bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    bar.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    bar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    bar.dstAccessMask = 0;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0,
+                         nullptr, 1, &bar);
+    VK_TRY(vkEndCommandBuffer(cmd));
+    VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VK_TRY(vkCreateFence(B.dev, &fci, nullptr, &fence));
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &cmd;
+    VK_TRY(vkQueueSubmit(B.queue, 1, &si, fence));
+    VK_TRY(vkWaitForFences(B.dev, 1, &fence, VK_TRUE, UINT64_MAX));
+    XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    XR_TRY(xrReleaseSwapchainImage(out, &ri));
+    return true;
+  };
+  const bool ok = upload();
+  if (fence)
+    vkDestroyFence(B.dev, fence, nullptr);
+  if (cmd)
+    vkFreeCommandBuffers(B.dev, B.pool, 1, &cmd);
+  if (buf)
+    vkDestroyBuffer(B.dev, buf, nullptr);
+  if (mem)
+    vkFreeMemory(B.dev, mem, nullptr);
+  return ok;
+}
+
+constexpr uint32_t kBeamW = 16, kBeamH = 4, kDotSize = 64;
+
+// White, premultiplied, soft-edged: a beam (alpha across its width) and a
+// round dot. The lasers tint them per frame (color scale/bias layers).
+bool create_pointer_textures() {
+  const bool srgb = B.swapFormat == VK_FORMAT_R8G8B8A8_SRGB;
+  const auto texel = [srgb](std::vector<uint8_t>& px, size_t i, float alpha) {
+    alpha = std::clamp(alpha, 0.f, 1.f);
+    const float c = srgb ? (alpha <= 0.0031308f ? alpha * 12.92f : 1.055f * std::pow(alpha, 1.f / 2.4f) - 0.055f)
+                         : alpha;
+    px[i * 4 + 0] = px[i * 4 + 1] = px[i * 4 + 2] = static_cast<uint8_t>(std::lround(c * 255.f));
+    px[i * 4 + 3] = static_cast<uint8_t>(std::lround(alpha * 255.f));
+  };
+  std::vector<uint8_t> beam(kBeamW * kBeamH * 4);
+  for (uint32_t y = 0; y < kBeamH; ++y)
+    for (uint32_t x = 0; x < kBeamW; ++x) {
+      const float u = std::abs((x + 0.5f) / kBeamW * 2.f - 1.f);
+      texel(beam, y * kBeamW + x, 1.f - u * u);
+    }
+  std::vector<uint8_t> dot(kDotSize * kDotSize * 4);
+  for (uint32_t y = 0; y < kDotSize; ++y)
+    for (uint32_t x = 0; x < kDotSize; ++x) {
+      const float dx = (x + 0.5f) / kDotSize * 2.f - 1.f, dy = (y + 0.5f) / kDotSize * 2.f - 1.f;
+      const float r = std::sqrt(dx * dx + dy * dy);
+      texel(dot, y * kDotSize + x, std::clamp((1.f - r) / 0.2f, 0.f, 1.f));
+    }
+  return create_static_swapchain(B.beamSwapchain, kBeamW, kBeamH, beam) &&
+         create_static_swapchain(B.dotSwapchain, kDotSize, kDotSize, dot);
+}
+
+constexpr size_t kMaxPointerLayers = 4; // a beam and a dot per hand
+
+struct PointerLayers {
+  std::array<XrCompositionLayerQuad, kMaxPointerLayers> quads;
+  std::array<XrCompositionLayerColorScaleBiasKHR, kMaxPointerLayers> tints;
+  uint32_t count = 0;
+};
+
+void add_pointer_quad(PointerLayers& out, XrSwapchain swapchain, uint32_t w, uint32_t h, XrVector3f center,
+                      XrQuaternionf orientation, XrExtent2Df size, XrColor4f color) {
+  auto& q = out.quads[out.count];
+  q = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+  q.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+  q.space = B.space;
+  q.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+  q.subImage.swapchain = swapchain;
+  q.subImage.imageRect = {{0, 0}, {static_cast<int32_t>(w), static_cast<int32_t>(h)}};
+  q.pose = {orientation, center};
+  q.size = size;
+  if (B.hasColorScaleBias) {
+    auto& t = out.tints[out.count];
+    t = {XR_TYPE_COMPOSITION_LAYER_COLOR_SCALE_BIAS_KHR};
+    // Premultiplied: the color scales with the alpha.
+    t.colorScale = {color.r * color.a, color.g * color.a, color.b * color.a, color.a};
+    q.next = &t;
+  }
+  ++out.count;
+}
+
+void build_pointer_layers(PointerLayers& out) {
+  out.count = 0;
+  if (!B.beamSwapchain || !B.dotSwapchain)
+    return;
+  for (int h = 0; h < 2; ++h) {
+    const Hand& hand = G.hands[h];
+    if (!hand.valid)
+      continue;
+    const bool grabbing = G.oneHand == h || G.twoHands;
+    const float length = G.oneHand == h ? G.dist : hand.hit >= 0.f ? hand.hit : 1.f;
+    const XrColor4f color = grabbing         ? XrColor4f{1.f, 0.8f, 0.3f, 1.f}
+                            : hand.hit >= 0.f ? XrColor4f{0.45f, 0.85f, 1.f, 1.f}
+                                              : XrColor4f{0.85f, 0.9f, 1.f, 0.5f};
+    // The beam: a thin quad along the laser, turned about it to face the head.
+    const XrVector3f end = hand.origin + hand.dir * length;
+    const XrVector3f center = hand.origin + hand.dir * (length * 0.5f);
+    const XrVector3f toHead = B.head - center;
+    const XrVector3f z = vnorm(toHead - hand.dir * vdot(toHead, hand.dir));
+    if (vlen(z) > 0.5f)
+      add_pointer_quad(out, B.beamSwapchain, kBeamW, kBeamH, center,
+                       quat_from_axes(vcross(hand.dir, z), hand.dir, z), {0.004f, length}, color);
+    if (hand.hit < 0.f && G.oneHand != h)
+      continue;
+    // The dot where the laser meets the arena, facing the head.
+    const XrVector3f dz = vnorm(B.head - end);
+    const XrVector3f dx = vnorm(vcross({0.f, 1.f, 0.f}, dz));
+    if (vlen(dx) > 0.5f)
+      add_pointer_quad(out, B.dotSwapchain, kDotSize, kDotSize, end, quat_from_axes(dx, vcross(dz, dx), dz),
+                       {0.02f, 0.02f}, color);
+  }
 }
 
 bool render_xr_frame() {
@@ -1382,8 +1856,12 @@ bool render_xr_frame() {
   const auto& stereo = g_streams[kStereo];
   const auto& hud = g_streams[kHud];
   const bool fight = stereo.haveImage && now - stereo.lastCopy < std::chrono::milliseconds(250);
+  const bool pointing = fight && g_fightPaused && B.focused;
+  locate_hands(fs.predictedDisplayTime);
+  update_grab(pointing);
+  B.pointerMode = pointing;
 
-  std::array<const XrCompositionLayerBaseHeader*, 3> layers{};
+  std::array<const XrCompositionLayerBaseHeader*, 3 + kMaxPointerLayers> layers{};
   uint32_t layerCount = 0;
   XrCompositionLayerPassthroughFB ptLayer{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
   if (B.passthroughLayer) {
@@ -1395,6 +1873,7 @@ bool render_xr_frame() {
   XrCompositionLayerProjection proj{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
   XrCompositionLayerQuad hudQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
   XrCompositionLayerQuad screenQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+  PointerLayers pointers;
   if (fs.shouldRender && fight) {
     // Premultiplied alpha (no UNPREMULTIPLIED bit): the arena's coverage
     // hides the room, effects outside it add light over passthrough.
@@ -1412,18 +1891,26 @@ bool render_xr_frame() {
     proj.views = projViews.data();
     layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj);
     if (hud.haveImage && now - hud.lastCopy < std::chrono::milliseconds(250)) {
-      // The HUD floats above the arena's back edge, like a scoreboard.
-      const XrVector3f arena = arena_position();
-      const float width = env_float("AURORA_XR_HUD_WIDTH", 0.9f);
+      // The HUD floats above the arena's back edge, like a scoreboard, and
+      // moves, turns and scales with it.
+      const ArenaPose arena = arena_pose();
+      const float k = arena.scale / g_defaultArenaScale;
+      const float width = env_float("AURORA_XR_HUD_WIDTH", 0.9f) * k;
       hudQuad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
       hudQuad.space = B.space;
       hudQuad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
       hudQuad.subImage.swapchain = hud.swapchain;
       hudQuad.subImage.imageRect = {{0, 0}, {static_cast<int32_t>(hud.width), static_cast<int32_t>(hud.height)}};
-      hudQuad.pose.orientation.w = 1.f;
-      hudQuad.pose.position = {arena.x, arena.y + env_float("AURORA_XR_HUD_HEIGHT", 0.55f), arena.z - 0.15f};
+      hudQuad.pose.orientation = yaw_quat(arena.yaw);
+      hudQuad.pose.position =
+          arena.pos + rot_y({0.f, env_float("AURORA_XR_HUD_HEIGHT", 0.55f) * k, -0.15f * k}, arena.yaw);
       hudQuad.size = {width, width * static_cast<float>(hud.height) / static_cast<float>(hud.width)};
       layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&hudQuad);
+    }
+    if (pointing) {
+      build_pointer_layers(pointers);
+      for (uint32_t i = 0; i < pointers.count; ++i)
+        layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&pointers.quads[i]);
     }
     ++B.fightFrames;
   } else if (fs.shouldRender && g_streams[kScreen].haveImage) {
@@ -1523,6 +2010,8 @@ bool setup() {
   }
   if (!create_input())
     Log.warn("Controller input unavailable");
+  if (!create_pointer_textures())
+    Log.warn("Laser pointers unavailable");
   if (const char* dir = std::getenv("AURORA_XR_DUMP"); dir != nullptr && *dir != '\0')
     B.dumpDir = dir;
   // Not every exit path calls aurora::shutdown, so stop the XR thread from an
@@ -1571,6 +2060,16 @@ void teardown() {
     for (auto m : {B.copyVert, B.copyFrag})
       if (m)
         vkDestroyShaderModule(B.dev, m, nullptr);
+  }
+  for (auto& sp : B.aimSpace) {
+    if (sp)
+      xrDestroySpace(sp);
+    sp = XR_NULL_HANDLE;
+  }
+  for (XrSwapchain* sc : {&B.beamSwapchain, &B.dotSwapchain}) {
+    if (*sc)
+      xrDestroySwapchain(*sc);
+    *sc = XR_NULL_HANDLE;
   }
   if (B.actionSet)
     xrDestroyActionSet(B.actionSet); // destroys its actions too
@@ -1893,12 +2392,14 @@ Mat4 projection(const XrFovf& fov, float near) {
           0.f, 0.f, -1.f, 0.f};
 }
 
-// Game units -> meters in the starting head space (AURORA_XR_ARENA_SCALE,
-// default 0.006: Final Destination's ~170-unit stage is about 1 m wide).
+// Game units -> meters in the starting head space: T(pos) · R_y(yaw) ·
+// S(scale). The scale starts at AURORA_XR_ARENA_SCALE (default 0.006: Final
+// Destination's ~170-unit stage is about 1 m wide); the player can move,
+// turn and scale the arena during a pause.
 Mat4 arena_transform() {
-  const float s = env_float("AURORA_XR_ARENA_SCALE", 0.006f);
-  const XrVector3f p = arena_position();
-  return {s, 0.f, 0.f, p.x, 0.f, s, 0.f, p.y, 0.f, 0.f, s, p.z, 0.f, 0.f, 0.f, 1.f};
+  const ArenaPose a = arena_pose();
+  const float c = std::cos(a.yaw) * a.scale, s = std::sin(a.yaw) * a.scale;
+  return {c, 0.f, s, a.pos.x, 0.f, a.scale, 0.f, a.pos.y, -s, 0.f, c, a.pos.z, 0.f, 0.f, 0.f, 1.f};
 }
 
 constexpr char kComposeShader[] = R"(
@@ -2537,6 +3038,8 @@ extern "C" bool aurora_xr_get_pad(PADStatus* out) {
   *out = aurora::xr::g_pad;
   return true;
 }
+
+extern "C" void aurora_xr_set_paused(bool paused) { aurora::xr::g_fightPaused = paused; }
 
 extern "C" bool aurora_xr_pace(void) {
   using namespace aurora::xr;
