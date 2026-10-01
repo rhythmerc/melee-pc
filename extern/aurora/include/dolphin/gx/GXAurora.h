@@ -57,6 +57,13 @@ extern "C" {
  */
 #define GX_AURORA_DEBUG_MARKER_INSERT 0x0022
 
+/**
+ * XR draw category (aurora/xr.h, aurora_xr_camera).
+ * Followed by a u32 category, a u32 has-view flag and 12 u32 (f32 bits) of a
+ * row-major 3x4 view matrix.
+ */
+#define GX_AURORA_XR_CAMERA 0x0023
+
 #define GX_AURORA_LOAD_TEXOBJ 0x0030
 
 #define GX_AURORA_LOAD_TLUT 0x0031

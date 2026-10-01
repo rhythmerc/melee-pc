@@ -1,6 +1,13 @@
 # XR: 3D fights over passthrough (plan)
 
-Status: investigation and plan only. Nothing here is implemented yet.
+Status: the core is implemented. See docs/quest-xr.md, "3D fights", for
+what works and what's open. Notes added during implementation:
+
+- The default layer rule here was wrong. Layer 1 is part of the stage
+  itself (Final Destination's main platform is parts 1 and 3 on layer 1).
+  Only layer 2 is the far background. The default now hides only layer 2.
+- The 3D view is drawn per game frame with the latest predicted head pose.
+  Re-encoding at display rate (step 6) is still open.
 
 **Goal.** During a fight, the stage and fighters render in stereo 3D, anchored
 in the room over passthrough. The HUD sits on a flat plane. Stage backgrounds

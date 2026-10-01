@@ -17,6 +17,15 @@
 #include <vector>
 
 namespace aurora::gfx {
+
+// What the game said was being drawn (aurora_xr_camera), so the XR
+// presenter can re-draw the world for each eye and the HUD on its own plane.
+enum class XrCategory : uint8_t {
+  Mono = 0,  // only part of the normal frame
+  World = 1, // 3D fight geometry: also replayed per eye
+  Hud = 2,   // HUD: also replayed onto the HUD plane
+};
+
 using BindGroupRef = HashType;
 using PipelineRef = HashType;
 using SamplerRef = HashType;

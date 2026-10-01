@@ -1,3 +1,7 @@
+#ifdef AURORA_ENABLE_OPENXR
+#include <aurora/xr.h>
+#endif
+#include <bit>
 #include "dolphin/gx/GXAurora.h"
 
 #include <limits>
@@ -31,6 +35,19 @@ void GXInsertDebugMarker(const char* label) {
   GX_WRITE_AURORA(GX_AURORA_DEBUG_MARKER_INSERT);
   GXWriteString(label);
 }
+
+#ifdef AURORA_ENABLE_OPENXR
+// aurora/xr.h (C linkage, declared there). Through the FIFO, so the category lines up exactly with the
+// draws around it however the FIFO is processed.
+void aurora_xr_camera(int category, const float view[3][4]) {
+  GX_WRITE_AURORA(GX_AURORA_XR_CAMERA);
+  GX_WRITE_U32(static_cast<u32>(category));
+  GX_WRITE_U32(view != nullptr ? 1u : 0u);
+  for (int i = 0; i < 12; ++i) {
+    GX_WRITE_U32(view != nullptr ? std::bit_cast<u32>(view[i / 4][i % 4]) : 0u);
+  }
+}
+#endif
 
 void AuroraSetViewportPolicy(AuroraViewportPolicy policy) {
   aurora::gx::set_viewport_policy(policy);

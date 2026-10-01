@@ -5,6 +5,9 @@ extern "C" void browser_yield(void);
 extern "C" void browser_upload_pools(void* queue, const unsigned* entries, unsigned count);
 #endif
 #include "frame.hpp"
+#ifdef AURORA_ENABLE_OPENXR
+#include "xr_replay.hpp"
+#endif
 #include <aurora/gfx.h>
 #include <cstdlib>
 
@@ -779,6 +782,13 @@ void end_frame(EndFrameCallback callback) {
     g_stagingBuffers[stagingSlot].Unmap();
 #endif
     g_mappingStates[stagingSlot].store(BufferMapState::Unmapped, std::memory_order_release);
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+    // Every pass of this frame is encoded; the OpenXR presenter re-draws the
+    // world per eye and the HUD from the recorded commands before they go.
+    if (auto hook = xr_frame_hook(); hook != nullptr && packet.encoder) {
+      hook(packet.encoder, packet);
+    }
+#endif
     auto encoder = std::move(packet.encoder);
     const auto stats = packet.stats;
     auto afterSubmitCallbacks = std::move(packet.afterSubmitCallbacks);

@@ -43,10 +43,13 @@ enum class CommandType {
   Draw,
   CustomDraw,
   DebugMarker,
+  XrMarker, // category boundary (AURORA_ENABLE_OPENXR); no-op when encoded, blocks draw merging
 };
+
 
 struct Command {
   CommandType type;
+  XrCategory xrCategory = XrCategory::Mono;
 #ifdef AURORA_GFX_DEBUG_GROUPS
   std::vector<std::string> debugGroupStack;
 #endif
@@ -99,6 +102,7 @@ struct RenderPass {
   wgpu::StoreOp stencilStoreOp = wgpu::StoreOp::Undefined;
   uint32_t stencilClearValue = 0;
   CommandList commands;
+  wgpu::BindGroup xrBindGroup; // GX group 3 (AURORA_ENABLE_OPENXR); null: projection unchanged
   bool clearDepth = true;
   bool hasDepth = true;
   bool hasStencil = false;
@@ -204,6 +208,11 @@ struct FramePacket {
   size_t stagingBuffer = 0;
   StagingHighWater copied;
   AuroraStats stats{};
+  // AURORA_ENABLE_OPENXR: the world camera's view matrix (row-major 3x4,
+  // world -> game camera space) and which categories this frame recorded.
+  bool xrHasWorld = false;
+  bool xrHasHud = false;
+  std::array<float, 12> xrWorldView{};
 };
 
 } // namespace aurora::gfx::detail

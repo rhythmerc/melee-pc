@@ -110,4 +110,7 @@ void set_viewport(const Viewport& viewport) noexcept;
 void set_scissor(const ClipRect& scissor) noexcept;
 void push_debug_group(std::string label);
 void insert_debug_marker(std::string label);
+// AURORA_ENABLE_OPENXR: tag following commands; view3x4 (world camera only)
+// may be null to keep the frame's current view.
+void xr_set_category(XrCategory category, const float* view3x4);
 } // namespace aurora::gfx

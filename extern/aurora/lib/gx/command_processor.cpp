@@ -1,3 +1,4 @@
+#include <bit>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -818,6 +819,14 @@ void handle_aurora(ByteReader& reader) noexcept {
     g_gxState.texCopyDest = reinterpret_cast<const void*>(reader.read<u64>());
   } else if (subCmd == GX_AURORA_REQUEST_DEPTH_SNAPSHOT) {
     gfx::depth_peek::request_snapshot();
+  } else if (subCmd == GX_AURORA_XR_CAMERA) {
+    const u32 category = reader.read<u32>();
+    const bool hasView = reader.read<u32>() != 0;
+    std::array<float, 12> view{};
+    for (auto& v : view) {
+      v = std::bit_cast<float>(reader.read<u32>());
+    }
+    gfx::xr_set_category(static_cast<gfx::XrCategory>(category <= 2 ? category : 0), hasView ? view.data() : nullptr);
   } else if (subCmd == GX_AURORA_BEGIN_OFFSCREEN) {
     const u32 width = reader.read<u32>();
     const u32 height = reader.read<u32>();

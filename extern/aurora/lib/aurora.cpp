@@ -482,8 +482,12 @@ void end_frame() noexcept {
     }
     webgpu::gpu_prof::after_submit();
 #ifdef AURORA_ENABLE_OPENXR
-    if (presentToXr) {
+    // Hands every image begun this frame to the XR thread: the virtual
+    // screen, and the 3D views and HUD the frame hook drew for a fight.
+    if (xr::wanted()) {
       xr::end_frame();
+    }
+    if (presentToXr) {
       gfx::after_present();
     } else
 #endif

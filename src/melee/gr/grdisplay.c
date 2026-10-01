@@ -1,3 +1,6 @@
+#ifdef TARGET_PC
+#include "pc/xr_scene.h"
+#endif
 #include "grdisplay.h"
 
 #include <melee/lb/forward.h>
@@ -108,6 +111,12 @@ void grDisplay_801C5DB0(HSD_GObj* gobj, intptr_t code)
         }
 
         if (Camera_80030A78() == false && Camera_80030AC4() != false) {
+#ifdef TARGET_PC
+            /* XR build: background layers stay out of the 3D view unless
+             * listed (pc/xr_scene.c). */
+            const bool xr_hidden = pc_xr_stage_part_begin(
+                stage_info.grkind, gp->map_id, gp->x11_flags.b012);
+#endif
             if (gp->x10_flags.b2 == 0) {
                 HSD_FogSet(0);
             }
@@ -137,6 +146,9 @@ void grDisplay_801C5DB0(HSD_GObj* gobj, intptr_t code)
                     }
                 }
             }
+#ifdef TARGET_PC
+            pc_xr_stage_part_end(xr_hidden);
+#endif
         }
     }
 }

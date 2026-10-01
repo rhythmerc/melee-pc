@@ -26,6 +26,61 @@ It's a hybrid app, following Meta's
 XR is off in the panel's process, so the launcher renders to its window as
 on a phone.
 
+## 3D fights
+
+During a fight, the stage and fighters are drawn in stereo 3D on a tabletop
+arena over passthrough. The HUD floats above it. Everything else (menus,
+character and stage select, results) stays on the virtual screen. The plan
+and the investigation behind it are in docs/xr-3d-plan.md.
+
+- **Tagging.** The game tags what it draws (`src/pc/xr_scene.c`):
+  - The fight camera (`cm/camera.c`, `fn_800301D0`) tags world draws.
+  - The HUD camera (`if/ifall.c`) tags HUD draws.
+  - Everything else is mono, meaning it's only in the normal frame.
+
+  The tags travel through the GX FIFO (`aurora_xr_camera`,
+  `GX_AURORA_XR_CAMERA`), so they line up with the draws, and each recorded
+  command keeps its category.
+- **Stereo replay.** Each frame the normal flat frame renders as before. It
+  still feeds the Pokémon Stadium screen and other framebuffer copies.
+  Then `lib/xr` replays the world draws once per eye (`gfx/xr_replay.hpp`).
+  GX bind group 3 swaps the game's projection for
+  `P_eye · V_eye · A · V_game⁻¹`: undo the game camera, place the arena in
+  the room, then look from the eye. Lighting, skinning, and projected
+  shadows are unchanged.
+- **Passthrough compositing.** Both eyes go side by side into one shared
+  image, submitted as a projection layer with the poses they were rendered
+  for. Alpha is depth coverage, with premultiplied blending:
+  - Geometry hides the room.
+  - Translucent parts that write no depth add light over it, like
+    holograms.
+- **HUD.** HUD draws are replayed onto their own plane above the arena.
+  Bright text and icons are opaque, and black areas are see-through.
+- **Stage backgrounds.** Stage parts on layer 2, the far background, are
+  left out of the 3D view, with per-stage exceptions (`xr_scene.c`). Pokémon
+  Stadium's big screen (`map_id` 1) is always shown. Layers 0 and 1 are the
+  stage itself.
+
+Checked on desktop against Monado (`AURORA_XR_DUMP` images):
+- **Final Destination** (VS boot scene) and **Battlefield** (training boot
+  scene) render in 3D at 60 frames per second.
+- **The title screen** stays on the virtual screen.
+
+Not yet run on a headset.
+
+### Known gaps in 3D
+
+- **Background sparkles.** They're effects drawn under the fight camera, so
+  some still show, for example Battlefield's twinkles and Final Destination's
+  stars.
+- **Fog** still uses the eye's depth instead of the game camera's.
+- **Billboards and particles** face the game camera, not the eye.
+- **Frame rate.** The 3D view updates at the game's 60 Hz with the latest
+  head pose. Re-encoding the last frame per display frame isn't done yet.
+- **Placement.** The arena is fixed in the starting head space. There's no
+  grab-to-move or table anchoring.
+- **Coverage.** Only the static stages have been looked at.
+
 ## How the frame gets to the headset
 
 Dawn can't adopt a Vulkan device someone else created and doesn't expose its
@@ -95,7 +150,17 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_SCREEN_DISTANCE` | 1.5 | Meters in front of the starting head position |
 | `AURORA_XR_SCREEN_Y` | 0 | Height offset in meters |
 | `AURORA_XR_SCREEN_HEIGHT` | 1080 | Screen texture height in pixels |
-| `AURORA_XR_DEBUG` | 0 | Log a centre pixel every 300 frames |
+| `AURORA_XR_3D` | 1 | 3D fights. Set 0 to keep fights on the virtual screen |
+| `AURORA_XR_EYE_SCALE` | 1.0 | Eye resolution, as a fraction of the runtime's recommendation |
+| `AURORA_XR_ARENA_SCALE` | 0.006 | Meters per game unit |
+| `AURORA_XR_ARENA_POS` | `0,-0.45,-1.0` | Arena center, in meters, in the starting head space |
+| `AURORA_XR_HUD_WIDTH` | 0.9 | HUD plane width in meters |
+| `AURORA_XR_HUD_HEIGHT` | 0.55 | HUD plane height above the arena in meters |
+| `AURORA_XR_HUD_BACKDROP` | 0 | Minimum HUD alpha, as a translucent panel behind it |
+| `AURORA_XR_DUMP` | unset | Directory to write each stream's image once (PPM, plus alpha as PGM) |
+| `MELEE_XR_STAGE_LAYERS` | `0xB` | Stage layers shown in 3D, as a bitmask |
+| `MELEE_XR_PARTS` | unset | Per-part overrides, e.g. `16:1,-36:6` (`stage:map_id`) |
+| `MELEE_XR_STAGE_LOG` | unset | Log each stage part's id and layer once |
 
 ## Measured (Quest 3, 72 Hz)
 

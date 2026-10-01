@@ -88,6 +88,14 @@ static_assert(std::has_unique_object_representations_v<DrawImmediateData>);
 static_assert(sizeof(DrawImmediateData) == 64);
 
 extern wgpu::BindGroup g_emptyTextureBindGroup;
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+// GX bind group 3: per-pass projection override for XR eye replays
+// (struct XrEye in the shader: mat4x4f m, vec4u enabled). The disabled
+// group leaves every draw on the game's own projection.
+constexpr uint64_t XrEyeUniformSize = 80;
+extern wgpu::BindGroupLayout g_xrEyeBindGroupLayout;
+extern wgpu::BindGroup g_xrDisabledBindGroup;
+#endif
 
 template <typename Arg, Arg Default>
 struct TevPass {

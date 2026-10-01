@@ -1,4 +1,7 @@
 #include "encoding.hpp"
+#ifdef AURORA_ENABLE_OPENXR
+#include "xr_replay.hpp"
+#endif
 
 #include "frame.hpp"
 
@@ -119,6 +122,10 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
   // Bind bind group for the whole pass
   pass.SetBindGroup(0, resources().staticBindGroup);
   pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+  const wgpu::BindGroup& xrGroup = passInfo.xrBindGroup ? passInfo.xrBindGroup : gx::g_xrDisabledBindGroup;
+  pass.SetBindGroup(3, xrGroup);
+#endif
 
   for (auto& cmd : passInfo.commands) {
 #ifdef AURORA_GFX_DEBUG_GROUPS
@@ -163,6 +170,9 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
       g_currentPipeline = UINTPTR_MAX;
       pass.SetBindGroup(0, resources().staticBindGroup);
       pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+      pass.SetBindGroup(3, xrGroup);
+#endif
       if (hasViewport) {
         apply_viewport(pass, currentViewport);
       }
@@ -175,6 +185,8 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
       pass.InsertDebugMarker(wgpu::StringView(frame.debugMarkers[cmd.data.debugMarkerIndex]));
 #endif
     } break;
+    case CommandType::XrMarker:
+      break;
     }
   }
 
@@ -449,4 +461,111 @@ bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass) {
   g_currentPipeline = ref;
   return true;
 }
+
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+namespace {
+XrFrameHook g_xrFrameHook = nullptr;
+
+bool same_formats(const RenderTargetLayout& a, const RenderTargetLayout& b) {
+  if (a.colorAttachmentCount != b.colorAttachmentCount || a.depthStencilFormat != b.depthStencilFormat ||
+      a.sampleCount != b.sampleCount) {
+    return false;
+  }
+  for (uint32_t i = 0; i < a.colorAttachmentCount; ++i) {
+    if (a.colorAttachments[i].format != b.colorAttachments[i].format) {
+      return false;
+    }
+  }
+  return true;
+}
+} // namespace
+
+void set_xr_frame_hook(XrFrameHook hook) noexcept { g_xrFrameHook = hook; }
+XrFrameHook xr_frame_hook() noexcept { return g_xrFrameHook; }
+
+void encode_xr_replay(const wgpu::CommandEncoder& cmd, FramePacket& frame, XrCategory category,
+                      const XrReplayTarget& target) {
+  ZoneScoped;
+  std::array<wgpu::RenderPassColorAttachment, MaxColorAttachments> attachments{};
+  for (uint32_t i = 0; i < target.layout.colorAttachmentCount; ++i) {
+    attachments[i] = {
+        .view = target.colorViews[i],
+        .resolveTarget = target.resolveViews[i],
+        .loadOp = wgpu::LoadOp::Clear,
+        .storeOp = wgpu::StoreOp::Store,
+        .clearValue = i == SceneColorAttachmentIndex ? target.clearColor : wgpu::Color{0, 0, 0, 0},
+    };
+  }
+  const wgpu::RenderPassDepthStencilAttachment depth{
+      .view = target.depthView,
+      .depthLoadOp = wgpu::LoadOp::Clear,
+      .depthStoreOp = wgpu::StoreOp::Store,
+      .depthClearValue = target.clearDepth,
+  };
+  const wgpu::RenderPassDescriptor desc{
+      .label = category == XrCategory::World ? "XR eye replay" : "XR HUD replay",
+      .colorAttachmentCount = target.layout.colorAttachmentCount,
+      .colorAttachments = attachments.data(),
+      .depthStencilAttachment = &depth,
+  };
+  auto pass = cmd.BeginRenderPass(&desc);
+  g_currentPipeline = UINTPTR_MAX;
+  pass.SetBindGroup(0, resources().staticBindGroup);
+  pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
+  pass.SetBindGroup(3, target.xrBindGroup ? target.xrBindGroup : gx::g_xrDisabledBindGroup);
+
+  // Draw encoders only read the scene attachment's size from the pass info.
+  RenderPass info;
+  info.colorAttachmentCount = target.layout.colorAttachmentCount;
+  info.colorAttachments[SceneColorAttachmentIndex].size = target.size;
+  info.msaaSamples = target.layout.sampleCount;
+
+  const float w = static_cast<float>(target.size.width);
+  const float h = static_cast<float>(target.size.height);
+  if (target.fullViewport) {
+    pass.SetViewport(0.f, 0.f, w, h, 0.f, 1.f);
+    pass.SetScissorRect(0, 0, target.size.width, target.size.height);
+  }
+  for (auto& src : frame.renderPasses) {
+    if (!src.sealed || src.discardable || !same_formats(src.target_layout(), target.layout)) {
+      continue;
+    }
+    const auto& srcSize = src.colorAttachments[SceneColorAttachmentIndex].size;
+    const float sx = srcSize.width != 0 ? w / static_cast<float>(srcSize.width) : 1.f;
+    const float sy = srcSize.height != 0 ? h / static_cast<float>(srcSize.height) : 1.f;
+    for (auto& c : src.commands) {
+      switch (c.type) {
+      case CommandType::SetViewport:
+        if (!target.fullViewport) {
+          auto vp = c.data.setViewport;
+          vp.left *= sx;
+          vp.top *= sy;
+          vp.width *= sx;
+          vp.height *= sy;
+          apply_viewport(pass, vp);
+        }
+        break;
+      case CommandType::SetScissor:
+        if (!target.fullViewport) {
+          auto sc = c.data.setScissor;
+          sc.x = static_cast<int32_t>(static_cast<float>(sc.x) * sx);
+          sc.y = static_cast<int32_t>(static_cast<float>(sc.y) * sy);
+          sc.width = static_cast<int32_t>(static_cast<float>(sc.width) * sx);
+          sc.height = static_cast<int32_t>(static_cast<float>(sc.height) * sy);
+          apply_scissor(pass, sc, target.size);
+        }
+        break;
+      case CommandType::Draw:
+        if (c.xrCategory == category && c.data.draw.encoder != nullptr) {
+          c.data.draw.encoder(c.data.draw.payload.data(), pass, info);
+        }
+        break;
+      default:
+        break; // custom draws (clears, copies), markers
+      }
+    }
+  }
+  pass.End();
+}
+#endif
 } // namespace aurora::gfx

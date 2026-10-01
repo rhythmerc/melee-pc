@@ -1,3 +1,4 @@
+#include <cstring>
 #include "gx.hpp"
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -35,6 +36,10 @@ using webgpu::g_graphicsConfig;
 
 GXState g_gxState{};
 wgpu::BindGroup g_emptyTextureBindGroup;
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+wgpu::BindGroupLayout g_xrEyeBindGroupLayout;
+wgpu::BindGroup g_xrDisabledBindGroup;
+#endif
 
 namespace {
 wgpu::Sampler sEmptySampler;
@@ -620,6 +625,38 @@ void initialize() noexcept {
     };
     g_emptyTextureBindGroup = g_device.CreateBindGroup(&desc);
   }
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+  {
+    const wgpu::BindGroupLayoutEntry entry{
+        .binding = 0,
+        .visibility = wgpu::ShaderStage::Vertex,
+        .buffer = {.type = wgpu::BufferBindingType::Uniform, .minBindingSize = XrEyeUniformSize},
+    };
+    const wgpu::BindGroupLayoutDescriptor layoutDesc{
+        .label = "GX XR Eye Bind Group Layout",
+        .entryCount = 1,
+        .entries = &entry,
+    };
+    g_xrEyeBindGroupLayout = g_device.CreateBindGroupLayout(&layoutDesc);
+    const wgpu::BufferDescriptor bufDesc{
+        .label = "GX XR Eye Disabled",
+        .usage = wgpu::BufferUsage::Uniform,
+        .size = XrEyeUniformSize,
+        .mappedAtCreation = true,
+    };
+    auto buffer = g_device.CreateBuffer(&bufDesc);
+    std::memset(buffer.GetMappedRange(), 0, XrEyeUniformSize); // enabled = 0
+    buffer.Unmap();
+    const wgpu::BindGroupEntry bgEntry{.binding = 0, .buffer = buffer, .size = XrEyeUniformSize};
+    const wgpu::BindGroupDescriptor bgDesc{
+        .label = "GX XR Eye Disabled",
+        .layout = g_xrEyeBindGroupLayout,
+        .entryCount = 1,
+        .entries = &bgEntry,
+    };
+    g_xrDisabledBindGroup = g_device.CreateBindGroup(&bgDesc);
+  }
+#endif
   {
     const std::array layouts{
         gfx::detail::resources().staticBindGroupLayout,
@@ -627,6 +664,8 @@ void initialize() noexcept {
         sTextureBindGroupLayout,
 #ifdef __EMSCRIPTEN__
         gfx::detail::resources().uniformBindGroupLayout,
+#elif defined(AURORA_ENABLE_OPENXR)
+        g_xrEyeBindGroupLayout,
 #endif
     };
     const wgpu::PipelineLayoutDescriptor desc{
@@ -642,6 +681,10 @@ void initialize() noexcept {
 }
 
 void shutdown() noexcept {
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+  g_xrDisabledBindGroup = {};
+  g_xrEyeBindGroupLayout = {};
+#endif
 #ifdef __EMSCRIPTEN__
   sBrowserPipelines.clear();
 #endif

@@ -54,6 +54,7 @@ struct FrameRecorder {
   ClipRect cachedScissor;
   bool suppressRenderWorker = false;
   bool normalRequested = false;
+  XrCategory xrCategory = XrCategory::Mono;
 #ifdef AURORA_GFX_DEBUG_GROUPS
   std::vector<std::string> debugGroupStack;
 #endif
@@ -326,6 +327,7 @@ void push_command(CommandType type, const Command::Data& data) {
   }
   renderPass.commands.push_back({
       .type = type,
+      .xrCategory = g_recorder.xrCategory,
 #ifdef AURORA_GFX_DEBUG_GROUPS
       .debugGroupStack = g_recorder.debugGroupStack,
 #endif
@@ -573,6 +575,9 @@ void begin_recording(FramePacket& packet, size_t frameSlot) {
   g_recorder.drawCallCount = 0;
   g_recorder.mergedDrawCallCount = 0;
   g_recorder.suspendedEfbPass.reset();
+  g_recorder.xrCategory = XrCategory::Mono;
+  packet.xrHasWorld = false;
+  packet.xrHasHud = false;
 
   current_render_passes().emplace_back();
   auto& pass = current_render_passes()[0];
@@ -1215,6 +1220,29 @@ Range push_texture_data(const uint8_t* data, u32 bytesPerRow, u32 rowsPerImage) 
 
 uint32_t align_uniform(uint32_t value) {
   return AURORA_ALIGN(value, detail::resources().limits.minUniformBufferOffsetAlignment);
+}
+
+void xr_set_category(XrCategory category, const float* view3x4) {
+  if (!g_recorder.active()) {
+    return;
+  }
+  if (category != g_recorder.xrCategory) {
+    g_recorder.xrCategory = category;
+    // A non-draw command between draws keeps them from merging across the
+    // boundary (get_last_draw_command only merges into a trailing draw).
+    if (g_recorder.currentRenderPass != UINT32_MAX) {
+      push_command(CommandType::XrMarker, Command::Data{});
+    }
+  }
+  auto& frame = g_recorder.frame();
+  if (category == XrCategory::World) {
+    frame.xrHasWorld = true;
+    if (view3x4 != nullptr) {
+      std::copy_n(view3x4, 12, frame.xrWorldView.begin());
+    }
+  } else if (category == XrCategory::Hud) {
+    frame.xrHasHud = true;
+  }
 }
 
 void insert_debug_marker(std::string label) {

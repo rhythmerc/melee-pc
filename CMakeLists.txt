@@ -203,6 +203,7 @@ set(PC_SOURCES
         src/pc/touch.c
         src/pc/vi.c
         src/pc/widescreen.c
+        src/pc/xr_scene.c
         src/pc/windows_arm64_softfp.c
         src/pc/android_compat.cpp
         src/pc/file_cache.cpp

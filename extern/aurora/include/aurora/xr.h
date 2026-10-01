@@ -18,6 +18,18 @@ extern "C" {
  * *out is left untouched. Safe to call from any thread. */
 bool aurora_xr_get_pad(PADStatus* out);
 
+/* Draw categories for 3D fights (docs/xr-3d-plan.md). Everything drawn after
+ * this call, until the next one, is tagged with the category.
+ *   AURORA_XR_MONO   only the normal flat frame (the default every frame)
+ *   AURORA_XR_WORLD  fight geometry, re-drawn per eye in 3D. Pass the world
+ *                    camera's view matrix (world -> camera, GX Mtx layout);
+ *                    NULL keeps the frame's current one.
+ *   AURORA_XR_HUD    HUD, re-drawn onto its own flat plane
+ * Call from the thread that issues GX commands. No-op unless an XR session
+ * is presenting. */
+enum { AURORA_XR_MONO = 0, AURORA_XR_WORLD = 1, AURORA_XR_HUD = 2 };
+void aurora_xr_camera(int category, const float view[3][4]);
+
 #ifdef __cplusplus
 }
 #endif

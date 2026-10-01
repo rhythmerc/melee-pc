@@ -1,3 +1,6 @@
+#ifdef TARGET_PC
+#include "pc/xr_scene.h"
+#endif
 #include "camera.h"
 
 #include <Runtime/platform.h>
@@ -4033,6 +4036,10 @@ static void fn_800301D0(HSD_GObj* gobj, intptr_t arg1)
     Camera_8002A4AC(gobj);
     lbShadow_8000F38C(game_camera.x399_b7);
     if (HSD_CObjSetCurrent(cobj) != 0) {
+#ifdef TARGET_PC
+        /* XR build: everything this camera draws is the 3D fight. */
+        pc_xr_world_camera((const float(*)[4]) cobj->view_mtx);
+#endif
         if (!game_camera.x398_b5) {
             HSD_SetEraseColor(game_camera.background_color.r,
                               game_camera.background_color.g,
@@ -4082,6 +4089,9 @@ static void fn_800301D0(HSD_GObj* gobj, intptr_t arg1)
             }
         }
         HSD_CObjEndCurrent();
+#ifdef TARGET_PC
+        pc_xr_mono_camera();
+#endif
     }
 }
 

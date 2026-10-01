@@ -1,3 +1,6 @@
+#ifdef TARGET_PC
+#include "pc/xr_scene.h"
+#endif
 #include "ifall.h"
 
 #include "if_2F6E.h"
@@ -175,8 +178,14 @@ static void fn_802F36B8(HSD_GObj* gobj, intptr_t unused)
 {
     if (!ifAll_IsHUDHidden()) {
         if (HSD_CObjSetCurrent(GET_COBJ(gobj))) {
+#ifdef TARGET_PC
+            pc_xr_hud_camera(); /* XR build: drawn onto the HUD plane too */
+#endif
             HSD_GObj_80390ED0(gobj, 0x7);
             HSD_CObjEndCurrent();
+#ifdef TARGET_PC
+            pc_xr_mono_camera();
+#endif
         }
     }
 }

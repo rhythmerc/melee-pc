@@ -2119,6 +2119,31 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}{11}
     Log.info("Generated shader (hash {:x}): {}", hash, shaderSource);
   }
 
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+  // XR eye replays (lib/xr): group 3 can replace the game's projection with
+  // a per-eye matrix taking game camera space straight to the eye's clip
+  // space. Disabled (the default bind group) it is the game's projection.
+  {
+    const std::string anchor = "var<uniform> ubuf: Uniform;";
+    if (auto at = shaderSource.find(anchor); at != std::string::npos) {
+      shaderSource.insert(at + anchor.size(),
+                          "\nstruct XrEye { m: mat4x4f, enabled: vec4u };"
+                          "\n@group(3) @binding(0)\nvar<uniform> xr: XrEye;"
+                          "\nfn gx_proj(p: vec3f) -> vec4f {"
+                          "\n    if (xr.enabled.x != 0u) { return vec4f(p, 1.0) * xr.m; }"
+                          "\n    return vec4f(p, 1.0) * ubuf.proj;"
+                          "\n}");
+    }
+    for (const std::string_view var : {"mv_pos_a", "mv_pos_b", "mv_pos"}) {
+      const std::string from = fmt::format("vec4f({}, 1.0) * ubuf.proj", var);
+      const std::string to = fmt::format("gx_proj({})", var);
+      for (size_t at = shaderSource.find(from); at != std::string::npos; at = shaderSource.find(from, at)) {
+        shaderSource.replace(at, from.size(), to);
+        at += to.size();
+      }
+    }
+  }
+#endif
 #ifdef __EMSCRIPTEN__
   const std::string needle="var<immediate> imm: Immediate;";
   if(auto at=shaderSource.find(needle);at!=std::string::npos)
