@@ -106,17 +106,18 @@ compiled, its draw is skipped. This needs the Dawn fork's multiview
 `AURORA_XR_MULTIVIEW=0` goes back to replaying the eyes side by side, as
 does MSAA.
 
-On a Quest 3 (2026-10-01), Temple with 4 CPU players:
+On a Quest 3 (2026-10-01), Temple with 4 CPU players. Both runs are the
+same unattended launch at the default arena scale, with only
+`AURORA_XR_MULTIVIEW` changed:
 
 | | Two passes | Multiview |
 |---|---|---|
 | World draws per frame | ~840 | ~420 |
-| 3D eye pass | 12.5 to 13.5 ms | 10.7 to 12 ms |
+| 3D eye pass | 14.5 to 15.3 ms | 10.4 to 10.7 ms (steady state) |
+| Display | 76 to 85 of 120 fps | 94 to 102 of 120 fps |
 
-Halving the draws saved only 10 to 15%. On this GPU the cost of a world
-draw is per view (vertex and rasterization work), not draw overhead, and
-resolution barely changes it (17 to 21 µs per draw per eye at both 0.7 and
-1.0 scale).
+That's about 30% off the eye pass. An earlier hand-played run had the stage
+shrunk to minimum size, so it isn't comparable.
 
 ### Placing the arena
 
