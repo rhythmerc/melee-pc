@@ -5,6 +5,9 @@
  * loop. Melee waits in HSD_VIWaitXFBFlush -> VIWaitForRetrace once per frame,
  * so VIWaitForRetrace is the frame boundary.
  */
+#ifdef AURORA_ENABLE_OPENXR
+#include <aurora/xr.h>
+#endif
 #include <aurora/aurora.h>
 #include <aurora/event.h>
 #include <aurora/gfx.h>
@@ -252,6 +255,15 @@ void pc_frame_boundary(void) {
      * sync then took seconds to close (pc_net_catch_up_ns). */
     u64 late = next_sim_ns != 0 && now > next_sim_ns ? now - next_sim_ns : 0;
     late = pc_net_active() ? pc_net_catch_up_ns(late) : late > sim_period * 2 ? 0 : late;
+#ifdef AURORA_ENABLE_OPENXR
+    /* XR build: when the headset runs at a multiple of 60 Hz, take the frame
+     * cadence from it, so each game frame is shown for the same number of
+     * display frames (a free-running timer drifts against the display and
+     * repeats frames unevenly). Netplay keeps its own clock. */
+    if (!pc_net_active() && aurora_xr_pace()) {
+        next_sim_ns = SDL_GetTicksNS();
+    } else
+#endif
     if (next_sim_ns == 0 || now > next_sim_ns) {
         next_sim_ns = now - late;
     } else if (now < next_sim_ns) {

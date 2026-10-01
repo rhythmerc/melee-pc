@@ -33,6 +33,11 @@ void add_required_features(const wgpu::Adapter& adapter, std::vector<wgpu::Featu
 // True once the session is up and frames go to the headset.
 bool active() noexcept;
 
+// Render worker: true when this frame's 3D views went to the headset and the
+// flat present (window or virtual screen) should be skipped. Nothing shows the
+// virtual screen during a fight; AURORA_XR_FIGHT_SCREEN=1 keeps it.
+bool skip_present() noexcept;
+
 // Size of the virtual screen's texture. Fixed on the first call from the
 // aspect the game is presented at (4:3, or 16:9 in widescreen), with a
 // height of AURORA_XR_SCREEN_HEIGHT (default 1080): roughly what a 1.6 m

@@ -357,10 +357,15 @@ void end_frame() noexcept {
     wgpu::TextureView currentView;
     auto surfaceStatus = wgpu::SurfaceGetCurrentTextureStatus::Error;
     bool presentToXr = false;
+    bool skipPresent = false;
 #ifdef AURORA_ENABLE_OPENXR
     // The frame goes to the headset's virtual screen instead of the window
     // when an OpenXR session is up; xr::begin_frame returns null otherwise.
-    if (xr::wanted()) {
+    // During a 3D fight nothing shows the flat frame, so it is not presented
+    // at all.
+    if (xr::wanted() && xr::skip_present()) {
+      skipPresent = true;
+    } else if (xr::wanted()) {
       uint32_t xrWidth = 0, xrHeight = 0;
       xr::screen_size(contentWidth, contentHeight, xrWidth, xrHeight);
       currentTexture = xr::begin_frame(xrWidth, xrHeight);
@@ -370,7 +375,7 @@ void end_frame() noexcept {
       }
     }
 #endif
-    if (!presentToXr) {
+    if (!presentToXr && !skipPresent) {
       window::SurfaceLock surfaceLock;
       if (window::is_presentable() && g_surface) {
         ZoneScopedN("Acquire texture");
@@ -470,7 +475,7 @@ void end_frame() noexcept {
         imgui::render(pass, imguiDrawData);
         pass.End();
       }
-    } else {
+    } else if (!skipPresent) {
       Log.info("Skipping present; no usable surface texture ({})", magic_enum::enum_name(surfaceStatus));
     }
     webgpu::gpu_prof::frame_end(encoder);
@@ -487,7 +492,7 @@ void end_frame() noexcept {
     if (xr::wanted()) {
       xr::end_frame();
     }
-    if (presentToXr) {
+    if (presentToXr || skipPresent) {
       gfx::after_present();
     } else
 #endif

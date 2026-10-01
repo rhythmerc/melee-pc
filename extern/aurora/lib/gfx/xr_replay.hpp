@@ -11,6 +11,14 @@
 
 namespace aurora::gfx {
 
+// One replay of the frame's draws within the pass: its GX bind group 3 (the
+// projection; null = the game's own) and, for fullViewport targets, the
+// rectangle it draws into (zero size = the whole target).
+struct XrReplayView {
+  wgpu::BindGroup xrBindGroup;
+  float x = 0.f, y = 0.f, width = 0.f, height = 0.f;
+};
+
 struct XrReplayTarget {
   RenderTargetLayout layout; // scene_render_target_layout(), any size
   wgpu::Extent3D size;
@@ -19,10 +27,18 @@ struct XrReplayTarget {
   wgpu::TextureView depthView;
   wgpu::Color clearColor{0, 0, 0, 0};
   float clearDepth = 0.f;
-  // World: one viewport covering the whole target, game viewports ignored.
+  wgpu::StoreOp depthStore = wgpu::StoreOp::Store; // Discard when nothing reads it after
+  // World: each view's rectangle, game viewports ignored.
   // HUD: the game's viewports and scissors, scaled to the target.
   bool fullViewport = true;
-  wgpu::BindGroup xrBindGroup; // null: the game's projection
+  // The draws are replayed once per view, all in one render pass (both eyes
+  // side by side in one image keep everything in tile memory).
+  std::array<XrReplayView, 2> views{};
+  uint32_t viewCount = 1;
+  // Runs inside the pass after the replays (e.g. coverage-to-alpha draws).
+  void (*finish)(const wgpu::RenderPassEncoder& pass, void* user) = nullptr;
+  void* finishUser = nullptr;
+  const wgpu::PassTimestampWrites* timestampWrites = nullptr; // XR GPU timing
 };
 
 // Render worker only. Encodes the frame's draws tagged `category`, in

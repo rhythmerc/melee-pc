@@ -499,7 +499,7 @@ void encode_xr_replay(const wgpu::CommandEncoder& cmd, FramePacket& frame, XrCat
   const wgpu::RenderPassDepthStencilAttachment depth{
       .view = target.depthView,
       .depthLoadOp = wgpu::LoadOp::Clear,
-      .depthStoreOp = wgpu::StoreOp::Store,
+      .depthStoreOp = target.depthStore,
       .depthClearValue = target.clearDepth,
   };
   const wgpu::RenderPassDescriptor desc{
@@ -507,12 +507,12 @@ void encode_xr_replay(const wgpu::CommandEncoder& cmd, FramePacket& frame, XrCat
       .colorAttachmentCount = target.layout.colorAttachmentCount,
       .colorAttachments = attachments.data(),
       .depthStencilAttachment = &depth,
+      .timestampWrites = target.timestampWrites,
   };
   auto pass = cmd.BeginRenderPass(&desc);
   g_currentPipeline = UINTPTR_MAX;
   pass.SetBindGroup(0, resources().staticBindGroup);
   pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
-  pass.SetBindGroup(3, target.xrBindGroup ? target.xrBindGroup : gx::g_xrDisabledBindGroup);
 
   // Draw encoders only read the scene attachment's size from the pass info.
   RenderPass info;
@@ -522,48 +522,61 @@ void encode_xr_replay(const wgpu::CommandEncoder& cmd, FramePacket& frame, XrCat
 
   const float w = static_cast<float>(target.size.width);
   const float h = static_cast<float>(target.size.height);
-  if (target.fullViewport) {
-    pass.SetViewport(0.f, 0.f, w, h, 0.f, 1.f);
-    pass.SetScissorRect(0, 0, target.size.width, target.size.height);
-  }
-  for (auto& src : frame.renderPasses) {
-    if (!src.sealed || src.discardable || !same_formats(src.target_layout(), target.layout)) {
-      continue;
+  for (uint32_t v = 0; v < std::max(target.viewCount, 1u); ++v) {
+    const auto& view = target.views[v];
+    pass.SetBindGroup(3, view.xrBindGroup ? view.xrBindGroup : gx::g_xrDisabledBindGroup);
+    if (target.fullViewport) {
+      const bool whole = view.width <= 0.f || view.height <= 0.f;
+      const float vx = whole ? 0.f : view.x, vy = whole ? 0.f : view.y;
+      const float vw = whole ? w : view.width, vh = whole ? h : view.height;
+      pass.SetViewport(vx, vy, vw, vh, 0.f, 1.f);
+      pass.SetScissorRect(static_cast<uint32_t>(vx), static_cast<uint32_t>(vy), static_cast<uint32_t>(vw),
+                          static_cast<uint32_t>(vh));
     }
-    const auto& srcSize = src.colorAttachments[SceneColorAttachmentIndex].size;
-    const float sx = srcSize.width != 0 ? w / static_cast<float>(srcSize.width) : 1.f;
-    const float sy = srcSize.height != 0 ? h / static_cast<float>(srcSize.height) : 1.f;
-    for (auto& c : src.commands) {
-      switch (c.type) {
-      case CommandType::SetViewport:
-        if (!target.fullViewport) {
-          auto vp = c.data.setViewport;
-          vp.left *= sx;
-          vp.top *= sy;
-          vp.width *= sx;
-          vp.height *= sy;
-          apply_viewport(pass, vp);
+    for (auto& src : frame.renderPasses) {
+      if (!src.sealed || src.discardable || !same_formats(src.target_layout(), target.layout)) {
+        continue;
+      }
+      const auto& srcSize = src.colorAttachments[SceneColorAttachmentIndex].size;
+      const float sx = srcSize.width != 0 ? w / static_cast<float>(srcSize.width) : 1.f;
+      const float sy = srcSize.height != 0 ? h / static_cast<float>(srcSize.height) : 1.f;
+      for (auto& c : src.commands) {
+        switch (c.type) {
+        case CommandType::SetViewport:
+          if (!target.fullViewport) {
+            auto vp = c.data.setViewport;
+            vp.left *= sx;
+            vp.top *= sy;
+            vp.width *= sx;
+            vp.height *= sy;
+            apply_viewport(pass, vp);
+          }
+          break;
+        case CommandType::SetScissor:
+          if (!target.fullViewport) {
+            auto sc = c.data.setScissor;
+            sc.x = static_cast<int32_t>(static_cast<float>(sc.x) * sx);
+            sc.y = static_cast<int32_t>(static_cast<float>(sc.y) * sy);
+            sc.width = static_cast<int32_t>(static_cast<float>(sc.width) * sx);
+            sc.height = static_cast<int32_t>(static_cast<float>(sc.height) * sy);
+            apply_scissor(pass, sc, target.size);
+          }
+          break;
+        case CommandType::Draw:
+          if (c.xrCategory == category && c.data.draw.encoder != nullptr) {
+            c.data.draw.encoder(c.data.draw.payload.data(), pass, info);
+          }
+          break;
+        default:
+          break; // custom draws (clears, copies), markers
         }
-        break;
-      case CommandType::SetScissor:
-        if (!target.fullViewport) {
-          auto sc = c.data.setScissor;
-          sc.x = static_cast<int32_t>(static_cast<float>(sc.x) * sx);
-          sc.y = static_cast<int32_t>(static_cast<float>(sc.y) * sy);
-          sc.width = static_cast<int32_t>(static_cast<float>(sc.width) * sx);
-          sc.height = static_cast<int32_t>(static_cast<float>(sc.height) * sy);
-          apply_scissor(pass, sc, target.size);
-        }
-        break;
-      case CommandType::Draw:
-        if (c.xrCategory == category && c.data.draw.encoder != nullptr) {
-          c.data.draw.encoder(c.data.draw.payload.data(), pass, info);
-        }
-        break;
-      default:
-        break; // custom draws (clears, copies), markers
       }
     }
+  }
+  if (target.finish != nullptr) {
+    pass.SetViewport(0.f, 0.f, w, h, 0.f, 1.f);
+    pass.SetScissorRect(0, 0, target.size.width, target.size.height);
+    target.finish(pass, target.finishUser);
   }
   pass.End();
 }

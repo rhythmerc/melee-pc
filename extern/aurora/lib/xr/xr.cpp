@@ -6,6 +6,7 @@
 #include "../webgpu/gpu.hpp"
 #include "../gfx/xr_replay.hpp"
 #include "../gx/gx.hpp"
+#include "shaders/copy_spv.hpp"
 
 #include <aurora/gfx.hpp>
 
@@ -33,6 +34,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <condition_variable>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -120,6 +122,8 @@ struct Slot {
   std::vector<VkSemaphore> waitSems;
   VkSemaphore signalSem = VK_NULL_HANDLE;
   VkSemaphore prevSignalSem = VK_NULL_HANDLE;
+  VkImageView srcView = VK_NULL_HANDLE;           // shader copy source
+  VkDescriptorSet srcSet = VK_NULL_HANDLE;
 };
 
 enum StreamId : int { kScreen = 0, kStereo = 1, kHud = 2, kStreamCount = 3 };
@@ -128,6 +132,8 @@ struct Stream {
   const char* name = "";
   std::array<Slot, kSlotCount> slots;
   uint32_t width = 0, height = 0; // set before the XR thread starts
+  VkFormat format = VK_FORMAT_R8G8B8A8_UNORM; // shared images
+  int64_t swapFormat = 0;                     // swapchain (the sRGB twin of `format`)
   uint64_t readySeq = 0;          // g_mutex
   int renderingSlot = -1;         // render worker
 
@@ -138,6 +144,12 @@ struct Stream {
   std::chrono::steady_clock::time_point lastCopy{};
   uint64_t copies = 0;
   std::array<XrView, 2> shownViews{}; // Stereo: poses of the image in the swapchain
+  // Shader copy (AURORA_XR_SHADER_COPY): draws the shared image into the
+  // swapchain image instead of vkCmdCopyImage.
+  VkRenderPass copyPass = VK_NULL_HANDLE;
+  VkPipeline copyPipeline = VK_NULL_HANDLE;
+  std::vector<VkImageView> swapViews;
+  std::vector<VkFramebuffer> swapFramebuffers;
   // Debug dump (AURORA_XR_DUMP)
   VkBuffer dumpBuf = VK_NULL_HANDLE;
   VkDeviceMemory dumpMem = VK_NULL_HANDLE;
@@ -155,11 +167,25 @@ std::atomic<bool> g_sessionRunning{false};
 std::thread g_thread;
 std::array<Stream, kStreamCount> g_streams;
 uint32_t g_bridgeVendor = 0, g_bridgeDevice = 0;
+// The game framebuffer's format and sample count, read by begin_frame before
+// the XR thread starts: when they allow it, both eyes render straight into
+// the shared 3D image, which then has to be in the framebuffer's format.
+wgpu::TextureFormat g_sceneFormat = wgpu::TextureFormat::RGBA8Unorm;
+uint32_t g_sceneSamples = 1;
 
 // Latest predicted eye poses, from the XR thread for the render worker.
 std::mutex g_viewMutex;
 std::array<XrView, 2> g_latestViews{};
 bool g_viewsValid = false;
+
+// Lock-step pacing (aurora_xr_pace): the XR thread ticks every
+// g_displayPerGameFrame display frames, the game waits for the tick instead
+// of its own 60 Hz timer, so every game frame is shown for the same number
+// of display frames. 0 = the display rate is not a multiple of 60; no pacing.
+std::mutex g_paceMutex;
+std::condition_variable g_paceCv;
+uint64_t g_paceTick = 0;
+std::atomic<int> g_displayPerGameFrame{0};
 
 // Controller input, written by the XR thread, read by the game thread.
 std::mutex g_padMutex;
@@ -193,12 +219,24 @@ struct Bridge {
   PFN_vkGetMemoryFdKHR getMemoryFd = nullptr;
 #endif
 
+  bool hasRefreshRateExt = false;
+  PFN_xrEnumerateDisplayRefreshRatesFB enumerateRefreshRates = nullptr;
+  PFN_xrRequestDisplayRefreshRateFB requestRefreshRate = nullptr;
+  PFN_xrGetDisplayRefreshRateFB getRefreshRate = nullptr;
+  uint64_t displayFrame = 0;
+
   PFN_xrCreatePassthroughFB createPassthrough = nullptr;
   PFN_xrDestroyPassthroughFB destroyPassthrough = nullptr;
   PFN_xrCreatePassthroughLayerFB createPassthroughLayer = nullptr;
   PFN_xrDestroyPassthroughLayerFB destroyPassthroughLayer = nullptr;
 
   std::string dumpDir; // AURORA_XR_DUMP
+
+  VkSampler copySampler = VK_NULL_HANDLE;
+  VkDescriptorSetLayout copySetLayout = VK_NULL_HANDLE;
+  VkPipelineLayout copyLayout = VK_NULL_HANDLE;
+  VkDescriptorPool copyPool = VK_NULL_HANDLE;
+  VkShaderModule copyVert = VK_NULL_HANDLE, copyFrag = VK_NULL_HANDLE;
 
   // Controller input
   XrActionSet actionSet = XR_NULL_HANDLE;
@@ -210,6 +248,11 @@ struct Bridge {
 
   uint64_t framesShown = 0, fightFrames = 0;
   std::array<uint64_t, kStreamCount> copiedSinceStats{};
+  // Bridge copy timing (AURORA_XR_TIMING): 2 timestamps per slot per stream.
+  VkQueryPool timestamps = VK_NULL_HANDLE;
+  float timestampPeriodNs = 1.f;
+  std::array<double, kStreamCount> copyNs{};
+  std::array<uint64_t, kStreamCount> copySamples{};
   std::chrono::steady_clock::time_point statsStart;
 };
 Bridge B;
@@ -264,7 +307,8 @@ uint32_t find_memory_type(uint32_t bits, VkMemoryPropertyFlags want) {
 
 // The shared image's create info. The render worker rebuilds the identical
 // struct for Dawn's opaque-FD import, so it lives in one place.
-VkImageCreateInfo shared_image_info(VkExternalMemoryImageCreateInfo& ext, uint32_t width, uint32_t height) {
+VkImageCreateInfo shared_image_info(VkExternalMemoryImageCreateInfo& ext, uint32_t width, uint32_t height,
+                                    VkFormat format) {
   ext = {VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
 #ifdef __ANDROID__
   ext.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
@@ -278,7 +322,7 @@ VkImageCreateInfo shared_image_info(VkExternalMemoryImageCreateInfo& ext, uint32
   ici.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
 #endif
   ici.imageType = VK_IMAGE_TYPE_2D;
-  ici.format = VK_FORMAT_R8G8B8A8_UNORM;
+  ici.format = format;
   ici.extent = {width, height, 1};
   ici.mipLevels = 1;
   ici.arrayLayers = 1;
@@ -332,6 +376,7 @@ bool create_instance() {
   for (const auto& p : props) {
     hasVk2 |= !std::strcmp(p.extensionName, XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME);
     B.hasPassthroughExt |= !std::strcmp(p.extensionName, XR_FB_PASSTHROUGH_EXTENSION_NAME);
+    B.hasRefreshRateExt |= !std::strcmp(p.extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
   }
   if (!hasVk2) {
     Log.error("OpenXR runtime lacks XR_KHR_vulkan_enable2");
@@ -340,6 +385,8 @@ bool create_instance() {
   std::vector<const char*> exts{XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME};
   if (B.hasPassthroughExt)
     exts.push_back(XR_FB_PASSTHROUGH_EXTENSION_NAME);
+  if (B.hasRefreshRateExt)
+    exts.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
   XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
 #ifdef __ANDROID__
   exts.push_back(XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME);
@@ -369,6 +416,11 @@ bool create_instance() {
     B.destroyPassthrough = xr_proc<PFN_xrDestroyPassthroughFB>("xrDestroyPassthroughFB");
     B.createPassthroughLayer = xr_proc<PFN_xrCreatePassthroughLayerFB>("xrCreatePassthroughLayerFB");
     B.destroyPassthroughLayer = xr_proc<PFN_xrDestroyPassthroughLayerFB>("xrDestroyPassthroughLayerFB");
+  }
+  if (B.hasRefreshRateExt) {
+    B.enumerateRefreshRates = xr_proc<PFN_xrEnumerateDisplayRefreshRatesFB>("xrEnumerateDisplayRefreshRatesFB");
+    B.requestRefreshRate = xr_proc<PFN_xrRequestDisplayRefreshRateFB>("xrRequestDisplayRefreshRateFB");
+    B.getRefreshRate = xr_proc<PFN_xrGetDisplayRefreshRateFB>("xrGetDisplayRefreshRateFB");
   }
   return true;
 }
@@ -482,13 +534,20 @@ bool create_bridge_device() {
   pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
   pci.queueFamilyIndex = B.queueFamily;
   VK_TRY(vkCreateCommandPool(B.dev, &pci, nullptr, &B.pool));
+  if (env_flag("AURORA_XR_TIMING", true) && qfs[B.queueFamily].timestampValidBits > 0) {
+    VkQueryPoolCreateInfo qpci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    qpci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    qpci.queryCount = kStreamCount * kSlotCount * 2;
+    if (vkCreateQueryPool(B.dev, &qpci, nullptr, &B.timestamps) == VK_SUCCESS)
+      B.timestampPeriodNs = pp.limits.timestampPeriod;
+  }
   Log.info("Bridge VkDevice: {} [{:04x}:{:04x}]", pp.deviceName, pp.vendorID, pp.deviceID);
   return true;
 }
 
-bool create_slot(Slot& s, uint32_t width, uint32_t height) {
+bool create_slot(Slot& s, uint32_t width, uint32_t height, VkFormat format) {
   VkExternalMemoryImageCreateInfo ext;
-  VkImageCreateInfo ici = shared_image_info(ext, width, height);
+  VkImageCreateInfo ici = shared_image_info(ext, width, height, format);
 #ifdef __ANDROID__
   AHardwareBuffer_Desc ad{};
   ad.width = width;
@@ -556,7 +615,7 @@ bool create_swapchain(Stream& st) {
   XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
   ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT |
                   XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT;
-  ci.format = B.swapFormat;
+  ci.format = st.swapFormat;
   ci.sampleCount = 1;
   ci.width = st.width;
   ci.height = st.height;
@@ -574,9 +633,10 @@ bool create_swapchain(Stream& st) {
 }
 
 // Eye resolution for 3D fights: the runtime's recommendation scaled by
-// AURORA_XR_EYE_SCALE. 0.7 by default: on a Quest 3 the full 1680x1760 per
-// eye took 21-27 ms of GPU per frame (about 35 fps); 0.7 (1176x1232) holds
-// 72 Hz at about 10.5 ms.
+// AURORA_XR_EYE_SCALE (default 1.0). On a Quest 3 the full 1680x1760 per eye
+// first cost 21-27 ms of GPU per frame; with the flat present skipped during
+// fights, both eyes drawn straight into the shared image and the shader copy,
+// it costs about 9-10 ms per game frame at 120 Hz.
 bool size_stereo_stream() {
   uint32_t n = 0;
   XR_TRY(xrEnumerateViewConfigurationViews(B.instance, B.systemId, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &n,
@@ -588,7 +648,7 @@ bool size_stereo_stream() {
     Log.error("Expected 2 stereo views, got {}", n);
     return false;
   }
-  const float scale = std::clamp(env_float("AURORA_XR_EYE_SCALE", 0.7f), 0.25f, 2.f);
+  const float scale = std::clamp(env_float("AURORA_XR_EYE_SCALE", 1.f), 0.25f, 2.f);
   const auto even = [](float v) { return (static_cast<uint32_t>(v + 0.5f) + 1u) & ~1u; };
   const uint32_t eyeW = even(static_cast<float>(views[0].recommendedImageRectWidth) * scale);
   const uint32_t eyeH = even(static_cast<float>(views[0].recommendedImageRectHeight) * scale);
@@ -632,8 +692,20 @@ bool create_session() {
     return false;
   }
   for (auto& st : g_streams)
-    if (!create_swapchain(st))
-      return false;
+    st.swapFormat = B.swapFormat;
+  // The 3D image takes the framebuffer's channel order when the eyes render
+  // straight into it (single-sample BGRA8 framebuffers, e.g. desktop NVIDIA).
+  // The copy into the swapchain moves bytes unchanged, so the swapchain must
+  // match too.
+  auto& stereo = g_streams[kStereo];
+  const auto offered = [&](int64_t f) { return std::find(fmts.begin(), fmts.end(), f) != fmts.end(); };
+#ifndef __ANDROID__
+  if (g_sceneSamples == 1 && g_sceneFormat == wgpu::TextureFormat::BGRA8Unorm && offered(VK_FORMAT_B8G8R8A8_SRGB)) {
+    stereo.format = VK_FORMAT_B8G8R8A8_UNORM;
+    stereo.swapFormat = VK_FORMAT_B8G8R8A8_SRGB;
+  }
+#endif
+  (void)offered;
 
   if (B.createPassthrough && B.createPassthroughLayer && env_flag("AURORA_XR_PASSTHROUGH", true)) {
     XrPassthroughCreateInfoFB pci{XR_TYPE_PASSTHROUGH_CREATE_INFO_FB};
@@ -649,10 +721,159 @@ bool create_session() {
       B.passthrough = XR_NULL_HANDLE;
     }
   }
-  Log.info("Swapchains: screen {}x{}, 3D {}x{} (two {}x{} eyes), HUD {}x{} (format {}), passthrough {}",
+  Log.info("Swapchains: screen {}x{}, 3D {}x{} (two {}x{} eyes, format {}), HUD {}x{} (format {}), passthrough {}",
            g_streams[kScreen].width, g_streams[kScreen].height, g_streams[kStereo].width, g_streams[kStereo].height,
-           g_streams[kStereo].width / 2, g_streams[kStereo].height, g_streams[kHud].width, g_streams[kHud].height,
-           B.swapFormat, B.passthroughLayer ? "on" : "off");
+           g_streams[kStereo].width / 2, g_streams[kStereo].height, g_streams[kStereo].swapFormat,
+           g_streams[kHud].width, g_streams[kHud].height, B.swapFormat, B.passthroughLayer ? "on" : "off");
+  return true;
+}
+
+// Shader copy: on Adreno, vkCmdCopyImage of the 3D image ran at ~13 GB/s
+// (3.7 ms for 3360x1760 each way); a full-screen draw goes through the 3D
+// pipe and the tile memory instead.
+bool create_shader_copy() {
+  const auto module = [](const uint32_t* code, size_t bytes, VkShaderModule& out) {
+    VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    ci.codeSize = bytes;
+    ci.pCode = code;
+    return vkCreateShaderModule(B.dev, &ci, nullptr, &out);
+  };
+  VK_TRY(module(kCopyVertSpv, sizeof(kCopyVertSpv), B.copyVert));
+  VK_TRY(module(kCopyFragSpv, sizeof(kCopyFragSpv), B.copyFrag));
+  VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+  sci.magFilter = sci.minFilter = VK_FILTER_NEAREST;
+  sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+  VK_TRY(vkCreateSampler(B.dev, &sci, nullptr, &B.copySampler));
+  VkDescriptorSetLayoutBinding binding{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT,
+                                       &B.copySampler};
+  VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+  dslci.bindingCount = 1;
+  dslci.pBindings = &binding;
+  VK_TRY(vkCreateDescriptorSetLayout(B.dev, &dslci, nullptr, &B.copySetLayout));
+  VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+  plci.setLayoutCount = 1;
+  plci.pSetLayouts = &B.copySetLayout;
+  VK_TRY(vkCreatePipelineLayout(B.dev, &plci, nullptr, &B.copyLayout));
+  VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kStreamCount * kSlotCount};
+  VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+  dpci.maxSets = kStreamCount * kSlotCount;
+  dpci.poolSizeCount = 1;
+  dpci.pPoolSizes = &poolSize;
+  VK_TRY(vkCreateDescriptorPool(B.dev, &dpci, nullptr, &B.copyPool));
+
+  for (auto& st : g_streams) {
+    // Render pass: the swapchain image is fully overwritten (UNDEFINED in)
+    // and handed back in COLOR_ATTACHMENT_OPTIMAL, as OpenXR expects.
+    VkAttachmentDescription att{};
+    att.format = static_cast<VkFormat>(st.swapFormat);
+    att.samples = VK_SAMPLE_COUNT_1_BIT;
+    att.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    att.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkAttachmentReference ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription sub{};
+    sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    sub.colorAttachmentCount = 1;
+    sub.pColorAttachments = &ref;
+    std::array<VkSubpassDependency, 2> deps{{
+        {VK_SUBPASS_EXTERNAL, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0},
+        {0, VK_SUBPASS_EXTERNAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT, 0},
+    }};
+    VkRenderPassCreateInfo rpci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    rpci.attachmentCount = 1;
+    rpci.pAttachments = &att;
+    rpci.subpassCount = 1;
+    rpci.pSubpasses = &sub;
+    rpci.dependencyCount = static_cast<uint32_t>(deps.size());
+    rpci.pDependencies = deps.data();
+    VK_TRY(vkCreateRenderPass(B.dev, &rpci, nullptr, &st.copyPass));
+
+    std::array<VkPipelineShaderStageCreateInfo, 2> stages{{
+        {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, B.copyVert,
+         "main", nullptr},
+        {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, B.copyFrag,
+         "main", nullptr},
+    }};
+    VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkViewport viewport{0.f, 0.f, static_cast<float>(st.width), static_cast<float>(st.height), 0.f, 1.f};
+    VkRect2D scissor{{0, 0}, {st.width, st.height}};
+    VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    vp.viewportCount = 1;
+    vp.pViewports = &viewport;
+    vp.scissorCount = 1;
+    vp.pScissors = &scissor;
+    VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    rs.cullMode = VK_CULL_MODE_NONE;
+    rs.lineWidth = 1.f;
+    VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState cba{};
+    cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+                         VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    cb.attachmentCount = 1;
+    cb.pAttachments = &cba;
+    VkGraphicsPipelineCreateInfo gp{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    gp.stageCount = static_cast<uint32_t>(stages.size());
+    gp.pStages = stages.data();
+    gp.pVertexInputState = &vi;
+    gp.pInputAssemblyState = &ia;
+    gp.pViewportState = &vp;
+    gp.pRasterizationState = &rs;
+    gp.pMultisampleState = &ms;
+    gp.pColorBlendState = &cb;
+    gp.layout = B.copyLayout;
+    gp.renderPass = st.copyPass;
+    VK_TRY(vkCreateGraphicsPipelines(B.dev, VK_NULL_HANDLE, 1, &gp, nullptr, &st.copyPipeline));
+
+    for (VkImage img : st.swapImages) {
+      VkImageViewCreateInfo ivci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+      ivci.image = img;
+      ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+      ivci.format = static_cast<VkFormat>(st.swapFormat);
+      ivci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+      VkImageView view = VK_NULL_HANDLE;
+      VK_TRY(vkCreateImageView(B.dev, &ivci, nullptr, &view));
+      st.swapViews.push_back(view);
+      VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+      fci.renderPass = st.copyPass;
+      fci.attachmentCount = 1;
+      fci.pAttachments = &view;
+      fci.width = st.width;
+      fci.height = st.height;
+      fci.layers = 1;
+      VkFramebuffer fb = VK_NULL_HANDLE;
+      VK_TRY(vkCreateFramebuffer(B.dev, &fci, nullptr, &fb));
+      st.swapFramebuffers.push_back(fb);
+    }
+    for (auto& s : st.slots) {
+      VkImageViewCreateInfo ivci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+      ivci.image = s.image;
+      ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+      ivci.format = st.format;
+      ivci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+      VK_TRY(vkCreateImageView(B.dev, &ivci, nullptr, &s.srcView));
+      VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+      dsai.descriptorPool = B.copyPool;
+      dsai.descriptorSetCount = 1;
+      dsai.pSetLayouts = &B.copySetLayout;
+      VK_TRY(vkAllocateDescriptorSets(B.dev, &dsai, &s.srcSet));
+      VkDescriptorImageInfo dii{VK_NULL_HANDLE, s.srcView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+      VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+      w.dstSet = s.srcSet;
+      w.descriptorCount = 1;
+      w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+      w.pImageInfo = &dii;
+      vkUpdateDescriptorSets(B.dev, 1, &w, 0, nullptr);
+    }
+  }
   return true;
 }
 
@@ -859,6 +1080,17 @@ void retire_slot(Stream& st, Slot& s, int index) {
     vkDestroySemaphore(B.dev, s.prevSignalSem, nullptr);
   s.prevSignalSem = s.signalSem;
   s.signalSem = VK_NULL_HANDLE;
+  if (B.timestamps) {
+    const auto streamIndex = static_cast<uint32_t>(&st - g_streams.data());
+    const uint32_t q = (streamIndex * kSlotCount + static_cast<uint32_t>(index)) * 2;
+    uint64_t ts[2];
+    if (vkGetQueryPoolResults(B.dev, B.timestamps, q, 2, sizeof(ts), ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) ==
+            VK_SUCCESS &&
+        ts[1] > ts[0]) {
+      B.copyNs[streamIndex] += static_cast<double>(ts[1] - ts[0]) * B.timestampPeriodNs;
+      ++B.copySamples[streamIndex];
+    }
+  }
   if (st.dumpSlot == index) {
     st.dumpSlot = -1;
     st.dumped = true;
@@ -921,41 +1153,86 @@ bool copy_latest(Stream& st, bool& copied) {
   cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
   VK_TRY(vkResetCommandBuffer(s.cmd, 0));
   VK_TRY(vkBeginCommandBuffer(s.cmd, &cbi));
+  const uint32_t tsQuery =
+      (static_cast<uint32_t>(&st - g_streams.data()) * kSlotCount + static_cast<uint32_t>(index)) * 2;
+  if (B.timestamps)
+    vkCmdResetQueryPool(s.cmd, B.timestamps, tsQuery, 2);
+  // Dump frames read the swapchain image back after the copy, so the dump
+  // shows exactly what the runtime gets.
+  const bool dumpNow = !B.dumpDir.empty() && !st.dumped && st.dumpSlot < 0 && st.copies >= 300 &&
+                       (st.dumpBuf || create_dump_buffer(st));
+  const bool shaderCopy = st.copyPipeline != VK_NULL_HANDLE;
+  // The layout the shared image is used in here, and handed back to Dawn
+  // from (Dawn acquires with the same pair).
+  const VkImageLayout srcLayout =
+      shaderCopy ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+  const VkAccessFlags srcAccess = shaderCopy ? VK_ACCESS_SHADER_READ_BIT : VK_ACCESS_TRANSFER_READ_BIT;
+  const VkPipelineStageFlags srcStage =
+      shaderCopy ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_TRANSFER_BIT;
   std::array<VkImageMemoryBarrier, 3> pre{};
   uint32_t npre = 0;
   // Acquire from Dawn: must mirror Dawn's release barrier exactly.
-  pre[npre++] = barrier(s.image, dawnRelease.oldLayout, dawnRelease.newLayout, 0, VK_ACCESS_TRANSFER_READ_BIT,
-                        kExternalQueueFamily, B.queueFamily);
-  if (dawnRelease.newLayout != VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL)
-    pre[npre++] = barrier(s.image, dawnRelease.newLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                          VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT);
-  // OpenXR hands Vulkan swapchain images over in COLOR_ATTACHMENT_OPTIMAL.
-  pre[npre++] = barrier(swapImg, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
-  vkCmdPipelineBarrier(s.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
-                       nullptr, npre, pre.data());
-  VkImageCopy region{};
-  region.srcSubresource = region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-  region.extent = {st.width, st.height, 1};
-  vkCmdCopyImage(s.cmd, s.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                 1, &region);
-  if (!B.dumpDir.empty() && !st.dumped && st.dumpSlot < 0 && st.copies >= 300 &&
-      (st.dumpBuf || create_dump_buffer(st))) {
+  pre[npre++] = barrier(s.image, dawnRelease.oldLayout, dawnRelease.newLayout, 0, srcAccess, kExternalQueueFamily,
+                        B.queueFamily);
+  if (dawnRelease.newLayout != srcLayout)
+    pre[npre++] = barrier(s.image, dawnRelease.newLayout, srcLayout, srcAccess, srcAccess);
+  if (!shaderCopy) {
+    // OpenXR hands Vulkan swapchain images over in COLOR_ATTACHMENT_OPTIMAL.
+    pre[npre++] = barrier(swapImg, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+  }
+  vkCmdPipelineBarrier(s.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, srcStage | VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                       nullptr, 0, nullptr, npre, pre.data());
+  if (B.timestamps)
+    vkCmdWriteTimestamp(s.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, B.timestamps, tsQuery);
+  if (shaderCopy) {
+    VkRenderPassBeginInfo rpbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    rpbi.renderPass = st.copyPass;
+    rpbi.framebuffer = st.swapFramebuffers[swapIndex];
+    rpbi.renderArea = {{0, 0}, {st.width, st.height}};
+    vkCmdBeginRenderPass(s.cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(s.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, st.copyPipeline);
+    vkCmdBindDescriptorSets(s.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, B.copyLayout, 0, 1, &s.srcSet, 0, nullptr);
+    vkCmdDraw(s.cmd, 3, 1, 0, 0);
+    vkCmdEndRenderPass(s.cmd);
+  } else {
+    VkImageCopy region{};
+    region.srcSubresource = region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.extent = {st.width, st.height, 1};
+    vkCmdCopyImage(s.cmd, s.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapImg,
+                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+  }
+  if (B.timestamps)
+    vkCmdWriteTimestamp(s.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, B.timestamps, tsQuery + 1);
+  // The swapchain image is now in COLOR_ATTACHMENT_OPTIMAL (shader copy) or
+  // TRANSFER_DST_OPTIMAL (transfer copy).
+  VkImageLayout swapLayout =
+      shaderCopy ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  if (dumpNow) {
+    const VkImageMemoryBarrier toSrc =
+        barrier(swapImg, swapLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    vkCmdPipelineBarrier(s.cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toSrc);
     VkBufferImageCopy rb{};
     rb.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     rb.imageExtent = {st.width, st.height, 1};
-    vkCmdCopyImageToBuffer(s.cmd, s.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, st.dumpBuf, 1, &rb);
+    vkCmdCopyImageToBuffer(s.cmd, swapImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, st.dumpBuf, 1, &rb);
     st.dumpSlot = index;
+    swapLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
   }
-  std::array<VkImageMemoryBarrier, 2> post{
-      barrier(swapImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-              VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_COLOR_ATTACHMENT_READ_BIT),
-      // Release back to Dawn, which acquires with the same layouts.
-      barrier(s.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-              VK_ACCESS_TRANSFER_READ_BIT, 0, B.queueFamily, kExternalQueueFamily),
-  };
-  vkCmdPipelineBarrier(s.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0,
-                       nullptr, static_cast<uint32_t>(post.size()), post.data());
+  std::array<VkImageMemoryBarrier, 2> post{};
+  uint32_t npost = 0;
+  if (swapLayout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+    post[npost++] = barrier(swapImg, swapLayout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                            VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT,
+                            VK_ACCESS_COLOR_ATTACHMENT_READ_BIT);
+  }
+  // Release back to Dawn, which acquires with the same layouts.
+  post[npost++] = barrier(s.image, srcLayout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, srcAccess, 0, B.queueFamily,
+                          kExternalQueueFamily);
+  vkCmdPipelineBarrier(s.cmd, srcStage | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, npost, post.data());
   VK_TRY(vkEndCommandBuffer(s.cmd));
 
   VkExportSemaphoreCreateInfo esci{VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO};
@@ -963,7 +1240,7 @@ bool copy_latest(Stream& st, bool& copied) {
   VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
   sci.pNext = &esci;
   VK_TRY(vkCreateSemaphore(B.dev, &sci, nullptr, &s.signalSem));
-  std::vector<VkPipelineStageFlags> stages(s.waitSems.size(), VK_PIPELINE_STAGE_TRANSFER_BIT);
+  std::vector<VkPipelineStageFlags> stages(s.waitSems.size(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
   VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   si.waitSemaphoreCount = static_cast<uint32_t>(s.waitSems.size());
   si.pWaitSemaphores = s.waitSems.data();
@@ -986,7 +1263,7 @@ bool copy_latest(Stream& st, bool& copied) {
     s.forDawn.fds.clear();
     if (fd >= 0)
       s.forDawn.fds.push_back(fd);
-    s.forDawn.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    s.forDawn.oldLayout = srcLayout;
     s.forDawn.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     s.state = SlotState::Free;
   }
@@ -996,6 +1273,55 @@ bool copy_latest(Stream& st, bool& copied) {
   ++st.copies;
   copied = true;
   return true;
+}
+
+// The game draws 60 frames a second, so the display should run at a
+// multiple of 60 to show every game frame for the same number of display
+// frames (a 72 Hz display repeats every fifth one: visible stutter). Prefer
+// AURORA_XR_REFRESH if offered, then 60, then 120.
+void request_refresh_rate() {
+  if (!B.enumerateRefreshRates || !B.requestRefreshRate)
+    return;
+  uint32_t n = 0;
+  if (XR_FAILED(B.enumerateRefreshRates(B.session, 0, &n, nullptr)) || n == 0)
+    return;
+  std::vector<float> rates(n);
+  if (XR_FAILED(B.enumerateRefreshRates(B.session, n, &n, rates.data())))
+    return;
+  std::string list;
+  for (float r : rates)
+    list += fmt::format("{}{:.0f}", list.empty() ? "" : ", ", r);
+  const auto offered = [&](float want) {
+    return std::any_of(rates.begin(), rates.end(), [&](float r) { return std::abs(r - want) < 0.5f; });
+  };
+  float pick = 0.f;
+  if (const float wanted = env_float("AURORA_XR_REFRESH", 0.f); wanted > 0.f && offered(wanted))
+    pick = wanted;
+  else if (offered(60.f))
+    pick = 60.f;
+  else if (offered(120.f))
+    pick = 120.f;
+  if (pick > 0.f && XR_SUCCEEDED(B.requestRefreshRate(B.session, pick)))
+    Log.info("Display refresh rates offered: {}; requested {:.0f} Hz", list, pick);
+  else
+    Log.info("Display refresh rates offered: {}; keeping the default", list);
+}
+
+// Recompute how many display frames each game frame gets from the current
+// display rate (on session start and on XR_FB_display_refresh_rate changes).
+void update_pacing() {
+  float rate = 0.f;
+  if (B.getRefreshRate)
+    B.getRefreshRate(B.session, &rate);
+  if (rate <= 0.f && !B.getRefreshRate)
+    rate = 60.f; // no extension (e.g. some runtimes): assume a 60 Hz display
+  const float ratio = rate / 60.f;
+  const int per = std::abs(ratio - std::round(ratio)) < 0.02f ? static_cast<int>(std::round(ratio)) : 0;
+  const int old = g_displayPerGameFrame.exchange(env_flag("AURORA_XR_LOCKSTEP", true) ? per : 0);
+  if (old != g_displayPerGameFrame)
+    Log.info("Display at {:.1f} Hz: {}", rate,
+             g_displayPerGameFrame ? fmt::format("game paced to every {} display frame(s)", g_displayPerGameFrame.load())
+                                   : std::string{"not a multiple of 60 Hz, game keeps its own timer"});
 }
 
 // Publish where the eyes will be at this frame's display time, for the
@@ -1032,6 +1358,13 @@ XrVector3f arena_position() {
 bool render_xr_frame() {
   XrFrameState fs{XR_TYPE_FRAME_STATE};
   XR_TRY(xrWaitFrame(B.session, nullptr, &fs));
+  if (const int per = g_displayPerGameFrame; per > 0 && ++B.displayFrame % static_cast<uint64_t>(per) == 0) {
+    {
+      std::lock_guard lock{g_paceMutex};
+      ++g_paceTick;
+    }
+    g_paceCv.notify_all();
+  }
   update_input();
   publish_views(fs.predictedDisplayTime);
   XR_TRY(xrBeginFrame(B.session, nullptr));
@@ -1120,6 +1453,13 @@ bool render_xr_frame() {
     Log.info("{:.1f} display fps ({:.0f}% 3D); frames/s copied: screen {:.1f}, 3D {:.1f}, HUD {:.1f}",
              B.framesShown / secs, 100.0 * B.fightFrames / std::max<uint64_t>(B.framesShown, 1),
              B.copiedSinceStats[kScreen] / secs, B.copiedSinceStats[kStereo] / secs, B.copiedSinceStats[kHud] / secs);
+    if (B.timestamps) {
+      const auto avg = [](int i) { return B.copySamples[i] ? B.copyNs[i] / B.copySamples[i] / 1000.0 : 0.0; };
+      Log.info("GPU bridge copy per frame (us): screen {:.0f}, 3D {:.0f}, HUD {:.0f}", avg(kScreen), avg(kStereo),
+               avg(kHud));
+      B.copyNs = {};
+      B.copySamples = {};
+    }
     B.framesShown = 0;
     B.fightFrames = 0;
     B.copiedSinceStats = {};
@@ -1140,6 +1480,8 @@ bool poll_events() {
         bi.primaryViewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
         XR_TRY(xrBeginSession(B.session, &bi));
         B.running = true;
+        request_refresh_rate();
+        update_pacing();
         B.statsStart = std::chrono::steady_clock::now();
       } else if (state == XR_SESSION_STATE_STOPPING) {
         XR_TRY(xrEndSession(B.session));
@@ -1154,6 +1496,8 @@ bool poll_events() {
         g_padValid = false;
       }
       g_sessionRunning = B.running;
+    } else if (ev.type == XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB) {
+      update_pacing();
     } else if (ev.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) {
       return false;
     }
@@ -1163,14 +1507,20 @@ bool poll_events() {
 }
 
 bool setup() {
-  if (!create_instance() || !create_bridge_device() || !size_stereo_stream())
+  if (!create_instance() || !create_bridge_device() || !size_stereo_stream() || !create_session())
     return false;
-  for (auto& st : g_streams)
+  for (auto& st : g_streams) {
     for (auto& s : st.slots)
-      if (!create_slot(s, st.width, st.height))
+      if (!create_slot(s, st.width, st.height, st.format))
         return false;
-  if (!create_session())
-    return false;
+    if (!create_swapchain(st))
+      return false;
+  }
+  if (env_flag("AURORA_XR_SHADER_COPY", true) && !create_shader_copy()) {
+    Log.warn("Shader copy unavailable; copying with vkCmdCopyImage");
+    for (auto& st : g_streams)
+      st.copyPipeline = VK_NULL_HANDLE;
+  }
   if (!create_input())
     Log.warn("Controller input unavailable");
   if (const char* dir = std::getenv("AURORA_XR_DUMP"); dir != nullptr && *dir != '\0')
@@ -1189,6 +1539,39 @@ bool setup() {
 void teardown() {
   if (B.dev)
     vkDeviceWaitIdle(B.dev);
+  if (B.dev) {
+    // Views and framebuffers of the shared and swapchain images go first.
+    for (auto& st : g_streams) {
+      for (auto fb : st.swapFramebuffers)
+        vkDestroyFramebuffer(B.dev, fb, nullptr);
+      for (auto v : st.swapViews)
+        vkDestroyImageView(B.dev, v, nullptr);
+      st.swapFramebuffers.clear();
+      st.swapViews.clear();
+      if (st.copyPipeline)
+        vkDestroyPipeline(B.dev, st.copyPipeline, nullptr);
+      if (st.copyPass)
+        vkDestroyRenderPass(B.dev, st.copyPass, nullptr);
+      st.copyPipeline = VK_NULL_HANDLE;
+      st.copyPass = VK_NULL_HANDLE;
+      for (auto& s : st.slots) {
+        if (s.srcView)
+          vkDestroyImageView(B.dev, s.srcView, nullptr);
+        s.srcView = VK_NULL_HANDLE;
+      }
+    }
+    if (B.copyPool)
+      vkDestroyDescriptorPool(B.dev, B.copyPool, nullptr);
+    if (B.copyLayout)
+      vkDestroyPipelineLayout(B.dev, B.copyLayout, nullptr);
+    if (B.copySetLayout)
+      vkDestroyDescriptorSetLayout(B.dev, B.copySetLayout, nullptr);
+    if (B.copySampler)
+      vkDestroySampler(B.dev, B.copySampler, nullptr);
+    for (auto m : {B.copyVert, B.copyFrag})
+      if (m)
+        vkDestroyShaderModule(B.dev, m, nullptr);
+  }
   if (B.actionSet)
     xrDestroyActionSet(B.actionSet); // destroys its actions too
   B.actionSet = XR_NULL_HANDLE;
@@ -1242,6 +1625,9 @@ void teardown() {
       st.dumpBuf = VK_NULL_HANDLE;
       st.dumpMem = VK_NULL_HANDLE;
     }
+    if (B.timestamps)
+      vkDestroyQueryPool(B.dev, B.timestamps, nullptr);
+    B.timestamps = VK_NULL_HANDLE;
     if (B.pool)
       vkDestroyCommandPool(B.dev, B.pool, nullptr);
     vkDestroyDevice(B.dev, nullptr);
@@ -1276,6 +1662,8 @@ void thread_main() {
       break;
   }
   g_sessionRunning = false;
+  g_displayPerGameFrame = 0;
+  g_paceCv.notify_all();
   Log.info("XR thread exiting");
   teardown();
 }
@@ -1311,7 +1699,7 @@ bool import_slots_into_dawn() {
       s.stm = device.ImportSharedTextureMemory(&sd);
 #else
       VkExternalMemoryImageCreateInfo ext;
-      VkImageCreateInfo ici = shared_image_info(ext, st.width, st.height);
+      VkImageCreateInfo ici = shared_image_info(ext, st.width, st.height, st.format);
       wgpu::SharedTextureMemoryOpaqueFDDescriptor od{};
       od.vkImageCreateInfo = &ici;
       od.memoryFD = s.exportedMemoryFd;
@@ -1549,6 +1937,33 @@ struct ReplayTarget {
 };
 
 // Render worker only.
+// Render-side GPU timing (AURORA_XR_TIMING, Dawn timestamp queries): each
+// zone is a pass's begin/end pair, averaged and logged every 10 s.
+// kZone3D times both eyes on the direct path (one pass), or the left eye on
+// the fallback path, where kZone3DRight is the right eye.
+enum TimingZone : uint32_t { kZone3D, kZone3DRight, kZoneCompose3D, kZoneHud, kZoneComposeHud, kZoneCount };
+constexpr std::array<const char*, kZoneCount> kZoneNames{"3D eyes", "3D right eye (fallback)", "3D compose", "HUD",
+                                                         "HUD compose"};
+
+struct GpuTiming {
+  wgpu::QuerySet queries;
+  wgpu::Buffer resolve;
+  struct Readback {
+    wgpu::Buffer buffer;
+    uint32_t zones = 0; // zones written in the frame it holds
+    bool busy = false;  // copied into or mapped; not yet read
+  };
+  std::array<Readback, 3> readbacks;
+  int pending = -1;   // readback filled this frame, mapped after submit
+  uint32_t zones = 0; // zones written this frame
+  // Filled from map callbacks (render worker, via ProcessEvents).
+  std::array<double, kZoneCount> ns{};
+  std::array<uint64_t, kZoneCount> samples{};
+  uint64_t frames = 0;
+  std::chrono::steady_clock::time_point lastLog = std::chrono::steady_clock::now();
+  std::array<wgpu::PassTimestampWrites, kZoneCount> writes{};
+};
+
 struct Renderer3D {
   uint64_t layoutKey = 0;
   uint32_t sampleCount = 0;
@@ -1562,8 +1977,110 @@ struct Renderer3D {
   std::array<XrView, 2> renderedViews{};
   bool renderedStereo = false;
   bool failed = false;
+  GpuTiming timing;
+  // Direct path: both eyes straight into the shared 3D image, one pass.
+  wgpu::Texture directDepth;
+  std::vector<wgpu::Texture> directExtras; // non-scene attachments (normal buffer)
+  std::array<wgpu::TextureView, gfx::MaxColorAttachments> directExtraViews{};
+  wgpu::RenderPipeline coverClear, coverSet;
+  uint64_t directKey = 0;
+  bool loggedPath = false;
 };
 Renderer3D R;
+
+const wgpu::PassTimestampWrites* zone_writes(TimingZone zone) {
+  if (!R.timing.queries)
+    return nullptr;
+  R.timing.zones |= 1u << zone;
+  return &R.timing.writes[zone];
+}
+
+void setup_timing() {
+  auto& device = webgpu::g_device;
+  if (!env_flag("AURORA_XR_TIMING", true) || !device.HasFeature(wgpu::FeatureName::TimestampQuery))
+    return;
+  auto& t = R.timing;
+  const wgpu::QuerySetDescriptor qsd{.label = "XR timing", .type = wgpu::QueryType::Timestamp, .count = kZoneCount * 2};
+  t.queries = device.CreateQuerySet(&qsd);
+  const uint64_t bytes = kZoneCount * 2 * sizeof(uint64_t);
+  const wgpu::BufferDescriptor rd{.label = "XR timing resolve",
+                                  .usage = wgpu::BufferUsage::QueryResolve | wgpu::BufferUsage::CopySrc,
+                                  .size = bytes};
+  t.resolve = device.CreateBuffer(&rd);
+  for (auto& rb : t.readbacks) {
+    const wgpu::BufferDescriptor bd{.label = "XR timing readback",
+                                    .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst,
+                                    .size = bytes};
+    rb.buffer = device.CreateBuffer(&bd);
+  }
+  for (uint32_t z = 0; z < kZoneCount; ++z)
+    t.writes[z] = {.querySet = t.queries, .beginningOfPassWriteIndex = z * 2, .endOfPassWriteIndex = z * 2 + 1};
+}
+
+// After the frame's passes are encoded: resolve this frame's timestamps into
+// a free readback buffer (mapped in end_frame, after the submit).
+void resolve_timing(const wgpu::CommandEncoder& cmd) {
+  auto& t = R.timing;
+  if (!t.queries || t.zones == 0)
+    return;
+  for (int i = 0; i < static_cast<int>(t.readbacks.size()); ++i) {
+    auto& rb = t.readbacks[i];
+    if (rb.busy)
+      continue;
+    cmd.ResolveQuerySet(t.queries, 0, kZoneCount * 2, t.resolve, 0);
+    cmd.CopyBufferToBuffer(t.resolve, 0, rb.buffer, 0, kZoneCount * 2 * sizeof(uint64_t));
+    rb.busy = true;
+    rb.zones = t.zones;
+    t.pending = i;
+    break;
+  }
+  t.zones = 0;
+}
+
+void map_timing() {
+  auto& t = R.timing;
+  if (t.pending < 0)
+    return;
+  const int index = t.pending;
+  t.pending = -1;
+  t.readbacks[index].buffer.MapAsync(
+      wgpu::MapMode::Read, 0, kZoneCount * 2 * sizeof(uint64_t), wgpu::CallbackMode::AllowProcessEvents,
+      [index](wgpu::MapAsyncStatus status, wgpu::StringView) {
+        auto& t = R.timing;
+        auto& rb = t.readbacks[index];
+        if (status == wgpu::MapAsyncStatus::Success) {
+          const auto* ts = static_cast<const uint64_t*>(rb.buffer.GetConstMappedRange());
+          for (uint32_t z = 0; z < kZoneCount; ++z) {
+            if ((rb.zones & (1u << z)) && ts[z * 2 + 1] > ts[z * 2]) {
+              t.ns[z] += static_cast<double>(ts[z * 2 + 1] - ts[z * 2]);
+              ++t.samples[z];
+            }
+          }
+          ++t.frames;
+          rb.buffer.Unmap();
+        }
+        rb.busy = false;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - t.lastLog >= std::chrono::seconds(10) && t.frames > 0) {
+          std::string line;
+          double total = 0;
+          for (uint32_t z = 0; z < kZoneCount; ++z) {
+            const double us = t.samples[z] ? t.ns[z] / t.samples[z] / 1000.0 : 0.0;
+            total += us;
+            line += fmt::format("{}{} {:.0f}", z ? ", " : "", kZoneNames[z], us);
+          }
+          Log.info("GPU 3D passes per frame (us): {} (total {:.0f})", line, total);
+          t.ns = {};
+          t.samples = {};
+          t.frames = 0;
+          t.lastLog = now;
+        }
+      });
+}
+
+// The 3D frame hook drew this frame (render worker), so the flat present can
+// be skipped: nothing shows the virtual screen during a fight.
+bool g_skipPresent = false;
 
 ReplayTarget make_replay_target(const gfx::RenderTargetLayout& layout, uint32_t width, uint32_t height,
                                 const char* label) {
@@ -1636,7 +2153,7 @@ bool ensure_renderer(const gfx::RenderTargetLayout& layout) {
     const wgpu::BindGroupEntry e{.binding = 0, .buffer = R.eyeUniforms[i], .size = gx::XrEyeUniformSize};
     const wgpu::BindGroupDescriptor bg{.layout = gx::g_xrEyeBindGroupLayout, .entryCount = 1, .entries = &e};
     R.eyeGroups[i] = device.CreateBindGroup(&bg);
-    R.targets[i].target.xrBindGroup = R.eyeGroups[i];
+    R.targets[i].target.views[0].xrBindGroup = R.eyeGroups[i];
   }
 
   // Composite pipeline into the shared images (RGBA8Unorm).
@@ -1694,6 +2211,8 @@ bool ensure_renderer(const gfx::RenderTargetLayout& layout) {
     const wgpu::BindGroupDescriptor bgd{.layout = R.composeLayout, .entryCount = bge.size(), .entries = bge.data()};
     R.composeGroups[i] = device.CreateBindGroup(&bgd);
   }
+  if (!R.timing.queries)
+    setup_timing();
   R.layoutKey = layout.key;
   R.sampleCount = layout.sampleCount;
   Log.info("3D fight targets ready: eyes {}x{}, HUD {}x{}, {}x MSAA", eyeW, eyeH, g_streams[kHud].width,
@@ -1701,7 +2220,90 @@ bool ensure_renderer(const gfx::RenderTargetLayout& layout) {
   return true;
 }
 
-void compose(const wgpu::CommandEncoder& cmd, const wgpu::Texture& dst, std::initializer_list<int> sources) {
+// Coverage into alpha at the end of the direct 3D pass, in tile memory: two
+// full-screen triangles at the far plane (reversed Z: depth 0) that write
+// only alpha. Where the depth is still cleared ("equal") alpha becomes 0;
+// where geometry wrote depth ("less" than it) alpha becomes 1. Depth-less
+// draws (translucent effects) keep their color over alpha 0, which the
+// premultiplied projection layer adds over passthrough as light.
+constexpr char kCoverageShader[] = R"(
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let uv = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4f(uv * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment fn fs_clear() -> @location(0) vec4f { return vec4f(0.0, 0.0, 0.0, 0.0); }
+@fragment fn fs_set() -> @location(0) vec4f { return vec4f(0.0, 0.0, 0.0, 1.0); }
+)";
+
+bool ensure_direct(const gfx::RenderTargetLayout& layout) {
+  if (R.coverClear && R.directKey == layout.key)
+    return true;
+  auto& device = webgpu::g_device;
+  const auto& stereo = g_streams[kStereo];
+  const wgpu::Extent3D size{stereo.width, stereo.height, 1};
+  const wgpu::TextureDescriptor dd{.label = "XR 3D depth",
+                                   .usage = wgpu::TextureUsage::RenderAttachment,
+                                   .size = size,
+                                   .format = layout.depthStencilFormat};
+  R.directDepth = device.CreateTexture(&dd);
+  R.directExtras.clear();
+  R.directExtraViews = {};
+  for (uint32_t i = 0; i < layout.colorAttachmentCount; ++i) {
+    if (i == gfx::SceneColorAttachmentIndex)
+      continue;
+    const wgpu::TextureDescriptor td{.label = "XR 3D extra attachment",
+                                     .usage = wgpu::TextureUsage::RenderAttachment,
+                                     .size = size,
+                                     .format = layout.colorAttachments[i].format};
+    auto tex = device.CreateTexture(&td);
+    R.directExtraViews[i] = tex.CreateView();
+    R.directExtras.push_back(tex);
+  }
+  wgpu::ShaderSourceWGSL wgsl{};
+  wgsl.code = kCoverageShader;
+  const wgpu::ShaderModuleDescriptor smd{.nextInChain = &wgsl, .label = "XR coverage"};
+  const auto module = device.CreateShaderModule(&smd);
+  const wgpu::PipelineLayoutDescriptor pld{.bindGroupLayoutCount = 0};
+  const auto pipelineLayout = device.CreatePipelineLayout(&pld);
+  std::array<wgpu::ColorTargetState, gfx::MaxColorAttachments> targets{};
+  for (uint32_t i = 0; i < layout.colorAttachmentCount; ++i) {
+    targets[i] = {.format = layout.colorAttachments[i].format,
+                  .writeMask = i == gfx::SceneColorAttachmentIndex ? wgpu::ColorWriteMask::Alpha
+                                                                   : wgpu::ColorWriteMask::None};
+  }
+  const auto make = [&](const char* entry, wgpu::CompareFunction compare) {
+    const wgpu::FragmentState fragment{.module = module,
+                                       .entryPoint = entry,
+                                       .targetCount = layout.colorAttachmentCount,
+                                       .targets = targets.data()};
+    const wgpu::DepthStencilState depth{.format = layout.depthStencilFormat,
+                                        .depthWriteEnabled = wgpu::OptionalBool::False,
+                                        .depthCompare = compare};
+    const wgpu::RenderPipelineDescriptor rpd{
+        .label = "XR coverage",
+        .layout = pipelineLayout,
+        .vertex = {.module = module, .entryPoint = "vs"},
+        .depthStencil = &depth,
+        .fragment = &fragment,
+    };
+    return device.CreateRenderPipeline(&rpd);
+  };
+  // Reversed Z: cleared depth is 0 (far); the triangles sit at 0.
+  R.coverClear = make("fs_clear", gx::UseReversedZ ? wgpu::CompareFunction::Equal : wgpu::CompareFunction::Equal);
+  R.coverSet = make("fs_set", gx::UseReversedZ ? wgpu::CompareFunction::Less : wgpu::CompareFunction::Greater);
+  R.directKey = layout.key;
+  return true;
+}
+
+void draw_coverage(const wgpu::RenderPassEncoder& pass, void*) {
+  pass.SetPipeline(R.coverClear);
+  pass.Draw(3);
+  pass.SetPipeline(R.coverSet);
+  pass.Draw(3);
+}
+
+void compose(const wgpu::CommandEncoder& cmd, const wgpu::Texture& dst, std::initializer_list<int> sources,
+             TimingZone zone) {
   const auto view = dst.CreateView();
   const wgpu::RenderPassColorAttachment ca{
       .view = view,
@@ -1709,7 +2311,10 @@ void compose(const wgpu::CommandEncoder& cmd, const wgpu::Texture& dst, std::ini
       .storeOp = wgpu::StoreOp::Store,
       .clearValue = {0, 0, 0, 0},
   };
-  const wgpu::RenderPassDescriptor rpd{.label = "XR compose", .colorAttachmentCount = 1, .colorAttachments = &ca};
+  const wgpu::RenderPassDescriptor rpd{.label = "XR compose",
+                                       .colorAttachmentCount = 1,
+                                       .colorAttachments = &ca,
+                                       .timestampWrites = zone_writes(zone)};
   auto pass = cmd.BeginRenderPass(&rpd);
   pass.SetPipeline(R.compose);
   for (int i : sources) {
@@ -1747,19 +2352,70 @@ void render_3d(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame)
     } u{mul(mul(projection(views[eye].fov, 0.05f), view_from_pose(views[eye].pose)), cameraToArena), {1, 0, 0, 0}};
     static_assert(sizeof(u) == gx::XrEyeUniformSize);
     webgpu::g_queue.WriteBuffer(R.eyeUniforms[eye], 0, &u, sizeof(u));
-    gfx::encode_xr_replay(cmd, frame, gfx::XrCategory::World, R.targets[eye].target);
   }
-  if (auto dst = acquire_slot(g_streams[kStereo])) {
-    compose(cmd, dst, {0, 1});
-    R.renderedViews = views;
-    R.renderedStereo = true;
+
+  // Direct path: the framebuffer's format matches the shared 3D image and
+  // there is no MSAA to resolve, so both eyes render straight into the shared
+  // image in one pass (no private eye images, no compose pass). Otherwise
+  // each eye renders privately and a compose pass writes the shared image.
+  auto& stereo = g_streams[kStereo];
+  const auto stereoFormat = stereo.format == VK_FORMAT_B8G8R8A8_UNORM ? wgpu::TextureFormat::BGRA8Unorm
+                                                                      : wgpu::TextureFormat::RGBA8Unorm;
+  const bool direct = layout.sampleCount == 1 &&
+                      layout.colorAttachments[gfx::SceneColorAttachmentIndex].format == stereoFormat &&
+                      env_flag("AURORA_XR_DIRECT", true);
+  if (!R.loggedPath) {
+    Log.info("3D eyes render {}", direct ? "straight into the shared image" : "privately, then composed");
+    R.loggedPath = true;
   }
-  if (frame.xrHasHud) {
-    gfx::encode_xr_replay(cmd, frame, gfx::XrCategory::Hud, R.targets[2].target);
-    if (auto dst = acquire_slot(g_streams[kHud])) {
-      compose(cmd, dst, {2});
+  if (!direct && stereoFormat != wgpu::TextureFormat::RGBA8Unorm) {
+    return; // fallback compose writes RGBA8 only (MSAA switched on mid-session)
+  }
+  if (direct) {
+    if (!ensure_direct(layout))
+      return;
+    if (auto dst = acquire_slot(stereo)) {
+      gfx::XrReplayTarget t;
+      t.layout = layout;
+      t.size = {stereo.width, stereo.height, 1};
+      const auto dstView = dst.CreateView();
+      t.colorViews = R.directExtraViews;
+      t.colorViews[gfx::SceneColorAttachmentIndex] = dstView;
+      t.depthView = R.directDepth.CreateView();
+      t.clearColor = {0, 0, 0, 0};
+      t.clearDepth = gx::UseReversedZ ? 0.f : 1.f;
+      t.depthStore = wgpu::StoreOp::Discard;
+      const float eyeW = static_cast<float>(stereo.width / 2), eyeH = static_cast<float>(stereo.height);
+      t.views[0] = {R.eyeGroups[0], 0.f, 0.f, eyeW, eyeH};
+      t.views[1] = {R.eyeGroups[1], eyeW, 0.f, eyeW, eyeH};
+      t.viewCount = 2;
+      t.finish = &draw_coverage;
+      t.timestampWrites = zone_writes(kZone3D);
+      gfx::encode_xr_replay(cmd, frame, gfx::XrCategory::World, t);
+      R.renderedViews = views;
+      R.renderedStereo = true;
+      g_skipPresent = !env_flag("AURORA_XR_FIGHT_SCREEN", false);
+    }
+  } else {
+    for (int eye = 0; eye < 2; ++eye) {
+      R.targets[eye].target.timestampWrites = zone_writes(eye == 0 ? kZone3D : kZone3DRight);
+      gfx::encode_xr_replay(cmd, frame, gfx::XrCategory::World, R.targets[eye].target);
+    }
+    if (auto dst = acquire_slot(stereo)) {
+      compose(cmd, dst, {0, 1}, kZoneCompose3D);
+      R.renderedViews = views;
+      R.renderedStereo = true;
+      g_skipPresent = !env_flag("AURORA_XR_FIGHT_SCREEN", false);
     }
   }
+  if (frame.xrHasHud) {
+    R.targets[2].target.timestampWrites = zone_writes(kZoneHud);
+    gfx::encode_xr_replay(cmd, frame, gfx::XrCategory::Hud, R.targets[2].target);
+    if (auto dst = acquire_slot(g_streams[kHud])) {
+      compose(cmd, dst, {2}, kZoneComposeHud);
+    }
+  }
+  resolve_timing(cmd);
 }
 
 } // namespace
@@ -1788,9 +2444,15 @@ void add_required_features(const wgpu::Adapter& adapter, std::vector<wgpu::Featu
     if (adapter.HasFeature(f) && std::find(features.begin(), features.end(), f) == features.end())
       features.push_back(f);
   }
+  // XR GPU timing (AURORA_XR_TIMING).
+  if (env_flag("AURORA_XR_TIMING", true) && adapter.HasFeature(wgpu::FeatureName::TimestampQuery) &&
+      std::find(features.begin(), features.end(), wgpu::FeatureName::TimestampQuery) == features.end())
+    features.push_back(wgpu::FeatureName::TimestampQuery);
 }
 
 bool active() noexcept { return g_phase == Phase::Imported && g_sessionRunning; }
+
+bool skip_present() noexcept { return g_skipPresent; }
 
 void screen_size(uint32_t contentWidth, uint32_t contentHeight, uint32_t& width, uint32_t& height) noexcept {
   static uint32_t fixedW = 0, fixedH = 0;
@@ -1812,8 +2474,16 @@ wgpu::Texture begin_frame(uint32_t width, uint32_t height) noexcept {
     g_streams[kScreen].name = "screen";
     g_streams[kStereo].name = "3d";
     g_streams[kHud].name = "hud";
-    g_streams[kScreen].width = g_streams[kHud].width = width;
-    g_streams[kScreen].height = g_streams[kHud].height = height;
+    g_streams[kScreen].width = width;
+    g_streams[kScreen].height = height;
+    // The HUD is big flat text on a small plane: half the screen's
+    // resolution by default (AURORA_XR_HUD_SCALE).
+    const float hudScale = std::clamp(env_float("AURORA_XR_HUD_SCALE", 0.5f), 0.1f, 2.f);
+    g_streams[kHud].width = (static_cast<uint32_t>(static_cast<float>(width) * hudScale + 0.5f) + 1u) & ~1u;
+    g_streams[kHud].height = (static_cast<uint32_t>(static_cast<float>(height) * hudScale + 0.5f) + 1u) & ~1u;
+    const auto layout = gfx::scene_render_target_layout();
+    g_sceneFormat = layout.colorAttachments[gfx::SceneColorAttachmentIndex].format;
+    g_sceneSamples = layout.sampleCount;
     g_phase = Phase::Starting;
     g_thread = std::thread(thread_main);
     return {};
@@ -1844,6 +2514,8 @@ wgpu::Texture begin_frame(uint32_t width, uint32_t height) noexcept {
 }
 
 void end_frame() noexcept {
+  g_skipPresent = false;
+  map_timing();
   release_slot(g_streams[kScreen], nullptr);
   release_slot(g_streams[kStereo], R.renderedStereo ? &R.renderedViews : nullptr);
   R.renderedStereo = false;
@@ -1864,4 +2536,16 @@ extern "C" bool aurora_xr_get_pad(PADStatus* out) {
     return false;
   *out = aurora::xr::g_pad;
   return true;
+}
+
+extern "C" bool aurora_xr_pace(void) {
+  using namespace aurora::xr;
+  if (g_displayPerGameFrame <= 0 || !g_sessionRunning)
+    return false;
+  std::unique_lock lock{g_paceMutex};
+  const uint64_t tick = g_paceTick;
+  // Bounded: a paused or stopped session falls back to the game's own timer.
+  return g_paceCv.wait_for(lock, std::chrono::milliseconds(50), [&] {
+    return g_paceTick != tick || g_displayPerGameFrame <= 0 || !g_sessionRunning;
+  }) && g_paceTick != tick;
 }

@@ -66,26 +66,63 @@ Checked on desktop against Monado (`AURORA_XR_DUMP` images):
   scene) render in 3D at 60 frames per second.
 - **The title screen** stays on the virtual screen.
 
-On a Quest 3 (2026-10-01), a VS match on Final Destination ran as follows:
+### Performance
 
-| Eye scale | Per eye | Display | Game frames | App GPU time |
-|---|---|---|---|---|
-| 1.0 | 1680×1760 | 33 to 51 of 72 | about 35/s | 21 to 27 ms |
-| 0.7 (default) | 1176×1232 | 72 of 72 | 60/s | 10.3 to 11.1 ms |
+On a Quest 3 (2026-10-01), a VS match on Final Destination at full eye
+resolution (1680×1760 per eye):
 
-At 0.7, GPU utilization is 88 to 90%, so headroom is thin. The next savings
-are the per-frame copies of the 3D, HUD, and screen images through the
-bridge, and skipping the virtual screen's present pass during fights.
+| | First run | Now |
+|---|---|---|
+| Display | 72 Hz, 33 to 51 fps | 120 Hz, 120/120, no stale frames |
+| Game frames | about 35/s | 60/s, each shown for 2 display frames |
+| 3D eyes (replay plus coverage) | about 8.7 ms (two replays plus composite) | 6.4 to 7.4 ms, one pass |
+| Bridge copy of the 3D image | 3.5 ms | 0.84 to 0.98 ms |
+| Flat present during fights | rendered | skipped |
+| App GPU time | 21 to 27 ms per 72 Hz frame | 4.5 to 5 ms per 120 Hz frame (about 9 to 10 ms per game frame, 16.7 ms budget) |
+
+What changed:
+
+- **Flat present skipped during fights.** Nothing shows the virtual screen
+  during a fight, so aurora skips the present entirely (`xr::skip_present`).
+- **Direct 3D path.** Both eyes render straight into the shared 3D image in
+  one pass when the framebuffer format matches and MSAA is off. Coverage goes
+  into alpha in the same pass: two full-screen depth-tested triangles write
+  only alpha. Depth is discarded. There's no separate compose pass and no
+  private eye images.
+- **Shader copy on the bridge.** `vkCmdCopyImage` ran at about 13 GB/s on
+  Adreno. A full-screen draw into the swapchain image (`lib/xr/shaders`)
+  is about four times faster. It decodes sRGB before the sRGB attachment
+  re-encodes it, so the bytes come through unchanged.
+- **HUD at half resolution.**
+- **120 Hz, lock-step.** The Quest 3 offers 72, 80, 90, and 120 Hz, with no
+  60. 120 is requested (`XR_FB_display_refresh_rate`), and the game waits on
+  the XR thread's tick every second display frame (`aurora_xr_pace`, from
+  `src/pc/vi.c`) instead of its own timer. Every game frame is then shown for
+  exactly two display frames, instead of 72 Hz repeating every fifth.
+  Netplay keeps its own timer.
+- **Measurement.** `AURORA_XR_TIMING` logs per-pass GPU time (Dawn
+  timestamps) and per-stream bridge copy time (Vulkan timestamps) every 10 s.
 
 ### Known gaps in 3D
+
+From the first headset playtest (2026-10-01):
+
+- **Crash on KO.** The game flashes the 2D viewport and then crashes when a
+  character dies. It's reproducible and not yet investigated.
+- **Stage parts.** They need a per-stage pass. Final Destination is right.
+  Pokémon Stadium still shows its cityscape and skybox. Go stage by stage
+  with `MELEE_XR_STAGE_LOG` and `MELEE_XR_PARTS`.
+- **Full VR mode for fights (pinned).** An option for fights in full VR, not
+  over passthrough, alongside the mixed-reality arena.
 
 - **Background sparkles.** They're effects drawn under the fight camera, so
   some still show, for example Battlefield's twinkles and Final Destination's
   stars.
 - **Fog** still uses the eye's depth instead of the game camera's.
 - **Billboards and particles** face the game camera, not the eye.
-- **Frame rate.** The 3D view updates at the game's 60 Hz with the latest
-  head pose. Re-encoding the last frame per display frame isn't done yet.
+- **Frame rate.** The 3D view updates at the game's 60 Hz. Every second
+  display frame reuses the previous image and relies on the runtime's
+  reprojection; re-rendering it with the newer head pose isn't done.
 - **Placement.** The arena is fixed in the starting head space. There's no
   grab-to-move or table anchoring.
 - **Coverage.** Only the static stages have been looked at.
@@ -113,9 +150,10 @@ are two devices on the same GPU:
 
 The screen texture is 1080 pixels tall, with a width matching the game's
 presented aspect. A Quest app's window spans the whole display panel, so the
-window size isn't used. The game keeps its own 60 Hz pacing, since
-`aurora_vsync_enabled()` reports false while XR is active. The XR thread runs
-at display rate and shows the newest finished frame.
+window size isn't used. `aurora_vsync_enabled()` reports false while XR is
+active. At 120 Hz the game is paced by the XR thread (see Performance);
+otherwise it keeps its own 60 Hz timer. The XR thread runs at display rate
+and shows the newest finished frame.
 
 ## Build and run
 
@@ -160,7 +198,14 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_SCREEN_Y` | 0 | Height offset in meters |
 | `AURORA_XR_SCREEN_HEIGHT` | 1080 | Screen texture height in pixels |
 | `AURORA_XR_3D` | 1 | 3D fights. Set 0 to keep fights on the virtual screen |
-| `AURORA_XR_EYE_SCALE` | 0.7 | Eye resolution, as a fraction of the runtime's recommendation |
+| `AURORA_XR_EYE_SCALE` | 1.0 | Eye resolution, as a fraction of the runtime's recommendation |
+| `AURORA_XR_REFRESH` | unset | Display rate to request if offered (otherwise 60, then 120) |
+| `AURORA_XR_LOCKSTEP` | 1 | Pace the game to the display when it runs at a multiple of 60 Hz |
+| `AURORA_XR_DIRECT` | 1 | Render both eyes straight into the shared 3D image when possible |
+| `AURORA_XR_SHADER_COPY` | 1 | Copy into swapchains with a draw instead of `vkCmdCopyImage` |
+| `AURORA_XR_FIGHT_SCREEN` | 0 | Keep presenting the flat screen during fights (debugging) |
+| `AURORA_XR_HUD_SCALE` | 0.5 | HUD texture resolution, relative to the screen |
+| `AURORA_XR_TIMING` | 1 | Log GPU pass and copy times every 10 s |
 | `AURORA_XR_ARENA_SCALE` | 0.006 | Meters per game unit |
 | `AURORA_XR_ARENA_POS` | `0,-0.45,-1.0` | Arena center, in meters, in the starting head space |
 | `AURORA_XR_HUD_WIDTH` | 0.9 | HUD plane width in meters |
@@ -171,7 +216,7 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `MELEE_XR_PARTS` | unset | Per-part overrides, e.g. `16:1,-36:6` (`stage:map_id`) |
 | `MELEE_XR_STAGE_LOG` | unset | Log each stage part's id and layer once |
 
-## Measured (Quest 3, 72 Hz)
+## Measured: virtual screen only (Quest 3, 72 Hz, before 120 Hz lock-step)
 
 | | Result |
 |---|---|
