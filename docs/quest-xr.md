@@ -66,7 +66,16 @@ Checked on desktop against Monado (`AURORA_XR_DUMP` images):
   scene) render in 3D at 60 frames per second.
 - **The title screen** stays on the virtual screen.
 
-Not yet run on a headset.
+On a Quest 3 (2026-10-01), a VS match on Final Destination ran as follows:
+
+| Eye scale | Per eye | Display | Game frames | App GPU time |
+|---|---|---|---|---|
+| 1.0 | 1680×1760 | 33 to 51 of 72 | about 35/s | 21 to 27 ms |
+| 0.7 (default) | 1176×1232 | 72 of 72 | 60/s | 10.3 to 11.1 ms |
+
+At 0.7, GPU utilization is 88 to 90%, so headroom is thin. The next savings
+are the per-frame copies of the 3D, HUD, and screen images through the
+bridge, and skipping the virtual screen's present pass during fights.
 
 ### Known gaps in 3D
 
@@ -151,7 +160,7 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_SCREEN_Y` | 0 | Height offset in meters |
 | `AURORA_XR_SCREEN_HEIGHT` | 1080 | Screen texture height in pixels |
 | `AURORA_XR_3D` | 1 | 3D fights. Set 0 to keep fights on the virtual screen |
-| `AURORA_XR_EYE_SCALE` | 1.0 | Eye resolution, as a fraction of the runtime's recommendation |
+| `AURORA_XR_EYE_SCALE` | 0.7 | Eye resolution, as a fraction of the runtime's recommendation |
 | `AURORA_XR_ARENA_SCALE` | 0.006 | Meters per game unit |
 | `AURORA_XR_ARENA_POS` | `0,-0.45,-1.0` | Arena center, in meters, in the starting head space |
 | `AURORA_XR_HUD_WIDTH` | 0.9 | HUD plane width in meters |

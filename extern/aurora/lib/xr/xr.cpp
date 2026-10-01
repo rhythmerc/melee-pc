@@ -574,7 +574,9 @@ bool create_swapchain(Stream& st) {
 }
 
 // Eye resolution for 3D fights: the runtime's recommendation scaled by
-// AURORA_XR_EYE_SCALE.
+// AURORA_XR_EYE_SCALE. 0.7 by default: on a Quest 3 the full 1680x1760 per
+// eye took 21-27 ms of GPU per frame (about 35 fps); 0.7 (1176x1232) holds
+// 72 Hz at about 10.5 ms.
 bool size_stereo_stream() {
   uint32_t n = 0;
   XR_TRY(xrEnumerateViewConfigurationViews(B.instance, B.systemId, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 0, &n,
@@ -586,7 +588,7 @@ bool size_stereo_stream() {
     Log.error("Expected 2 stereo views, got {}", n);
     return false;
   }
-  const float scale = std::clamp(env_float("AURORA_XR_EYE_SCALE", 1.f), 0.25f, 2.f);
+  const float scale = std::clamp(env_float("AURORA_XR_EYE_SCALE", 0.7f), 0.25f, 2.f);
   const auto even = [](float v) { return (static_cast<uint32_t>(v + 0.5f) + 1u) & ~1u; };
   const uint32_t eyeW = even(static_cast<float>(views[0].recommendedImageRectWidth) * scale);
   const uint32_t eyeH = even(static_cast<float>(views[0].recommendedImageRectHeight) * scale);
