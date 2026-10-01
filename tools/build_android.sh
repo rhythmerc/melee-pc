@@ -14,7 +14,18 @@ XR_GRADLE_ARGS=()
 APK_NAME=Melee-Android-arm64.apk
 DEFAULT_BUILD_DIR="${ROOT_DIR}/build/android-arm64"
 if [[ "${MELEE_XR}" == 1 ]]; then
-    XR_CMAKE_ARGS=(-DAURORA_ENABLE_OPENXR=ON)
+    # The XR build renders into OpenXR's swapchain images on Dawn's own device,
+    # which needs Dawn built from the melee-xr fork (single-device hooks; see
+    # docs/quest-xr.md). MELEE_DAWN_SOURCE: a checkout of that branch.
+    MELEE_DAWN_SOURCE="${MELEE_DAWN_SOURCE:-${HOME}/projects/dawn}"
+    if [[ ! -f "${MELEE_DAWN_SOURCE}/include/dawn/native/VulkanBackend.h" ]] ||
+        ! grep -q SetExternalVulkanHooks "${MELEE_DAWN_SOURCE}/include/dawn/native/VulkanBackend.h"; then
+        echo "error: MELEE_DAWN_SOURCE (${MELEE_DAWN_SOURCE}) is not a melee-xr Dawn checkout" >&2
+        exit 1
+    fi
+    XR_CMAKE_ARGS=(-DAURORA_ENABLE_OPENXR=ON -DAURORA_DAWN_PROVIDER=vendor
+        "-DFETCHCONTENT_SOURCE_DIR_DAWN=${MELEE_DAWN_SOURCE}" -DDAWN_SUPPORTS_CXX_MODULES=OFF
+        -DDAWN_BUILD_PROTOBUF=OFF -DTINT_BUILD_IR_BINARY=OFF)
     XR_GRADLE_ARGS=(-Pmelee.xr=true)
     APK_NAME=Melee-Quest-XR-arm64.apk
     DEFAULT_BUILD_DIR="${ROOT_DIR}/build/android-arm64-xr"
@@ -29,6 +40,24 @@ fi
 if [[ ! -d "${ANDROID_NDK_HOME}" ]]; then
     echo "error: no Android NDK found; set ANDROID_NDK_HOME" >&2
     exit 1
+fi
+# The XR build compiles Dawn from source, which needs C++20 aggregate CTAD:
+# NDK r28 or newer (r26's Clang 17 rejects Tint). Prefer the newest installed.
+if [[ "${MELEE_XR}" == 1 ]]; then
+    ndk_major() { sed -n 's/^Pkg.Revision *= *\([0-9]*\).*/\1/p' "$1/source.properties" 2>/dev/null; }
+    if (( $(ndk_major "${ANDROID_NDK_HOME}") < 28 )); then
+        NEWEST_NDK="$(find "${ANDROID_HOME}/ndk" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort -V | tail -1)"
+        if [[ -n "${NEWEST_NDK}" ]] && (( $(ndk_major "${NEWEST_NDK}") >= 28 )); then
+            echo "MELEE_XR: using ${NEWEST_NDK} (Dawn needs NDK r28+, ${ANDROID_NDK_HOME} is older)"
+            # The game is compiled by GCC, which rejects r28+ headers'
+            # Clang-only availability attributes: keep it on the older NDK.
+            export GCC_NDK_HOME="${GCC_NDK_HOME:-${ANDROID_NDK_HOME}}"
+            ANDROID_NDK_HOME="${NEWEST_NDK}"
+        else
+            echo "error: MELEE_XR=1 needs NDK r28 or newer (Dawn from source); install one with sdkmanager" >&2
+            exit 1
+        fi
+    fi
 fi
 export ANDROID_NDK_HOME
 if [[ -d "${HOME}/Android/jdk17" && -z "${JAVA_HOME:-}" ]]; then

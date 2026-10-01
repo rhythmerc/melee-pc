@@ -862,6 +862,11 @@ bool initialize(AuroraBackend auroraBackend, bool allowCpu) {
     };
     instanceDescriptor.nextInChain = reinterpret_cast<wgpu::ChainedStruct*>(&dawnInstanceDescriptor);
 #endif
+#ifdef AURORA_ENABLE_OPENXR
+    // The OpenXR runtime creates Dawn's Vulkan instance and device, so it
+    // has to be set up before the adapter is requested.
+    xr::prepare_device();
+#endif
     g_instance = wgpu::CreateInstance(&instanceDescriptor);
     if (!g_instance) {
       Log.error("Failed to create WebGPU instance");

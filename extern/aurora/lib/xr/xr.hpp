@@ -27,6 +27,16 @@ namespace aurora::xr {
 // builds configured with AURORA_XR_DEFAULT_ON). Cheap; safe from any thread.
 bool wanted() noexcept;
 
+// Before the WebGPU instance and adapter are created: creates the OpenXR
+// instance and system and has the runtime create Dawn's Vulkan instance and
+// device (Dawn fork hooks), so frames render straight into OpenXR swapchain
+// images. False (and XR off) when OpenXR is unavailable. Main thread.
+bool prepare_device() noexcept;
+
+// After the WebGPU device is gone: destroys the OpenXR instance, which
+// created Dawn's Vulkan device and so has to outlive it.
+void release_instance() noexcept;
+
 // Adds the Dawn features the handoff needs when the adapter has them.
 void add_required_features(const wgpu::Adapter& adapter, std::vector<wgpu::FeatureName>& features) noexcept;
 

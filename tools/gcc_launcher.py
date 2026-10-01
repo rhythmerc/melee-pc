@@ -85,7 +85,10 @@ gcc_dir = os.path.dirname(gcc_bin)
 if gcc_dir:
     os.environ['PATH'] = gcc_dir + ':' + os.environ.get('PATH', '')
 
-ndk_root = os.environ.get('ANDROID_NDK_HOME')
+# GCC_NDK_HOME: the NDK whose headers GCC compiles against, when the build
+# uses a newer one for Clang (r28+ headers use Clang-only availability
+# attributes GCC rejects).
+ndk_root = os.environ.get('GCC_NDK_HOME') or os.environ.get('ANDROID_NDK_HOME')
 if not ndk_root:
     sys.exit('gcc_launcher: ANDROID_NDK_HOME is not set')
 sysroot = os.path.join(ndk_root, 'toolchains/llvm/prebuilt/linux-x86_64/sysroot')

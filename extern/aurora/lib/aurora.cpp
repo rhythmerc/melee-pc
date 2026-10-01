@@ -274,6 +274,9 @@ void shutdown() noexcept {
   imgui::shutdown();
   gfx::shutdown();
   webgpu::shutdown();
+#ifdef AURORA_ENABLE_OPENXR
+  xr::release_instance();
+#endif
 #endif
   input::shutdown();
   window::shutdown();
@@ -372,6 +375,8 @@ void end_frame() noexcept {
       if (currentTexture) {
         currentView = currentTexture.CreateView();
         presentToXr = true;
+      } else if (xr::skip_present()) {
+        skipPresent = true; // XR is up but had no image ready this frame
       }
     }
 #endif

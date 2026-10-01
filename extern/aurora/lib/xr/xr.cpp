@@ -6,7 +6,6 @@
 #include "../webgpu/gpu.hpp"
 #include "../gfx/xr_replay.hpp"
 #include "../gx/gx.hpp"
-#include "shaders/copy_spv.hpp"
 
 #include <aurora/gfx.hpp>
 
@@ -22,6 +21,9 @@
 #include <vulkan/vulkan.h>
 #include <openxr/openxr.h>
 #include <openxr/openxr_platform.h>
+// After vulkan.h: the fork's single-device hooks (github.com/encounter/dawn
+// plus the melee-xr patches; see docs/quest-xr.md).
+#include <dawn/native/VulkanBackend.h>
 
 #include <unistd.h>
 
@@ -35,6 +37,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <condition_variable>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -45,74 +48,66 @@ Module Log("aurora::xr");
 
 // ---------------------------------------------------------------- platform
 //
-// How the two devices share memory and synchronize (Dawn's choices; see
-// src/dawn/native/vulkan/SharedTextureMemoryVk.cpp and SharedFenceVk.cpp):
-//   Linux    OPAQUE_FD memory, OPAQUE_FD semaphores, VK_QUEUE_FAMILY_EXTERNAL
-//   Android  AHardwareBuffer memory, SYNC_FD semaphores, VK_QUEUE_FAMILY_FOREIGN_EXT
+// One Vulkan device: the OpenXR runtime creates Dawn's VkInstance and
+// VkDevice (XR_KHR_vulkan_enable2, through the Dawn fork's
+// SetExternalVulkanHooks), and Dawn renders straight into the runtime's
+// swapchain images. Dawn submits on queue 0 of its family; the XR thread and
+// the runtime use queue 1. A finished image comes back from Dawn with a
+// semaphore (SYNC_FD on Android, OPAQUE_FD on Linux) that the XR thread waits
+// on, on its queue, before releasing the image.
 #ifdef __ANDROID__
 constexpr VkExternalSemaphoreHandleTypeFlagBits kSemHandle = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
 constexpr VkSemaphoreImportFlags kSemImportFlags = VK_SEMAPHORE_IMPORT_TEMPORARY_BIT; // required for SYNC_FD
-constexpr uint32_t kExternalQueueFamily = VK_QUEUE_FAMILY_FOREIGN_EXT;
 constexpr wgpu::SharedFenceType kDawnFenceType = wgpu::SharedFenceType::SyncFD;
 using DawnFenceExportInfo = wgpu::SharedFenceSyncFDExportInfo;
-using DawnFenceDescriptor = wgpu::SharedFenceSyncFDDescriptor;
 #else
 constexpr VkExternalSemaphoreHandleTypeFlagBits kSemHandle = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_OPAQUE_FD_BIT;
 constexpr VkSemaphoreImportFlags kSemImportFlags = 0;
-constexpr uint32_t kExternalQueueFamily = VK_QUEUE_FAMILY_EXTERNAL;
 constexpr wgpu::SharedFenceType kDawnFenceType = wgpu::SharedFenceType::VkSemaphoreOpaqueFD;
 using DawnFenceExportInfo = wgpu::SharedFenceVkSemaphoreOpaqueFDExportInfo;
-using DawnFenceDescriptor = wgpu::SharedFenceVkSemaphoreOpaqueFDDescriptor;
 #endif
 
 // ---------------------------------------------------------------- state
 //
 // Three image streams go from the render worker to the XR thread, each with
-// its own shared images and swapchain:
+// its own swapchain:
 //   Screen  the presented frame, on the virtual screen (menus, or any time
 //           the game draws no fight)
 //   Stereo  3D fights: both eyes side by side, submitted as a projection
 //           layer with the head poses they were rendered for
 //   Hud     the HUD of a 3D fight, on a quad above the arena
-
-constexpr int kSlotCount = 3;
+//
+// A slot is one swapchain image. The XR thread acquires images ahead of the
+// render worker, which draws into the oldest one through Dawn and hands it
+// back; the XR thread then releases them in acquisition order, as OpenXR
+// requires.
 
 enum class SlotState {
-  Free,      // render worker may take it
-  Rendering, // render worker is drawing into it
-  Ready,     // finished frame waiting for the XR thread
-  Copying,   // XR thread is copying it into the swapchain
+  Released,  // the runtime's
+  Acquired,  // acquired by the XR thread; xrWaitSwapchainImage still pending
+  Free,      // acquired and waited: the render worker may take it
+  Rendering, // the render worker is drawing into it
+  Ready,     // drawn; the XR thread releases it next
 };
 
 struct PendingAccess {
-  // What the next acquire of this slot must wait on and acquire with. Set by
-  // whichever side released the image last.
+  // Dawn's release of the image: semaphores to wait on and the layout it left.
   std::vector<int> fds;
   VkImageLayout oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
   VkImageLayout newLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 };
 
 struct Slot {
-  // Allocated on the bridge device by the XR thread.
-  VkImage image = VK_NULL_HANDLE;
-  VkDeviceMemory memory = VK_NULL_HANDLE;
-  VkDeviceSize allocationSize = 0;
-  uint32_t memoryTypeIndex = 0;
-  int exportedMemoryFd = -1; // Linux: handed to Dawn once
-#ifdef __ANDROID__
-  AHardwareBuffer* ahb = nullptr;
-#endif
+  VkImage image = VK_NULL_HANDLE; // the runtime's swapchain image
 
   // Render worker only.
   wgpu::SharedTextureMemory stm;
   wgpu::Texture texture;
-  bool initialized = false;
 
   // Guarded by g_mutex.
-  SlotState state = SlotState::Free;
-  uint64_t readySeq = 0;
-  PendingAccess forDawn;   // next Dawn BeginAccess
-  PendingAccess forBridge; // Dawn's release, for the XR thread's acquire
+  SlotState state = SlotState::Released;
+  uint64_t acquireSeq = 0;       // acquisition order
+  PendingAccess fromDawn;        // set when Ready
   std::array<XrView, 2> views{}; // Stereo: the eye poses this image was rendered for
 
   // XR thread only.
@@ -120,36 +115,25 @@ struct Slot {
   VkFence fence = VK_NULL_HANDLE;
   bool inFlight = false;
   std::vector<VkSemaphore> waitSems;
-  VkSemaphore signalSem = VK_NULL_HANDLE;
-  VkSemaphore prevSignalSem = VK_NULL_HANDLE;
-  VkImageView srcView = VK_NULL_HANDLE;           // shader copy source
-  VkDescriptorSet srcSet = VK_NULL_HANDLE;
 };
 
 enum StreamId : int { kScreen = 0, kStereo = 1, kHud = 2, kStreamCount = 3 };
 
 struct Stream {
   const char* name = "";
-  std::array<Slot, kSlotCount> slots;
+  std::vector<Slot> slots;        // one per swapchain image; sized before Phase::SlotsReady
   uint32_t width = 0, height = 0; // set before the XR thread starts
-  VkFormat format = VK_FORMAT_R8G8B8A8_UNORM; // shared images
-  int64_t swapFormat = 0;                     // swapchain (the sRGB twin of `format`)
-  uint64_t readySeq = 0;          // g_mutex
+  VkFormat format = VK_FORMAT_R8G8B8A8_UNORM; // what Dawn draws as (bytes already sRGB-encoded)
+  int64_t swapFormat = 0;                     // swapchain: the sRGB twin, created mutable-format
+  uint64_t acquireSeq = 0;        // g_mutex
   int renderingSlot = -1;         // render worker
 
   // XR thread only.
   XrSwapchain swapchain = XR_NULL_HANDLE;
-  std::vector<VkImage> swapImages;
   bool haveImage = false;
-  std::chrono::steady_clock::time_point lastCopy{};
-  uint64_t copies = 0;
-  std::array<XrView, 2> shownViews{}; // Stereo: poses of the image in the swapchain
-  // Shader copy (AURORA_XR_SHADER_COPY): draws the shared image into the
-  // swapchain image instead of vkCmdCopyImage.
-  VkRenderPass copyPass = VK_NULL_HANDLE;
-  VkPipeline copyPipeline = VK_NULL_HANDLE;
-  std::vector<VkImageView> swapViews;
-  std::vector<VkFramebuffer> swapFramebuffers;
+  std::chrono::steady_clock::time_point lastRelease{};
+  uint64_t releases = 0;
+  std::array<XrView, 2> shownViews{}; // Stereo: poses of the last released image
   // Debug dump (AURORA_XR_DUMP)
   VkBuffer dumpBuf = VK_NULL_HANDLE;
   VkDeviceMemory dumpMem = VK_NULL_HANDLE;
@@ -161,15 +145,15 @@ struct Stream {
 enum class Phase { Idle, Starting, SlotsReady, Imported, Failed };
 
 std::mutex g_mutex;
+std::condition_variable g_slotFreeCv; // a slot became Free (XR thread -> render worker)
 std::atomic<Phase> g_phase{Phase::Idle};
 std::atomic<bool> g_stop{false};
 std::atomic<bool> g_sessionRunning{false};
 std::thread g_thread;
 std::array<Stream, kStreamCount> g_streams;
-uint32_t g_bridgeVendor = 0, g_bridgeDevice = 0;
 // The game framebuffer's format and sample count, read by begin_frame before
 // the XR thread starts: when they allow it, both eyes render straight into
-// the shared 3D image, which then has to be in the framebuffer's format.
+// the 3D swapchain image, which then has to be in the framebuffer's format.
 wgpu::TextureFormat g_sceneFormat = wgpu::TextureFormat::RGBA8Unorm;
 uint32_t g_sceneSamples = 1;
 
@@ -210,7 +194,7 @@ std::mutex g_padMutex;
 PADStatus g_pad{};
 bool g_padValid = false;
 
-// XR thread only.
+// XR thread only, except where noted.
 struct Bridge {
   XrInstance instance = XR_NULL_HANDLE;
   XrSystemId systemId = XR_NULL_SYSTEM_ID;
@@ -222,20 +206,23 @@ struct Bridge {
   XrPassthroughLayerFB passthroughLayer = XR_NULL_HANDLE;
   bool running = false;
 
+  // Dawn's device (borrowed: Dawn owns it), set by begin_frame before the XR
+  // thread starts. `queue` is the spare queue Dawn created for us (index
+  // queueIndex of Dawn's family); the runtime gets it in the graphics binding.
   VkInstance vkInstance = VK_NULL_HANDLE;
   VkPhysicalDevice phys = VK_NULL_HANDLE;
   VkDevice dev = VK_NULL_HANDLE;
   VkQueue queue = VK_NULL_HANDLE;
   uint32_t queueFamily = 0;
+  uint32_t queueIndex = 1;
   VkCommandPool pool = VK_NULL_HANDLE;
   VkPhysicalDeviceMemoryProperties memProps{};
-  PFN_vkGetSemaphoreFdKHR getSemaphoreFd = nullptr;
   PFN_vkImportSemaphoreFdKHR importSemaphoreFd = nullptr;
-#ifdef __ANDROID__
-  PFN_vkGetAndroidHardwareBufferPropertiesANDROID getAhbProps = nullptr;
-#else
-  PFN_vkGetMemoryFdKHR getMemoryFd = nullptr;
-#endif
+  // XR_KHR_vulkan_enable2, for Dawn's creation hooks (main thread).
+  PFN_xrCreateVulkanInstanceKHR createVulkanInstance = nullptr;
+  PFN_xrCreateVulkanDeviceKHR createVulkanDevice = nullptr;
+  PFN_xrGetVulkanGraphicsDevice2KHR getVulkanGraphicsDevice = nullptr;
+  bool prepared = false; // prepare_device ran and Dawn's hooks are set
 
   bool hasRefreshRateExt = false;
   PFN_xrEnumerateDisplayRefreshRatesFB enumerateRefreshRates = nullptr;
@@ -249,12 +236,6 @@ struct Bridge {
   PFN_xrDestroyPassthroughLayerFB destroyPassthroughLayer = nullptr;
 
   std::string dumpDir; // AURORA_XR_DUMP
-
-  VkSampler copySampler = VK_NULL_HANDLE;
-  VkDescriptorSetLayout copySetLayout = VK_NULL_HANDLE;
-  VkPipelineLayout copyLayout = VK_NULL_HANDLE;
-  VkDescriptorPool copyPool = VK_NULL_HANDLE;
-  VkShaderModule copyVert = VK_NULL_HANDLE, copyFrag = VK_NULL_HANDLE;
 
   // Controller input
   XrActionSet actionSet = XR_NULL_HANDLE;
@@ -274,12 +255,7 @@ struct Bridge {
   bool hasColorScaleBias = false;
 
   uint64_t framesShown = 0, fightFrames = 0;
-  std::array<uint64_t, kStreamCount> copiedSinceStats{};
-  // Bridge copy timing (AURORA_XR_TIMING): 2 timestamps per slot per stream.
-  VkQueryPool timestamps = VK_NULL_HANDLE;
-  float timestampPeriodNs = 1.f;
-  std::array<double, kStreamCount> copyNs{};
-  std::array<uint64_t, kStreamCount> copySamples{};
+  std::array<uint64_t, kStreamCount> releasedSinceStats{};
   std::chrono::steady_clock::time_point statsStart;
 };
 Bridge B;
@@ -330,36 +306,6 @@ uint32_t find_memory_type(uint32_t bits, VkMemoryPropertyFlags want) {
     if ((bits & (1u << i)) && (B.memProps.memoryTypes[i].propertyFlags & want) == want)
       return i;
   return UINT32_MAX;
-}
-
-// The shared image's create info. The render worker rebuilds the identical
-// struct for Dawn's opaque-FD import, so it lives in one place.
-VkImageCreateInfo shared_image_info(VkExternalMemoryImageCreateInfo& ext, uint32_t width, uint32_t height,
-                                    VkFormat format) {
-  ext = {VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};
-#ifdef __ANDROID__
-  ext.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
-#else
-  ext.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
-#endif
-  VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-  ici.pNext = &ext;
-#ifndef __ANDROID__
-  // Dawn requires MUTABLE_FORMAT to offer RGBA8Unorm/RGBA8UnormSrgb views.
-  ici.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
-#endif
-  ici.imageType = VK_IMAGE_TYPE_2D;
-  ici.format = format;
-  ici.extent = {width, height, 1};
-  ici.mipLevels = 1;
-  ici.arrayLayers = 1;
-  ici.samples = VK_SAMPLE_COUNT_1_BIT;
-  ici.tiling = VK_IMAGE_TILING_OPTIMAL;
-  ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-              VK_IMAGE_USAGE_SAMPLED_BIT;
-  ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-  ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-  return ici;
 }
 
 VkImageMemoryBarrier barrier(VkImage img, VkImageLayout from, VkImageLayout to, VkAccessFlags srcA,
@@ -455,196 +401,99 @@ bool create_instance() {
   return true;
 }
 
-bool create_bridge_device() {
-  auto getReqs = xr_proc<PFN_xrGetVulkanGraphicsRequirements2KHR>("xrGetVulkanGraphicsRequirements2KHR");
-  auto createInst = xr_proc<PFN_xrCreateVulkanInstanceKHR>("xrCreateVulkanInstanceKHR");
-  auto getDev = xr_proc<PFN_xrGetVulkanGraphicsDevice2KHR>("xrGetVulkanGraphicsDevice2KHR");
-  auto createDev = xr_proc<PFN_xrCreateVulkanDeviceKHR>("xrCreateVulkanDeviceKHR");
-  if (!getReqs || !createInst || !getDev || !createDev) {
-    Log.error("XR_KHR_vulkan_enable2 entry points missing");
-    return false;
-  }
-  XrGraphicsRequirementsVulkan2KHR reqs{XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN2_KHR};
-  XR_TRY(getReqs(B.instance, B.systemId, &reqs));
-
-  VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-  app.pApplicationName = "melee-pc xr bridge";
-  app.apiVersion = VK_API_VERSION_1_1;
-  VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
-  ici.pApplicationInfo = &app;
+// Dawn's Vulkan instance and device, created through the runtime
+// (XR_KHR_vulkan_enable2) so it can add what it needs and pick the GPU.
+// Called by Dawn on the main thread during adapter discovery and device
+// creation (prepare_device sets these up).
+VkResult hook_create_instance(void*, PFN_vkGetInstanceProcAddr getProcAddr, const VkInstanceCreateInfo* info,
+                              VkInstance* out) {
   XrVulkanInstanceCreateInfoKHR xici{XR_TYPE_VULKAN_INSTANCE_CREATE_INFO_KHR};
   xici.systemId = B.systemId;
-  xici.pfnGetInstanceProcAddr = &vkGetInstanceProcAddr;
-  xici.vulkanCreateInfo = &ici;
+  xici.pfnGetInstanceProcAddr = getProcAddr;
+  xici.vulkanCreateInfo = info;
   VkResult vr = VK_SUCCESS;
-  XR_TRY(createInst(B.instance, &xici, &B.vkInstance, &vr));
-  VK_TRY(vr);
+  const XrResult r = B.createVulkanInstance(B.instance, &xici, out, &vr);
+  if (XR_FAILED(r)) {
+    Log.error("xrCreateVulkanInstanceKHR failed: XrResult {}", static_cast<int>(r));
+    return VK_ERROR_INITIALIZATION_FAILED;
+  }
+  return vr;
+}
 
+VkPhysicalDevice hook_physical_device(void*, VkInstance instance) {
   XrVulkanGraphicsDeviceGetInfoKHR gi{XR_TYPE_VULKAN_GRAPHICS_DEVICE_GET_INFO_KHR};
   gi.systemId = B.systemId;
-  gi.vulkanInstance = B.vkInstance;
-  XR_TRY(getDev(B.instance, &gi, &B.phys));
+  gi.vulkanInstance = instance;
+  VkPhysicalDevice phys = VK_NULL_HANDLE;
+  if (XR_FAILED(B.getVulkanGraphicsDevice(B.instance, &gi, &phys)))
+    Log.error("xrGetVulkanGraphicsDevice2KHR failed");
+  return phys;
+}
+
+VkResult hook_create_device(void*, PFN_vkGetInstanceProcAddr getProcAddr, VkPhysicalDevice phys,
+                            const VkDeviceCreateInfo* info, VkDevice* out) {
+  XrVulkanDeviceCreateInfoKHR xdci{XR_TYPE_VULKAN_DEVICE_CREATE_INFO_KHR};
+  xdci.systemId = B.systemId;
+  xdci.pfnGetInstanceProcAddr = getProcAddr;
+  xdci.vulkanPhysicalDevice = phys;
+  xdci.vulkanCreateInfo = info;
+  VkResult vr = VK_SUCCESS;
+  const XrResult r = B.createVulkanDevice(B.instance, &xdci, out, &vr);
+  if (XR_FAILED(r)) {
+    Log.error("xrCreateVulkanDeviceKHR failed: XrResult {}", static_cast<int>(r));
+    return VK_ERROR_INITIALIZATION_FAILED;
+  }
+  return vr;
+}
+
+// XR thread: everything it needs on Dawn's device (handles set by
+// begin_frame from dawn::native::vulkan::GetDeviceVkHandles).
+bool adopt_dawn_device() {
+  if (!B.dev || !B.queue) {
+    Log.error("Dawn's device has no spare queue for the OpenXR runtime");
+    return false;
+  }
   vkGetPhysicalDeviceMemoryProperties(B.phys, &B.memProps);
   VkPhysicalDeviceProperties pp;
   vkGetPhysicalDeviceProperties(B.phys, &pp);
-  g_bridgeVendor = pp.vendorID;
-  g_bridgeDevice = pp.deviceID;
-
-  uint32_t n = 0;
-  vkEnumerateDeviceExtensionProperties(B.phys, nullptr, &n, nullptr);
-  std::vector<VkExtensionProperties> have(n);
-  vkEnumerateDeviceExtensionProperties(B.phys, nullptr, &n, have.data());
-#ifdef __ANDROID__
-  std::vector<const char*> need{VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME,
-                                VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME,
-                                VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME};
-#else
-  std::vector<const char*> need{VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME};
-#endif
-  for (const char* e : need) {
-    if (std::none_of(have.begin(), have.end(), [&](const auto& p) { return !std::strcmp(p.extensionName, e); })) {
-      Log.error("Bridge GPU lacks {}", e);
-      return false;
-    }
-  }
-
-  vkGetPhysicalDeviceQueueFamilyProperties(B.phys, &n, nullptr);
-  std::vector<VkQueueFamilyProperties> qfs(n);
-  vkGetPhysicalDeviceQueueFamilyProperties(B.phys, &n, qfs.data());
-  B.queueFamily = UINT32_MAX;
-  for (uint32_t i = 0; i < n && B.queueFamily == UINT32_MAX; ++i)
-    if (qfs[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)
-      B.queueFamily = i;
-  if (B.queueFamily == UINT32_MAX) {
-    Log.error("Bridge GPU has no graphics queue");
-    return false;
-  }
-  const float prio = 1.f;
-  VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
-  qci.queueFamilyIndex = B.queueFamily;
-  qci.queueCount = 1;
-  qci.pQueuePriorities = &prio;
-  VkDeviceCreateInfo dci{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
-  dci.queueCreateInfoCount = 1;
-  dci.pQueueCreateInfos = &qci;
-  dci.enabledExtensionCount = static_cast<uint32_t>(need.size());
-  dci.ppEnabledExtensionNames = need.data();
-  XrVulkanDeviceCreateInfoKHR xdci{XR_TYPE_VULKAN_DEVICE_CREATE_INFO_KHR};
-  xdci.systemId = B.systemId;
-  xdci.pfnGetInstanceProcAddr = &vkGetInstanceProcAddr;
-  xdci.vulkanPhysicalDevice = B.phys;
-  xdci.vulkanCreateInfo = &dci;
-  XR_TRY(createDev(B.instance, &xdci, &B.dev, &vr));
-  VK_TRY(vr);
-  vkGetDeviceQueue(B.dev, B.queueFamily, 0, &B.queue);
-
-  B.getSemaphoreFd = reinterpret_cast<PFN_vkGetSemaphoreFdKHR>(vkGetDeviceProcAddr(B.dev, "vkGetSemaphoreFdKHR"));
   B.importSemaphoreFd =
       reinterpret_cast<PFN_vkImportSemaphoreFdKHR>(vkGetDeviceProcAddr(B.dev, "vkImportSemaphoreFdKHR"));
-#ifdef __ANDROID__
-  B.getAhbProps = reinterpret_cast<PFN_vkGetAndroidHardwareBufferPropertiesANDROID>(
-      vkGetDeviceProcAddr(B.dev, "vkGetAndroidHardwareBufferPropertiesANDROID"));
-  if (!B.getAhbProps) {
-    Log.error("vkGetAndroidHardwareBufferPropertiesANDROID missing");
+  if (!B.importSemaphoreFd) {
+    Log.error("vkImportSemaphoreFdKHR missing on Dawn's device");
     return false;
   }
-#else
-  B.getMemoryFd = reinterpret_cast<PFN_vkGetMemoryFdKHR>(vkGetDeviceProcAddr(B.dev, "vkGetMemoryFdKHR"));
-  if (!B.getMemoryFd) {
-    Log.error("vkGetMemoryFdKHR missing");
-    return false;
-  }
-#endif
-  if (!B.getSemaphoreFd || !B.importSemaphoreFd) {
-    Log.error("Semaphore fd entry points missing");
-    return false;
-  }
-
   VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
   pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
   pci.queueFamilyIndex = B.queueFamily;
   VK_TRY(vkCreateCommandPool(B.dev, &pci, nullptr, &B.pool));
-  if (env_flag("AURORA_XR_TIMING", true) && qfs[B.queueFamily].timestampValidBits > 0) {
-    VkQueryPoolCreateInfo qpci{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
-    qpci.queryType = VK_QUERY_TYPE_TIMESTAMP;
-    qpci.queryCount = kStreamCount * kSlotCount * 2;
-    if (vkCreateQueryPool(B.dev, &qpci, nullptr, &B.timestamps) == VK_SUCCESS)
-      B.timestampPeriodNs = pp.limits.timestampPeriod;
-  }
-  Log.info("Bridge VkDevice: {} [{:04x}:{:04x}]", pp.deviceName, pp.vendorID, pp.deviceID);
+  Log.info("Rendering on Dawn's VkDevice: {}, queue family {} (OpenXR queue {})", pp.deviceName, B.queueFamily,
+           B.queueIndex);
   return true;
 }
 
-bool create_slot(Slot& s, uint32_t width, uint32_t height, VkFormat format) {
-  VkExternalMemoryImageCreateInfo ext;
-  VkImageCreateInfo ici = shared_image_info(ext, width, height, format);
-#ifdef __ANDROID__
-  AHardwareBuffer_Desc ad{};
-  ad.width = width;
-  ad.height = height;
-  ad.layers = 1;
-  ad.format = AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
-  ad.usage = AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT | AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
-  if (AHardwareBuffer_allocate(&ad, &s.ahb) != 0) {
-    Log.error("AHardwareBuffer_allocate failed");
-    return false;
-  }
-  VkAndroidHardwareBufferFormatPropertiesANDROID fp{VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID};
-  VkAndroidHardwareBufferPropertiesANDROID hp{VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID};
-  hp.pNext = &fp;
-  VK_TRY(B.getAhbProps(B.dev, s.ahb, &hp));
-  VK_TRY(vkCreateImage(B.dev, &ici, nullptr, &s.image));
-  VkImportAndroidHardwareBufferInfoANDROID imp{VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID};
-  imp.buffer = s.ahb;
-  VkMemoryDedicatedAllocateInfo dai{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
-  dai.pNext = &imp;
-  dai.image = s.image;
-  VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  mai.pNext = &dai;
-  mai.allocationSize = hp.allocationSize;
-  mai.memoryTypeIndex = find_memory_type(hp.memoryTypeBits, 0);
-#else
-  VK_TRY(vkCreateImage(B.dev, &ici, nullptr, &s.image));
-  VkMemoryRequirements mr;
-  vkGetImageMemoryRequirements(B.dev, s.image, &mr);
-  VkExportMemoryAllocateInfo emai{VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO};
-  emai.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
-  VkMemoryDedicatedAllocateInfo dai{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};
-  dai.pNext = &emai;
-  dai.image = s.image;
-  VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-  mai.pNext = &dai;
-  mai.allocationSize = mr.size;
-  mai.memoryTypeIndex = find_memory_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-#endif
-  if (mai.memoryTypeIndex == UINT32_MAX) {
-    Log.error("No memory type for the shared image");
-    return false;
-  }
-  VK_TRY(vkAllocateMemory(B.dev, &mai, nullptr, &s.memory));
-  VK_TRY(vkBindImageMemory(B.dev, s.image, s.memory, 0));
-  s.allocationSize = mai.allocationSize;
-  s.memoryTypeIndex = mai.memoryTypeIndex;
-#ifndef __ANDROID__
-  VkMemoryGetFdInfoKHR gfi{VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR};
-  gfi.memory = s.memory;
-  gfi.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
-  VK_TRY(B.getMemoryFd(B.dev, &gfi, &s.exportedMemoryFd));
-#endif
-  VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-  cai.commandPool = B.pool;
-  cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-  cai.commandBufferCount = 1;
-  VK_TRY(vkAllocateCommandBuffers(B.dev, &cai, &s.cmd));
-  VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-  VK_TRY(vkCreateFence(B.dev, &fci, nullptr, &s.fence));
-  return true;
+// The image's create info as Dawn should see it: the stream's UNORM format
+// over the runtime's sRGB, mutable-format swapchain image, so Dawn stores the
+// already sRGB-encoded bytes unchanged and the compositor decodes them.
+VkImageCreateInfo swapchain_image_info(const Stream& st) {
+  VkImageCreateInfo ici{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+  ici.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
+  ici.imageType = VK_IMAGE_TYPE_2D;
+  ici.format = st.format;
+  ici.extent = {st.width, st.height, 1};
+  ici.mipLevels = 1;
+  ici.arrayLayers = 1;
+  ici.samples = VK_SAMPLE_COUNT_1_BIT;
+  ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+  ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+  ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  return ici;
 }
 
 bool create_swapchain(Stream& st) {
   XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
-  ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT |
-                  XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT;
+  ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_SRC_BIT |
+                  XR_SWAPCHAIN_USAGE_MUTABLE_FORMAT_BIT;
   ci.format = st.swapFormat;
   ci.sampleCount = 1;
   ci.width = st.width;
@@ -657,8 +506,18 @@ bool create_swapchain(Stream& st) {
   XR_TRY(xrEnumerateSwapchainImages(st.swapchain, 0, &n, nullptr));
   std::vector<XrSwapchainImageVulkan2KHR> imgs(n, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
   XR_TRY(xrEnumerateSwapchainImages(st.swapchain, n, &n, reinterpret_cast<XrSwapchainImageBaseHeader*>(imgs.data())));
-  for (const auto& im : imgs)
-    st.swapImages.push_back(im.image);
+  st.slots = std::vector<Slot>(n);
+  for (uint32_t i = 0; i < n; ++i) {
+    Slot& s = st.slots[i];
+    s.image = imgs[i].image;
+    VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    cai.commandPool = B.pool;
+    cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cai.commandBufferCount = 1;
+    VK_TRY(vkAllocateCommandBuffers(B.dev, &cai, &s.cmd));
+    VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VK_TRY(vkCreateFence(B.dev, &fci, nullptr, &s.fence));
+  }
   return true;
 }
 
@@ -693,7 +552,7 @@ bool create_session() {
   gb.physicalDevice = B.phys;
   gb.device = B.dev;
   gb.queueFamilyIndex = B.queueFamily;
-  gb.queueIndex = 0;
+  gb.queueIndex = B.queueIndex; // Dawn's spare queue; Dawn submits on 0
   XrSessionCreateInfo sci{XR_TYPE_SESSION_CREATE_INFO};
   sci.next = &gb;
   sci.systemId = B.systemId;
@@ -704,9 +563,10 @@ bool create_session() {
   rsci.poseInReferenceSpace.orientation.w = 1.f;
   XR_TRY(xrCreateReferenceSpace(B.session, &rsci, &B.space));
 
-  // The game's frames are already sRGB-encoded bytes in RGBA8Unorm textures.
-  // Copying those bytes unchanged into *_SRGB swapchains makes the runtime
-  // decode them correctly; a blit would re-encode them and wash them out.
+  // The game's frames are already sRGB-encoded bytes. Dawn draws them through
+  // a UNORM view of a mutable-format *_SRGB swapchain image, which stores the
+  // bytes unchanged, and the runtime decodes them correctly; an sRGB view
+  // would re-encode them and wash them out.
   uint32_t n = 0;
   XR_TRY(xrEnumerateSwapchainFormats(B.session, 0, &n, nullptr));
   std::vector<int64_t> fmts(n);
@@ -725,8 +585,6 @@ bool create_session() {
     st.swapFormat = B.swapFormat;
   // The 3D image takes the framebuffer's channel order when the eyes render
   // straight into it (single-sample BGRA8 framebuffers, e.g. desktop NVIDIA).
-  // The copy into the swapchain moves bytes unchanged, so the swapchain must
-  // match too.
   auto& stereo = g_streams[kStereo];
   const auto offered = [&](int64_t f) { return std::find(fmts.begin(), fmts.end(), f) != fmts.end(); };
 #ifndef __ANDROID__
@@ -758,158 +616,6 @@ bool create_session() {
   return true;
 }
 
-// Shader copy: on Adreno, vkCmdCopyImage of the 3D image ran at ~13 GB/s
-// (3.7 ms for 3360x1760 each way); a full-screen draw goes through the 3D
-// pipe and the tile memory instead.
-bool create_shader_copy() {
-  const auto module = [](const uint32_t* code, size_t bytes, VkShaderModule& out) {
-    VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
-    ci.codeSize = bytes;
-    ci.pCode = code;
-    return vkCreateShaderModule(B.dev, &ci, nullptr, &out);
-  };
-  VK_TRY(module(kCopyVertSpv, sizeof(kCopyVertSpv), B.copyVert));
-  VK_TRY(module(kCopyFragSpv, sizeof(kCopyFragSpv), B.copyFrag));
-  VkSamplerCreateInfo sci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-  sci.magFilter = sci.minFilter = VK_FILTER_NEAREST;
-  sci.addressModeU = sci.addressModeV = sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-  VK_TRY(vkCreateSampler(B.dev, &sci, nullptr, &B.copySampler));
-  VkDescriptorSetLayoutBinding binding{0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT,
-                                       &B.copySampler};
-  VkDescriptorSetLayoutCreateInfo dslci{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-  dslci.bindingCount = 1;
-  dslci.pBindings = &binding;
-  VK_TRY(vkCreateDescriptorSetLayout(B.dev, &dslci, nullptr, &B.copySetLayout));
-  VkPipelineLayoutCreateInfo plci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-  plci.setLayoutCount = 1;
-  plci.pSetLayouts = &B.copySetLayout;
-  VK_TRY(vkCreatePipelineLayout(B.dev, &plci, nullptr, &B.copyLayout));
-  VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kStreamCount * kSlotCount};
-  VkDescriptorPoolCreateInfo dpci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-  dpci.maxSets = kStreamCount * kSlotCount;
-  dpci.poolSizeCount = 1;
-  dpci.pPoolSizes = &poolSize;
-  VK_TRY(vkCreateDescriptorPool(B.dev, &dpci, nullptr, &B.copyPool));
-
-  for (auto& st : g_streams) {
-    // Render pass: the swapchain image is fully overwritten (UNDEFINED in)
-    // and handed back in COLOR_ATTACHMENT_OPTIMAL, as OpenXR expects.
-    VkAttachmentDescription att{};
-    att.format = static_cast<VkFormat>(st.swapFormat);
-    att.samples = VK_SAMPLE_COUNT_1_BIT;
-    att.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    att.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    att.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    att.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    VkAttachmentReference ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    VkSubpassDescription sub{};
-    sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    sub.colorAttachmentCount = 1;
-    sub.pColorAttachments = &ref;
-    std::array<VkSubpassDependency, 2> deps{{
-        {VK_SUBPASS_EXTERNAL, 0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, 0},
-        {0, VK_SUBPASS_EXTERNAL, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT, 0},
-    }};
-    VkRenderPassCreateInfo rpci{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-    rpci.attachmentCount = 1;
-    rpci.pAttachments = &att;
-    rpci.subpassCount = 1;
-    rpci.pSubpasses = &sub;
-    rpci.dependencyCount = static_cast<uint32_t>(deps.size());
-    rpci.pDependencies = deps.data();
-    VK_TRY(vkCreateRenderPass(B.dev, &rpci, nullptr, &st.copyPass));
-
-    std::array<VkPipelineShaderStageCreateInfo, 2> stages{{
-        {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, B.copyVert,
-         "main", nullptr},
-        {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, B.copyFrag,
-         "main", nullptr},
-    }};
-    VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    VkViewport viewport{0.f, 0.f, static_cast<float>(st.width), static_cast<float>(st.height), 0.f, 1.f};
-    VkRect2D scissor{{0, 0}, {st.width, st.height}};
-    VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-    vp.viewportCount = 1;
-    vp.pViewports = &viewport;
-    vp.scissorCount = 1;
-    vp.pScissors = &scissor;
-    VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-    rs.cullMode = VK_CULL_MODE_NONE;
-    rs.lineWidth = 1.f;
-    VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-    VkPipelineColorBlendAttachmentState cba{};
-    cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
-                         VK_COLOR_COMPONENT_A_BIT;
-    VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-    cb.attachmentCount = 1;
-    cb.pAttachments = &cba;
-    VkGraphicsPipelineCreateInfo gp{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
-    gp.stageCount = static_cast<uint32_t>(stages.size());
-    gp.pStages = stages.data();
-    gp.pVertexInputState = &vi;
-    gp.pInputAssemblyState = &ia;
-    gp.pViewportState = &vp;
-    gp.pRasterizationState = &rs;
-    gp.pMultisampleState = &ms;
-    gp.pColorBlendState = &cb;
-    gp.layout = B.copyLayout;
-    gp.renderPass = st.copyPass;
-    VK_TRY(vkCreateGraphicsPipelines(B.dev, VK_NULL_HANDLE, 1, &gp, nullptr, &st.copyPipeline));
-
-    for (VkImage img : st.swapImages) {
-      VkImageViewCreateInfo ivci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-      ivci.image = img;
-      ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-      ivci.format = static_cast<VkFormat>(st.swapFormat);
-      ivci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-      VkImageView view = VK_NULL_HANDLE;
-      VK_TRY(vkCreateImageView(B.dev, &ivci, nullptr, &view));
-      st.swapViews.push_back(view);
-      VkFramebufferCreateInfo fci{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-      fci.renderPass = st.copyPass;
-      fci.attachmentCount = 1;
-      fci.pAttachments = &view;
-      fci.width = st.width;
-      fci.height = st.height;
-      fci.layers = 1;
-      VkFramebuffer fb = VK_NULL_HANDLE;
-      VK_TRY(vkCreateFramebuffer(B.dev, &fci, nullptr, &fb));
-      st.swapFramebuffers.push_back(fb);
-    }
-    for (auto& s : st.slots) {
-      VkImageViewCreateInfo ivci{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-      ivci.image = s.image;
-      ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-      ivci.format = st.format;
-      ivci.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-      VK_TRY(vkCreateImageView(B.dev, &ivci, nullptr, &s.srcView));
-      VkDescriptorSetAllocateInfo dsai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-      dsai.descriptorPool = B.copyPool;
-      dsai.descriptorSetCount = 1;
-      dsai.pSetLayouts = &B.copySetLayout;
-      VK_TRY(vkAllocateDescriptorSets(B.dev, &dsai, &s.srcSet));
-      VkDescriptorImageInfo dii{VK_NULL_HANDLE, s.srcView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-      VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-      w.dstSet = s.srcSet;
-      w.descriptorCount = 1;
-      w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-      w.pImageInfo = &dii;
-      vkUpdateDescriptorSets(B.dev, 1, &w, 0, nullptr);
-    }
-  }
-  return true;
-}
-
-// AURORA_XR_DUMP=<dir>: write each stream's image once (after 300 copies) as
-// <dir>/xr_<stream>.ppm and <dir>/xr_<stream>_alpha.pgm, for checking what
-// reaches the headset without one.
 bool create_dump_buffer(Stream& st) {
   VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
   bci.size = static_cast<VkDeviceSize>(st.width) * st.height * 4;
@@ -1114,7 +820,8 @@ void update_input() {
 
 // ---------------------------------------------------------------- XR thread: per frame
 
-// Wait for the slot's previous copy and release what it no longer needs.
+// The slot's last release has finished on the GPU: its command buffer and
+// semaphores can be reused, and a dump it recorded can be written.
 void retire_slot(Stream& st, Slot& s, int index) {
   if (!s.inFlight)
     return;
@@ -1124,23 +831,6 @@ void retire_slot(Stream& st, Slot& s, int index) {
   for (VkSemaphore sem : s.waitSems)
     vkDestroySemaphore(B.dev, sem, nullptr);
   s.waitSems.clear();
-  // Dawn waited on prevSignalSem before producing the frame this finished
-  // copy consumed, so nothing references it any more.
-  if (s.prevSignalSem)
-    vkDestroySemaphore(B.dev, s.prevSignalSem, nullptr);
-  s.prevSignalSem = s.signalSem;
-  s.signalSem = VK_NULL_HANDLE;
-  if (B.timestamps) {
-    const auto streamIndex = static_cast<uint32_t>(&st - g_streams.data());
-    const uint32_t q = (streamIndex * kSlotCount + static_cast<uint32_t>(index)) * 2;
-    uint64_t ts[2];
-    if (vkGetQueryPoolResults(B.dev, B.timestamps, q, 2, sizeof(ts), ts, sizeof(uint64_t), VK_QUERY_RESULT_64_BIT) ==
-            VK_SUCCESS &&
-        ts[1] > ts[0]) {
-      B.copyNs[streamIndex] += static_cast<double>(ts[1] - ts[0]) * B.timestampPeriodNs;
-      ++B.copySamples[streamIndex];
-    }
-  }
   if (st.dumpSlot == index) {
     st.dumpSlot = -1;
     st.dumped = true;
@@ -1148,187 +838,155 @@ void retire_slot(Stream& st, Slot& s, int index) {
   }
 }
 
-// Copy the stream's newest finished frame into its swapchain. Returns false
-// on a fatal error; `copied` says whether there was a new frame.
-bool copy_latest(Stream& st, bool& copied) {
-  copied = false;
-  int index = -1;
-  PendingAccess dawnRelease;
-  std::array<XrView, 2> views{};
+// Keeps one waited-on image ready for the render worker. OpenXR allows one
+// waited image per swapchain until it is released, so the next is waited on
+// only once the last went back. The wait is short: an image the compositor
+// still holds is waited on again next display frame.
+bool acquire_ahead(Stream& st) {
+  int pending = -1;
+  bool haveWaited = false;
+  size_t held = 0;
   {
     std::lock_guard lock{g_mutex};
-    uint64_t best = 0;
-    for (int i = 0; i < kSlotCount; ++i) {
-      if (st.slots[i].state == SlotState::Ready && st.slots[i].readySeq > best) {
-        best = st.slots[i].readySeq;
-        index = i;
-      }
+    for (size_t i = 0; i < st.slots.size(); ++i) {
+      const SlotState state = st.slots[i].state;
+      haveWaited |= state == SlotState::Free || state == SlotState::Rendering || state == SlotState::Ready;
+      if (state == SlotState::Acquired)
+        pending = static_cast<int>(i);
+      if (state != SlotState::Released)
+        ++held;
     }
-    if (index < 0)
+  }
+  if (haveWaited)
+    return true;
+  if (pending < 0) {
+    if (held >= st.slots.size())
       return true;
-    st.slots[index].state = SlotState::Copying;
-    dawnRelease = std::move(st.slots[index].forBridge);
-    st.slots[index].forBridge = {};
-    views = st.slots[index].views;
+    uint32_t index = 0;
+    XR_TRY(xrAcquireSwapchainImage(st.swapchain, nullptr, &index));
+    std::lock_guard lock{g_mutex};
+    st.slots[index].state = SlotState::Acquired;
+    st.slots[index].acquireSeq = ++st.acquireSeq;
+    pending = static_cast<int>(index);
   }
-  Slot& s = st.slots[index];
-  retire_slot(st, s, index);
-
-  for (int fd : dawnRelease.fds) {
-    VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-    VkSemaphore sem = VK_NULL_HANDLE;
-    VK_TRY(vkCreateSemaphore(B.dev, &sci, nullptr, &sem));
-    VkImportSemaphoreFdInfoKHR imp{VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR};
-    imp.semaphore = sem;
-    imp.flags = kSemImportFlags;
-    imp.handleType = kSemHandle;
-    imp.fd = fd; // Vulkan owns it on success
-    if (B.importSemaphoreFd(B.dev, &imp) != VK_SUCCESS) {
-      close(fd);
-      vkDestroySemaphore(B.dev, sem, nullptr);
-      Log.error("Importing Dawn's semaphore failed");
-      return false;
-    }
-    s.waitSems.push_back(sem);
-  }
-
-  uint32_t swapIndex = 0;
-  XR_TRY(xrAcquireSwapchainImage(st.swapchain, nullptr, &swapIndex));
   XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-  wi.timeout = XR_INFINITE_DURATION;
-  XR_TRY(xrWaitSwapchainImage(st.swapchain, &wi));
-  VkImage swapImg = st.swapImages[swapIndex];
-
-  VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-  cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-  VK_TRY(vkResetCommandBuffer(s.cmd, 0));
-  VK_TRY(vkBeginCommandBuffer(s.cmd, &cbi));
-  const uint32_t tsQuery =
-      (static_cast<uint32_t>(&st - g_streams.data()) * kSlotCount + static_cast<uint32_t>(index)) * 2;
-  if (B.timestamps)
-    vkCmdResetQueryPool(s.cmd, B.timestamps, tsQuery, 2);
-  // Dump frames read the swapchain image back after the copy, so the dump
-  // shows exactly what the runtime gets.
-  const bool dumpNow = !B.dumpDir.empty() && !st.dumped && st.dumpSlot < 0 && st.copies >= static_cast<uint64_t>(env_float("AURORA_XR_DUMP_AFTER", 300.f)) &&
-                       (st.dumpBuf || create_dump_buffer(st));
-  const bool shaderCopy = st.copyPipeline != VK_NULL_HANDLE;
-  // The layout the shared image is used in here, and handed back to Dawn
-  // from (Dawn acquires with the same pair).
-  const VkImageLayout srcLayout =
-      shaderCopy ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-  const VkAccessFlags srcAccess = shaderCopy ? VK_ACCESS_SHADER_READ_BIT : VK_ACCESS_TRANSFER_READ_BIT;
-  const VkPipelineStageFlags srcStage =
-      shaderCopy ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : VK_PIPELINE_STAGE_TRANSFER_BIT;
-  std::array<VkImageMemoryBarrier, 3> pre{};
-  uint32_t npre = 0;
-  // Acquire from Dawn: must mirror Dawn's release barrier exactly.
-  pre[npre++] = barrier(s.image, dawnRelease.oldLayout, dawnRelease.newLayout, 0, srcAccess, kExternalQueueFamily,
-                        B.queueFamily);
-  if (dawnRelease.newLayout != srcLayout)
-    pre[npre++] = barrier(s.image, dawnRelease.newLayout, srcLayout, srcAccess, srcAccess);
-  if (!shaderCopy) {
-    // OpenXR hands Vulkan swapchain images over in COLOR_ATTACHMENT_OPTIMAL.
-    pre[npre++] = barrier(swapImg, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                          VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
-  }
-  vkCmdPipelineBarrier(s.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, srcStage | VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
-                       nullptr, 0, nullptr, npre, pre.data());
-  if (B.timestamps)
-    vkCmdWriteTimestamp(s.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, B.timestamps, tsQuery);
-  if (shaderCopy) {
-    VkRenderPassBeginInfo rpbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    rpbi.renderPass = st.copyPass;
-    rpbi.framebuffer = st.swapFramebuffers[swapIndex];
-    rpbi.renderArea = {{0, 0}, {st.width, st.height}};
-    vkCmdBeginRenderPass(s.cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
-    vkCmdBindPipeline(s.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, st.copyPipeline);
-    vkCmdBindDescriptorSets(s.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, B.copyLayout, 0, 1, &s.srcSet, 0, nullptr);
-    vkCmdDraw(s.cmd, 3, 1, 0, 0);
-    vkCmdEndRenderPass(s.cmd);
-  } else {
-    VkImageCopy region{};
-    region.srcSubresource = region.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.extent = {st.width, st.height, 1};
-    vkCmdCopyImage(s.cmd, s.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, swapImg,
-                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-  }
-  if (B.timestamps)
-    vkCmdWriteTimestamp(s.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, B.timestamps, tsQuery + 1);
-  // The swapchain image is now in COLOR_ATTACHMENT_OPTIMAL (shader copy) or
-  // TRANSFER_DST_OPTIMAL (transfer copy).
-  VkImageLayout swapLayout =
-      shaderCopy ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-  if (dumpNow) {
-    const VkImageMemoryBarrier toSrc =
-        barrier(swapImg, swapLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
-    vkCmdPipelineBarrier(s.cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toSrc);
-    VkBufferImageCopy rb{};
-    rb.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    rb.imageExtent = {st.width, st.height, 1};
-    vkCmdCopyImageToBuffer(s.cmd, swapImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, st.dumpBuf, 1, &rb);
-    st.dumpSlot = index;
-    swapLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-  }
-  std::array<VkImageMemoryBarrier, 2> post{};
-  uint32_t npost = 0;
-  if (swapLayout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
-    post[npost++] = barrier(swapImg, swapLayout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                            VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT,
-                            VK_ACCESS_COLOR_ATTACHMENT_READ_BIT);
-  }
-  // Release back to Dawn, which acquires with the same layouts.
-  post[npost++] = barrier(s.image, srcLayout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, srcAccess, 0, B.queueFamily,
-                          kExternalQueueFamily);
-  vkCmdPipelineBarrier(s.cmd, srcStage | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                       VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, npost, post.data());
-  VK_TRY(vkEndCommandBuffer(s.cmd));
-
-  VkExportSemaphoreCreateInfo esci{VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO};
-  esci.handleTypes = kSemHandle;
-  VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
-  sci.pNext = &esci;
-  VK_TRY(vkCreateSemaphore(B.dev, &sci, nullptr, &s.signalSem));
-  std::vector<VkPipelineStageFlags> stages(s.waitSems.size(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
-  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-  si.waitSemaphoreCount = static_cast<uint32_t>(s.waitSems.size());
-  si.pWaitSemaphores = s.waitSems.data();
-  si.pWaitDstStageMask = stages.data();
-  si.commandBufferCount = 1;
-  si.pCommandBuffers = &s.cmd;
-  si.signalSemaphoreCount = 1;
-  si.pSignalSemaphores = &s.signalSem;
-  VK_TRY(vkQueueSubmit(B.queue, 1, &si, s.fence));
-  s.inFlight = true;
-  XR_TRY(xrReleaseSwapchainImage(st.swapchain, nullptr));
-
-  VkSemaphoreGetFdInfoKHR gfi{VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR};
-  gfi.semaphore = s.signalSem;
-  gfi.handleType = kSemHandle;
-  int fd = -1;
-  VK_TRY(B.getSemaphoreFd(B.dev, &gfi, &fd)); // SYNC_FD may give -1: already signalled
+  wi.timeout = 2'000'000; // 2 ms
+  const XrResult r = xrWaitSwapchainImage(st.swapchain, &wi);
+  if (r == XR_TIMEOUT_EXPIRED)
+    return true;
+  XR_TRY(r);
+  retire_slot(st, st.slots[pending], pending);
   {
     std::lock_guard lock{g_mutex};
-    s.forDawn.fds.clear();
-    if (fd >= 0)
-      s.forDawn.fds.push_back(fd);
-    s.forDawn.oldLayout = srcLayout;
-    s.forDawn.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    s.state = SlotState::Free;
+    st.slots[pending].state = SlotState::Free;
   }
-  st.haveImage = true;
-  st.lastCopy = std::chrono::steady_clock::now();
-  st.shownViews = views;
-  ++st.copies;
-  copied = true;
+  g_slotFreeCv.notify_all();
   return true;
 }
 
-// The game draws 60 frames a second, so the display should run at a
-// multiple of 60 to show every game frame for the same number of display
-// frames (a 72 Hz display repeats every fifth one: visible stutter). Prefer
-// AURORA_XR_REFRESH if offered, then 60, then 120.
+// Releases drawn images in acquisition order: waits (on the GPU, on our
+// queue) for Dawn's semaphores, puts the image back in the layout the
+// runtime expects, then hands it to the runtime.
+bool release_ready(Stream& st, bool& released) {
+  released = false;
+  for (;;) {
+    int index = -1;
+    PendingAccess fromDawn;
+    std::array<XrView, 2> views{};
+    {
+      std::lock_guard lock{g_mutex};
+      uint64_t oldest = UINT64_MAX;
+      for (size_t i = 0; i < st.slots.size(); ++i) {
+        const auto& sl = st.slots[i];
+        if (sl.state != SlotState::Released && sl.acquireSeq < oldest) {
+          oldest = sl.acquireSeq;
+          index = static_cast<int>(i);
+        }
+      }
+      if (index < 0 || st.slots[index].state != SlotState::Ready)
+        return true;
+      fromDawn = std::move(st.slots[index].fromDawn);
+      st.slots[index].fromDawn = {};
+      views = st.slots[index].views;
+    }
+    Slot& s = st.slots[index];
+    retire_slot(st, s, index);
+
+    for (int fd : fromDawn.fds) {
+      VkSemaphoreCreateInfo sci{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+      VkSemaphore sem = VK_NULL_HANDLE;
+      VK_TRY(vkCreateSemaphore(B.dev, &sci, nullptr, &sem));
+      VkImportSemaphoreFdInfoKHR imp{VK_STRUCTURE_TYPE_IMPORT_SEMAPHORE_FD_INFO_KHR};
+      imp.semaphore = sem;
+      imp.flags = kSemImportFlags;
+      imp.handleType = kSemHandle;
+      imp.fd = fd; // Vulkan owns it on success
+      if (B.importSemaphoreFd(B.dev, &imp) != VK_SUCCESS) {
+        close(fd);
+        vkDestroySemaphore(B.dev, sem, nullptr);
+        Log.error("Importing Dawn's semaphore failed");
+        return false;
+      }
+      s.waitSems.push_back(sem);
+    }
+
+    // OpenXR takes Vulkan color swapchain images back in
+    // COLOR_ATTACHMENT_OPTIMAL; Dawn may have left another layout.
+    const VkImageLayout from = fromDawn.newLayout != VK_IMAGE_LAYOUT_UNDEFINED
+                                   ? fromDawn.newLayout
+                                   : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    const bool dumpNow = !B.dumpDir.empty() && !st.dumped && st.dumpSlot < 0 &&
+                         st.releases >= static_cast<uint64_t>(env_float("AURORA_XR_DUMP_AFTER", 300.f)) &&
+                         (st.dumpBuf || create_dump_buffer(st));
+    const bool record = dumpNow || from != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    if (record) {
+      VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+      cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+      VK_TRY(vkResetCommandBuffer(s.cmd, 0));
+      VK_TRY(vkBeginCommandBuffer(s.cmd, &cbi));
+      VkImageLayout layout = from;
+      if (dumpNow) {
+        const auto toSrc = barrier(s.image, layout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+        vkCmdPipelineBarrier(s.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                             nullptr, 0, nullptr, 1, &toSrc);
+        VkBufferImageCopy rb{};
+        rb.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        rb.imageExtent = {st.width, st.height, 1};
+        vkCmdCopyImageToBuffer(s.cmd, s.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, st.dumpBuf, 1, &rb);
+        st.dumpSlot = index;
+        layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+      }
+      if (layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+        const auto back = barrier(s.image, layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                  VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT, 0);
+        vkCmdPipelineBarrier(s.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0,
+                             nullptr, 0, nullptr, 1, &back);
+      }
+      VK_TRY(vkEndCommandBuffer(s.cmd));
+    }
+    std::vector<VkPipelineStageFlags> stages(s.waitSems.size(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
+    VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    si.waitSemaphoreCount = static_cast<uint32_t>(s.waitSems.size());
+    si.pWaitSemaphores = s.waitSems.data();
+    si.pWaitDstStageMask = stages.data();
+    si.commandBufferCount = record ? 1 : 0;
+    si.pCommandBuffers = &s.cmd;
+    VK_TRY(vkQueueSubmit(B.queue, 1, &si, s.fence));
+    s.inFlight = true;
+    XR_TRY(xrReleaseSwapchainImage(st.swapchain, nullptr));
+    {
+      std::lock_guard lock{g_mutex};
+      s.state = SlotState::Released;
+    }
+    st.haveImage = true;
+    st.lastRelease = std::chrono::steady_clock::now();
+    st.shownViews = views;
+    ++st.releases;
+    released = true;
+  }
+}
+
 void request_refresh_rate() {
   if (!B.enumerateRefreshRates || !B.requestRefreshRate)
     return;
@@ -1845,18 +1503,18 @@ bool render_xr_frame() {
   XR_TRY(xrBeginFrame(B.session, nullptr));
 
   const auto now = std::chrono::steady_clock::now();
-  if (fs.shouldRender) {
-    for (int i = 0; i < kStreamCount; ++i) {
-      bool copied = false;
-      if (!copy_latest(g_streams[i], copied))
-        return false;
-      B.copiedSinceStats[i] += copied ? 1 : 0;
-    }
+  // Hand finished images to the runtime, then line up the next ones for the
+  // render worker.
+  for (int i = 0; i < kStreamCount; ++i) {
+    bool released = false;
+    if (!release_ready(g_streams[i], released) || !acquire_ahead(g_streams[i]))
+      return false;
+    B.releasedSinceStats[i] += released ? 1 : 0;
   }
   // A fight is on while 3D frames keep coming; otherwise the virtual screen.
   const auto& stereo = g_streams[kStereo];
   const auto& hud = g_streams[kHud];
-  const bool fight = stereo.haveImage && now - stereo.lastCopy < std::chrono::milliseconds(250);
+  const bool fight = stereo.haveImage && now - stereo.lastRelease < std::chrono::milliseconds(250);
   const bool pointing = fight && g_fightPaused && B.focused;
   locate_hands(fs.predictedDisplayTime);
   update_grab(pointing);
@@ -1891,7 +1549,7 @@ bool render_xr_frame() {
     proj.viewCount = 2;
     proj.views = projViews.data();
     layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj);
-    if (hud.haveImage && now - hud.lastCopy < std::chrono::milliseconds(250)) {
+    if (hud.haveImage && now - hud.lastRelease < std::chrono::milliseconds(250)) {
       // The HUD floats above the arena's back edge, like a scoreboard, and
       // moves, turns and scales with it.
       const ArenaPose arena = arena_pose();
@@ -1938,19 +1596,13 @@ bool render_xr_frame() {
 
   const double secs = std::chrono::duration<double>(now - B.statsStart).count();
   if (secs >= 10.0) {
-    Log.info("{:.1f} display fps ({:.0f}% 3D); frames/s copied: screen {:.1f}, 3D {:.1f}, HUD {:.1f}",
+    Log.info("{:.1f} display fps ({:.0f}% 3D); frames/s released: screen {:.1f}, 3D {:.1f}, HUD {:.1f}",
              B.framesShown / secs, 100.0 * B.fightFrames / std::max<uint64_t>(B.framesShown, 1),
-             B.copiedSinceStats[kScreen] / secs, B.copiedSinceStats[kStereo] / secs, B.copiedSinceStats[kHud] / secs);
-    if (B.timestamps) {
-      const auto avg = [](int i) { return B.copySamples[i] ? B.copyNs[i] / B.copySamples[i] / 1000.0 : 0.0; };
-      Log.info("GPU bridge copy per frame (us): screen {:.0f}, 3D {:.0f}, HUD {:.0f}", avg(kScreen), avg(kStereo),
-               avg(kHud));
-      B.copyNs = {};
-      B.copySamples = {};
-    }
+             B.releasedSinceStats[kScreen] / secs, B.releasedSinceStats[kStereo] / secs,
+             B.releasedSinceStats[kHud] / secs);
     B.framesShown = 0;
     B.fightFrames = 0;
-    B.copiedSinceStats = {};
+    B.releasedSinceStats = {};
     B.statsStart = now;
   }
   return true;
@@ -1995,20 +1647,13 @@ bool poll_events() {
 }
 
 bool setup() {
-  if (!create_instance() || !create_bridge_device() || !size_stereo_stream() || !create_session())
+  // The OpenXR instance and system already exist (prepare_device), and Dawn's
+  // device was created through them.
+  if (!B.prepared || !adopt_dawn_device() || !size_stereo_stream() || !create_session())
     return false;
-  for (auto& st : g_streams) {
-    for (auto& s : st.slots)
-      if (!create_slot(s, st.width, st.height, st.format))
-        return false;
+  for (auto& st : g_streams)
     if (!create_swapchain(st))
       return false;
-  }
-  if (env_flag("AURORA_XR_SHADER_COPY", true) && !create_shader_copy()) {
-    Log.warn("Shader copy unavailable; copying with vkCmdCopyImage");
-    for (auto& st : g_streams)
-      st.copyPipeline = VK_NULL_HANDLE;
-  }
   if (!create_input())
     Log.warn("Controller input unavailable");
   if (!create_pointer_textures())
@@ -2023,44 +1668,18 @@ bool setup() {
   return true;
 }
 
-// Destroy everything the XR thread created, newest first. Leaving the
-// session or instance alive at exit lets the loader unload the runtime while
-// the runtime's own threads still run, which crashes the process.
+// Destroy everything the XR thread created, newest first. Dawn owns the
+// device and instance; the OpenXR instance outlives them (release_instance).
 void teardown() {
-  if (B.dev)
-    vkDeviceWaitIdle(B.dev);
+  // Only our queue: Dawn may be submitting on its own, and vkDeviceWaitIdle
+  // would need every queue externally synchronized.
+  if (B.queue)
+    vkQueueWaitIdle(B.queue);
   if (B.dev) {
-    // Views and framebuffers of the shared and swapchain images go first.
     for (auto& st : g_streams) {
-      for (auto fb : st.swapFramebuffers)
-        vkDestroyFramebuffer(B.dev, fb, nullptr);
-      for (auto v : st.swapViews)
-        vkDestroyImageView(B.dev, v, nullptr);
-      st.swapFramebuffers.clear();
-      st.swapViews.clear();
-      if (st.copyPipeline)
-        vkDestroyPipeline(B.dev, st.copyPipeline, nullptr);
-      if (st.copyPass)
-        vkDestroyRenderPass(B.dev, st.copyPass, nullptr);
-      st.copyPipeline = VK_NULL_HANDLE;
-      st.copyPass = VK_NULL_HANDLE;
-      for (auto& s : st.slots) {
-        if (s.srcView)
-          vkDestroyImageView(B.dev, s.srcView, nullptr);
-        s.srcView = VK_NULL_HANDLE;
-      }
+      for (int i = 0; i < static_cast<int>(st.slots.size()); ++i)
+        retire_slot(st, st.slots[i], i);
     }
-    if (B.copyPool)
-      vkDestroyDescriptorPool(B.dev, B.copyPool, nullptr);
-    if (B.copyLayout)
-      vkDestroyPipelineLayout(B.dev, B.copyLayout, nullptr);
-    if (B.copySetLayout)
-      vkDestroyDescriptorSetLayout(B.dev, B.copySetLayout, nullptr);
-    if (B.copySampler)
-      vkDestroySampler(B.dev, B.copySampler, nullptr);
-    for (auto m : {B.copyVert, B.copyFrag})
-      if (m)
-        vkDestroyShaderModule(B.dev, m, nullptr);
   }
   for (auto& sp : B.aimSpace) {
     if (sp)
@@ -2085,6 +1704,8 @@ void teardown() {
     B.destroyPassthrough(B.passthrough);
   B.passthroughLayer = XR_NULL_HANDLE;
   B.passthrough = XR_NULL_HANDLE;
+  // Dawn's textures over the swapchain images never touch them again: XR is
+  // stopped (Phase::Failed or g_stop) before this runs.
   for (auto& st : g_streams) {
     if (st.swapchain)
       xrDestroySwapchain(st.swapchain);
@@ -2097,26 +1718,14 @@ void teardown() {
   B.space = XR_NULL_HANDLE;
   B.session = XR_NULL_HANDLE;
   if (B.dev) {
-    // Dawn holds its own imports of the shared images, so releasing the
-    // bridge's copies does not affect frames it is still drawing.
     for (auto& st : g_streams) {
       for (auto& s : st.slots) {
-        for (VkSemaphore sem : s.waitSems)
-          vkDestroySemaphore(B.dev, sem, nullptr);
-        s.waitSems.clear();
-        for (VkSemaphore sem : {s.signalSem, s.prevSignalSem})
-          if (sem)
-            vkDestroySemaphore(B.dev, sem, nullptr);
-        s.signalSem = s.prevSignalSem = VK_NULL_HANDLE;
         if (s.fence)
           vkDestroyFence(B.dev, s.fence, nullptr);
-        if (s.image)
-          vkDestroyImage(B.dev, s.image, nullptr);
-        if (s.memory)
-          vkFreeMemory(B.dev, s.memory, nullptr);
+        if (s.cmd)
+          vkFreeCommandBuffers(B.dev, B.pool, 1, &s.cmd);
         s.fence = VK_NULL_HANDLE;
-        s.image = VK_NULL_HANDLE;
-        s.memory = VK_NULL_HANDLE;
+        s.cmd = VK_NULL_HANDLE;
       }
       if (st.dumpBuf)
         vkDestroyBuffer(B.dev, st.dumpBuf, nullptr);
@@ -2125,21 +1734,9 @@ void teardown() {
       st.dumpBuf = VK_NULL_HANDLE;
       st.dumpMem = VK_NULL_HANDLE;
     }
-    if (B.timestamps)
-      vkDestroyQueryPool(B.dev, B.timestamps, nullptr);
-    B.timestamps = VK_NULL_HANDLE;
     if (B.pool)
       vkDestroyCommandPool(B.dev, B.pool, nullptr);
-    vkDestroyDevice(B.dev, nullptr);
-    B.dev = VK_NULL_HANDLE;
-  }
-  if (B.vkInstance) {
-    vkDestroyInstance(B.vkInstance, nullptr);
-    B.vkInstance = VK_NULL_HANDLE;
-  }
-  if (B.instance) {
-    xrDestroyInstance(B.instance);
-    B.instance = XR_NULL_HANDLE;
+    B.pool = VK_NULL_HANDLE;
   }
 }
 
@@ -2165,54 +1762,36 @@ void thread_main() {
   g_displayPerGameFrame = 0;
   g_paceCv.notify_all();
   Log.info("XR thread exiting");
+  // Stop the render worker taking images, and let a frame it is drawing into
+  // one finish, before the swapchains go.
+  g_phase = Phase::Failed;
+  for (int i = 0; i < 50; ++i) {
+    bool drawing = false;
+    {
+      std::lock_guard lock{g_mutex};
+      for (const auto& st : g_streams)
+        for (const auto& s : st.slots)
+          drawing |= s.state == SlotState::Rendering;
+    }
+    if (!drawing)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
   teardown();
 }
 
-// ---------------------------------------------------------------- render worker: shared images
+// ---------------------------------------------------------------- render worker: swapchain images
 
-bool import_slots_into_dawn() {
-  auto& device = webgpu::g_device;
-  if (webgpu::g_adapterInfo.vendorID != g_bridgeVendor || webgpu::g_adapterInfo.deviceID != g_bridgeDevice) {
-    Log.error("Dawn uses GPU [{:04x}:{:04x}] but the OpenXR runtime wants [{:04x}:{:04x}]",
-              webgpu::g_adapterInfo.vendorID, webgpu::g_adapterInfo.deviceID, g_bridgeVendor, g_bridgeDevice);
-    return false;
-  }
-#ifdef __ANDROID__
-  const bool featuresOk = device.HasFeature(wgpu::FeatureName::SharedTextureMemoryAHardwareBuffer) &&
-                          device.HasFeature(wgpu::FeatureName::SharedFenceSyncFD);
-#else
-  const bool featuresOk = device.HasFeature(wgpu::FeatureName::SharedTextureMemoryOpaqueFD) &&
-                          device.HasFeature(wgpu::FeatureName::SharedFenceVkSemaphoreOpaqueFD);
-#endif
-  if (!featuresOk) {
-    Log.error("Dawn device lacks shared texture/fence features");
-    return false;
-  }
+// Wraps every swapchain image as Dawn shared texture memory, once, after the
+// XR thread created the swapchains.
+bool wrap_swapchains_into_dawn() {
   for (auto& st : g_streams) {
+    const VkImageCreateInfo ici = swapchain_image_info(st);
     for (auto& s : st.slots) {
-      wgpu::SharedTextureMemoryDescriptor sd{};
-      sd.label = st.name;
-#ifdef __ANDROID__
-      wgpu::SharedTextureMemoryAHardwareBufferDescriptor ahbd{};
-      ahbd.handle = s.ahb;
-      sd.nextInChain = &ahbd;
-      s.stm = device.ImportSharedTextureMemory(&sd);
-#else
-      VkExternalMemoryImageCreateInfo ext;
-      VkImageCreateInfo ici = shared_image_info(ext, st.width, st.height, st.format);
-      wgpu::SharedTextureMemoryOpaqueFDDescriptor od{};
-      od.vkImageCreateInfo = &ici;
-      od.memoryFD = s.exportedMemoryFd;
-      od.memoryTypeIndex = s.memoryTypeIndex;
-      od.allocationSize = s.allocationSize;
-      od.dedicatedAllocation = true;
-      sd.nextInChain = &od;
-      s.stm = device.ImportSharedTextureMemory(&sd);
-      close(s.exportedMemoryFd); // Dawn duplicates the handle on import
-      s.exportedMemoryFd = -1;
-#endif
+      s.stm = wgpu::SharedTextureMemory::Acquire(dawn::native::vulkan::CreateSharedTextureMemoryFromVkImage(
+          webgpu::g_device.Get(), reinterpret_cast<uint64_t>(s.image), &ici, st.name));
       if (!s.stm) {
-        Log.error("ImportSharedTextureMemory failed ({})", st.name);
+        Log.error("Wrapping a {} swapchain image for Dawn failed", st.name);
         return false;
       }
       s.texture = s.stm.CreateTexture();
@@ -2222,66 +1801,45 @@ bool import_slots_into_dawn() {
       }
     }
   }
-  Log.info("Shared images imported into Dawn: screen {}x{}, 3D {}x{}, HUD {}x{}", g_streams[kScreen].width,
-           g_streams[kScreen].height, g_streams[kStereo].width, g_streams[kStereo].height, g_streams[kHud].width,
-           g_streams[kHud].height);
+  Log.info("Swapchain images wrapped for Dawn: screen {}x{}, 3D {}x{}, HUD {}x{} ({} images each)",
+           g_streams[kScreen].width, g_streams[kScreen].height, g_streams[kStereo].width, g_streams[kStereo].height,
+           g_streams[kHud].width, g_streams[kHud].height, g_streams[kScreen].slots.size());
   return true;
 }
 
-// Pick a slot for the next frame (render worker, g_mutex held).
+// The oldest image the XR thread has ready, so images come back in the
+// order they were acquired.
 int take_slot_locked(Stream& st) {
-  for (int i = 0; i < kSlotCount; ++i)
-    if (st.slots[i].state == SlotState::Free)
-      return i;
-  // No free slot: reclaim the oldest finished frame the XR thread skipped.
-  // Nothing on the bridge side touched it, so Dawn waits on its own release.
-  int oldest = -1;
-  for (int i = 0; i < kSlotCount; ++i)
-    if (st.slots[i].state == SlotState::Ready &&
-        (oldest < 0 || st.slots[i].readySeq < st.slots[oldest].readySeq))
-      oldest = i;
-  if (oldest >= 0) {
-    Slot& s = st.slots[oldest];
-    s.forDawn = std::move(s.forBridge);
-    s.forBridge = {};
-  }
-  return oldest;
+  int best = -1;
+  for (int i = 0; i < static_cast<int>(st.slots.size()); ++i)
+    if (st.slots[i].state == SlotState::Free &&
+        (best < 0 || st.slots[i].acquireSeq < st.slots[best].acquireSeq))
+      best = i;
+  return best;
 }
 
-// Begin Dawn access to a free slot of the stream; null if none.
-wgpu::Texture acquire_slot(Stream& st) {
+// Waits up to `wait` for the XR thread to line up an image: it releases the
+// previous one and acquires the next on its display-frame loop, which can
+// land just after the render worker asks.
+wgpu::Texture acquire_slot(Stream& st, std::chrono::milliseconds wait = std::chrono::milliseconds(10)) {
   int index;
-  PendingAccess access;
   {
-    std::lock_guard lock{g_mutex};
+    std::unique_lock lock{g_mutex};
+    g_slotFreeCv.wait_for(lock, wait, [&] { return take_slot_locked(st) >= 0 || g_phase != Phase::Imported; });
     index = take_slot_locked(st);
     if (index < 0)
       return {};
     st.slots[index].state = SlotState::Rendering;
-    access = std::move(st.slots[index].forDawn);
-    st.slots[index].forDawn = {};
   }
   Slot& s = st.slots[index];
-  std::vector<wgpu::SharedFence> fences;
-  for (int fd : access.fds) {
-    DawnFenceDescriptor fdd{};
-    fdd.handle = fd;
-    wgpu::SharedFenceDescriptor desc{};
-    desc.nextInChain = &fdd;
-    fences.push_back(webgpu::g_device.ImportSharedFence(&desc));
-    close(fd); // Dawn duplicates on import
-  }
-  std::vector<uint64_t> values(fences.size(), 1);
+  // xrWaitSwapchainImage already returned: no fences. The contents are not
+  // kept, so the image starts UNDEFINED.
   wgpu::SharedTextureMemoryVkImageLayoutBeginState bs{};
-  bs.oldLayout = access.oldLayout;
-  bs.newLayout = access.newLayout;
+  bs.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  bs.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
   wgpu::SharedTextureMemoryBeginAccessDescriptor bd{};
   bd.nextInChain = &bs;
-  bd.initialized = s.initialized;
-  bd.fenceCount = fences.size();
-  bd.fences = fences.data();
-  bd.signaledValueCount = values.size();
-  bd.signaledValues = values.data();
+  bd.initialized = false;
   if (s.stm.BeginAccess(s.texture, &bd) != wgpu::Status::Success) {
     Log.error("BeginAccess failed ({}); XR presentation disabled", st.name);
     g_phase = Phase::Failed;
@@ -2291,7 +1849,6 @@ wgpu::Texture acquire_slot(Stream& st) {
   return s.texture;
 }
 
-// End Dawn access after the frame's submit and hand the slot to the XR thread.
 void release_slot(Stream& st, const std::array<XrView, 2>* views) {
   if (st.renderingSlot < 0)
     return;
@@ -2305,7 +1862,6 @@ void release_slot(Stream& st, const std::array<XrView, 2>* views) {
     g_phase = Phase::Failed;
     return;
   }
-  s.initialized = true;
   PendingAccess release;
   release.oldLayout = static_cast<VkImageLayout>(es.oldLayout);
   release.newLayout = static_cast<VkImageLayout>(es.newLayout);
@@ -2322,10 +1878,9 @@ void release_slot(Stream& st, const std::array<XrView, 2>* views) {
       release.fds.push_back(dup(oi.handle)); // the SharedFence keeps its own handle
   }
   std::lock_guard lock{g_mutex};
-  s.forBridge = std::move(release);
+  s.fromDawn = std::move(release);
   if (views != nullptr)
     s.views = *views;
-  s.readySeq = ++st.readySeq;
   s.state = SlotState::Ready;
 }
 
@@ -2913,6 +2468,10 @@ void render_3d(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame)
       R.renderedViews = views;
       R.renderedStereo = true;
       g_skipPresent = !env_flag("AURORA_XR_FIGHT_SCREEN", false);
+    } else {
+      // No 3D image this frame: still a fight, so don't present the flat
+      // frame nobody sees (the headset keeps showing the last 3D image).
+      g_skipPresent = !env_flag("AURORA_XR_FIGHT_SCREEN", false);
     }
   } else {
     for (int eye = 0; eye < 2; ++eye) {
@@ -2992,6 +2551,18 @@ wgpu::Texture begin_frame(uint32_t width, uint32_t height) noexcept {
     return {};
   Phase phase = g_phase;
   if (phase == Phase::Idle) {
+    if (!B.prepared) {
+      Log.error("OpenXR was not set up before the GPU device (prepare_device); presenting to the window");
+      g_phase = Phase::Failed;
+      return {};
+    }
+    const auto h = dawn::native::vulkan::GetDeviceVkHandles(webgpu::g_device.Get());
+    B.vkInstance = h.instance;
+    B.phys = h.physicalDevice;
+    B.dev = h.device;
+    B.queueFamily = h.queueFamilyIndex;
+    B.queueIndex = 1;
+    B.queue = dawn::native::vulkan::GetExtraQueue(webgpu::g_device.Get(), 0);
     g_streams[kScreen].name = "screen";
     g_streams[kStereo].name = "3d";
     g_streams[kHud].name = "hud";
@@ -3010,7 +2581,7 @@ wgpu::Texture begin_frame(uint32_t width, uint32_t height) noexcept {
     return {};
   }
   if (phase == Phase::SlotsReady) {
-    if (!import_slots_into_dawn()) {
+    if (!wrap_swapchains_into_dawn()) {
       Log.error("Virtual screen disabled; presenting to the window instead");
       g_phase = Phase::Failed;
       return {};
@@ -3031,7 +2602,13 @@ wgpu::Texture begin_frame(uint32_t width, uint32_t height) noexcept {
     }
     return {};
   }
-  return acquire_slot(screen);
+  auto texture = acquire_slot(screen);
+  if (!texture) {
+    // No image ready (the XR thread is a frame behind): drop this frame's
+    // flat present rather than falling back to the window.
+    g_skipPresent = true;
+  }
+  return texture;
 }
 
 void end_frame() noexcept {
@@ -3041,6 +2618,48 @@ void end_frame() noexcept {
   release_slot(g_streams[kStereo], R.renderedStereo ? &R.renderedViews : nullptr);
   R.renderedStereo = false;
   release_slot(g_streams[kHud], nullptr);
+}
+
+bool prepare_device() noexcept {
+  if (!wanted() || B.prepared)
+    return B.prepared;
+  if (!create_instance()) {
+    Log.error("OpenXR unavailable; presenting to the window instead");
+    g_phase = Phase::Failed;
+    return false;
+  }
+  auto getReqs = xr_proc<PFN_xrGetVulkanGraphicsRequirements2KHR>("xrGetVulkanGraphicsRequirements2KHR");
+  B.createVulkanInstance = xr_proc<PFN_xrCreateVulkanInstanceKHR>("xrCreateVulkanInstanceKHR");
+  B.createVulkanDevice = xr_proc<PFN_xrCreateVulkanDeviceKHR>("xrCreateVulkanDeviceKHR");
+  B.getVulkanGraphicsDevice = xr_proc<PFN_xrGetVulkanGraphicsDevice2KHR>("xrGetVulkanGraphicsDevice2KHR");
+  if (!getReqs || !B.createVulkanInstance || !B.createVulkanDevice || !B.getVulkanGraphicsDevice) {
+    Log.error("XR_KHR_vulkan_enable2 entry points missing; presenting to the window instead");
+    g_phase = Phase::Failed;
+    return false;
+  }
+  // Required before the runtime creates anything Vulkan for us.
+  XrGraphicsRequirementsVulkan2KHR reqs{XR_TYPE_GRAPHICS_REQUIREMENTS_VULKAN2_KHR};
+  if (XR_FAILED(getReqs(B.instance, B.systemId, &reqs))) {
+    Log.error("xrGetVulkanGraphicsRequirements2KHR failed; presenting to the window instead");
+    g_phase = Phase::Failed;
+    return false;
+  }
+  dawn::native::vulkan::ExternalVulkanHooks hooks;
+  hooks.createInstance = &hook_create_instance;
+  hooks.getPhysicalDevice = &hook_physical_device;
+  hooks.createDevice = &hook_create_device;
+  hooks.extraQueueCount = 1; // the runtime's queue (graphics binding)
+  dawn::native::vulkan::SetExternalVulkanHooks(&hooks);
+  B.prepared = true;
+  return true;
+}
+
+void release_instance() noexcept {
+  if (B.instance) {
+    xrDestroyInstance(B.instance);
+    B.instance = XR_NULL_HANDLE;
+  }
+  dawn::native::vulkan::SetExternalVulkanHooks(nullptr);
 }
 
 void shutdown() noexcept {

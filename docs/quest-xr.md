@@ -151,7 +151,9 @@ What changed:
   exactly two display frames, instead of 72 Hz repeating every fifth.
   Netplay keeps its own timer.
 - **Measurement.** `AURORA_XR_TIMING` logs per-pass GPU time (Dawn
-  timestamps) and per-stream bridge copy time (Vulkan timestamps) every 10 s.
+  timestamps) every 10 s.
+- **Since then:** the single-device path (below) removed the bridge copies
+  altogether.
 
 ### Shaders
 
@@ -202,24 +204,46 @@ From the first headset playtest (2026-10-01):
 
 ## How the frame gets to the headset
 
-Dawn can't adopt a Vulkan device someone else created and doesn't expose its
-own, while OpenXR has to create the device its swapchains live on. So there
-are two devices on the same GPU:
+There's one Vulkan device, and Dawn renders straight into OpenXR's
+swapchain images. Stock Dawn can't do this. It creates its own Vulkan
+instance and device and has no way to render into images it didn't create.
+The XR build therefore uses Dawn built from a fork: `encounter/dawn` at
+aurora's pinned `AURORA_DAWN_REF`, plus the `melee-xr` patch. The patch adds
+three things to `dawn/native/VulkanBackend.h`:
 
-- **Bridge device.** An XR thread creates it through `XR_KHR_vulkan_enable2`.
-  It owns the session, passthrough (`XR_FB_passthrough`), and a quad-layer
-  swapchain, and it allocates three shared images.
-- **Dawn device.** aurora's normal device imports those images as
-  `SharedTextureMemory`. aurora's present pass (`aurora.cpp`, `end_frame`)
-  draws into one instead of the window surface.
-- **Handoff.** Semaphores go both ways as file descriptors. Only descriptors
-  cross threads; every Dawn call stays on the render worker.
+- **`SetExternalVulkanHooks`.** Dawn creates its `VkInstance` and `VkDevice`
+  through `xrCreateVulkanInstanceKHR` and `xrCreateVulkanDeviceKHR`
+  (`XR_KHR_vulkan_enable2`). Only the physical device the runtime names is
+  offered as an adapter. One extra queue is created in Dawn's queue family
+  for the runtime.
+- **`GetDeviceVkHandles` and `GetExtraQueue`.** These give the session's
+  graphics binding Dawn's instance, device and the spare queue.
+- **`CreateSharedTextureMemoryFromVkImage`.** This wraps each swapchain image
+  as Dawn shared texture memory. Dawn never destroys the image.
 
-| | Quest (Android) | Linux / Monado |
-|---|---|---|
-| Shared memory | AHardwareBuffer | opaque FD |
-| Semaphores | sync FD | opaque FD |
-| Queue family handoff | `VK_QUEUE_FAMILY_FOREIGN_EXT` | `VK_QUEUE_FAMILY_EXTERNAL` |
+Per frame:
+
+1. The XR thread acquires a swapchain image and waits on it, ahead of the
+   render worker. OpenXR allows one waited image per swapchain at a time.
+2. The render worker begins access to it, draws into it, and ends access.
+   Ending access exports a semaphore (sync FD on Quest, opaque FD on
+   Linux).
+3. The XR thread waits on that semaphore on its own queue. It adds a barrier
+   back to `COLOR_ATTACHMENT_OPTIMAL` if Dawn left another layout, then
+   releases images in the order it acquired them.
+
+There are no copies. Dawn submits on queue 0, and the XR thread and runtime
+use queue 1, so neither needs a lock around the other.
+
+The game's frames are already sRGB-encoded bytes. The swapchains are sRGB
+and created mutable-format, and Dawn sees each image as the matching UNORM
+format, so it stores the bytes unchanged and the compositor decodes them.
+
+`prepare_device` (from `webgpu::initialize`, before the adapter is
+requested) creates the OpenXR instance and system and sets the hooks. The
+session is created later on the XR thread, on Dawn's device. The OpenXR
+instance is destroyed after WebGPU shuts down, because it created Dawn's
+device.
 
 The screen texture is 1080 pixels tall, with a width matching the game's
 presented aspect. A Quest app's window spans the whole display panel, so the
@@ -239,11 +263,18 @@ For a debug build without the release key, run the native step, then
 build uses the same package id as the flat build, so it replaces it on the
 device.
 
-Desktop testing against Monado:
+`MELEE_XR=1` builds Dawn from source, from the `melee-xr` fork checkout at
+`MELEE_DAWN_SOURCE` (default `~/projects/dawn`). Before the first build,
+fetch its dependencies with `python3 tools/fetch_dawn_dependencies.py`. Dawn
+is built with C++ modules and protobuf turned off.
+
+Desktop testing against Monado, with the same fork:
 
 ```sh
-cmake -B build/linux-xr -G Ninja -DAURORA_ENABLE_OPENXR=ON ...   # same flags as build/linux
-AURORA_XR=1 build/linux-xr/melee disc.rvz
+cmake -B build/linux-xr-fork -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DAURORA_ENABLE_OPENXR=ON \
+  -DAURORA_SDL3_PROVIDER=vendor -DAURORA_DAWN_PROVIDER=vendor -DFETCHCONTENT_SOURCE_DIR_DAWN=$HOME/projects/dawn \
+  -DDAWN_SUPPORTS_CXX_MODULES=OFF
+AURORA_XR=1 build/linux-xr-fork/melee disc.rvz
 ```
 
 ## Controls (Touch controllers, port 1)
@@ -275,10 +306,9 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_REFRESH` | unset | Display rate to request if offered (otherwise 60, then 120) |
 | `AURORA_XR_LOCKSTEP` | 1 | Pace the game to the display when it runs at a multiple of 60 Hz |
 | `AURORA_XR_DIRECT` | 1 | Render both eyes straight into the shared 3D image when possible |
-| `AURORA_XR_SHADER_COPY` | 1 | Copy into swapchains with a draw instead of `vkCmdCopyImage` |
 | `AURORA_XR_FIGHT_SCREEN` | 0 | Keep presenting the flat screen during fights (debugging) |
 | `AURORA_XR_HUD_SCALE` | 0.5 | HUD texture resolution, relative to the screen |
-| `AURORA_XR_TIMING` | 1 | Log GPU pass and copy times every 10 s |
+| `AURORA_XR_TIMING` | 1 | Log GPU pass times every 10 s |
 | `AURORA_PIPELINE_INLINE` | 0 | Compile pipelines on the render thread instead of the compile thread |
 | `AURORA_XR_ARENA_SCALE` | 0.006 | Starting meters per game unit (grab with two hands to change) |
 | `AURORA_XR_ARENA_YAW` | 0 | Starting arena turn in degrees (counter-clockwise from above) |
