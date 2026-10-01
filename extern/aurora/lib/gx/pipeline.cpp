@@ -3,6 +3,7 @@
 #include "../gfx/encoding.hpp"
 #include "../gfx/resources.hpp"
 #include "../gfx/pipeline_cache.hpp"
+#include "../gfx/recording.hpp"
 #include "../gfx/resource_cache.hpp"
 
 #include "gx_fmt.hpp"
@@ -40,7 +41,15 @@ static bool env_flag(const char* name) {
 }
 
 void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+  // A multiview replay can only bind multiview pipelines.
+  if (gfx::xr_multiview_replay() && (data.xrPipeline == 0 || !gfx::bind_pipeline(data.xrPipeline, pass))) {
+    return;
+  }
+  if (!gfx::xr_multiview_replay() && !gfx::bind_pipeline(data.pipeline, pass)) {
+#else
   if (!gfx::bind_pipeline(data.pipeline, pass)) {
+#endif
     /* AURORA_LOG_SKIPPED=1: report draws dropped because their pipeline is
      * still compiling. Pipelines are built asynchronously and an unready one
      * silently skips its draw, so a short-lived screen can miss its geometry

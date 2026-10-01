@@ -8,7 +8,7 @@
 
 namespace aurora::gfx {
 
-inline constexpr size_t InlineDrawPayloadSize = 128;
+inline constexpr size_t InlineDrawPayloadSize = 144; // gx::DrawData with its XR multiview twin pipeline
 inline constexpr size_t MaxColorAttachments = 8;
 inline constexpr uint32_t SceneColorAttachmentIndex = 0;
 
@@ -31,6 +31,8 @@ struct RenderTargetLayout {
   std::array<ColorAttachmentLayout, MaxColorAttachments> colorAttachments{};
   wgpu::TextureFormat depthStencilFormat = wgpu::TextureFormat::Undefined;
   uint32_t sampleCount = 1;
+  // XR multiview (Dawn fork): views drawn per draw, one attachment layer each.
+  uint32_t viewCount = 1;
 };
 
 /// Generational handle: 0 is never valid, and IDs are not reused after unregister_draw_type.

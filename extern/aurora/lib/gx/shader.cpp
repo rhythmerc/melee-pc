@@ -871,7 +871,7 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8 
 absl::flat_hash_set<gfx::ShaderRef> s_seenShaders;
 } // namespace
 
-std::string build_shader_source(const ShaderConfig& config, uint32_t normalAttachment) noexcept {
+std::string build_shader_source(const ShaderConfig& config, uint32_t normalAttachment, uint32_t viewCount) noexcept {
   ZoneScoped;
   const auto hash = xxh3_hash(normalAttachment, xxh3_hash(config));
   const auto info = build_shader_info(config);
@@ -2123,16 +2123,35 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}{11}
   // XR eye replays (lib/xr): group 3 can replace the game's projection with
   // a per-eye matrix taking game camera space straight to the eye's clip
   // space. Disabled (the default bind group) it is the game's projection.
+  // A multiview layout (both eyes in one draw, Dawn fork) indexes a matrix
+  // per eye by @builtin(view_index) instead.
   {
+    const bool multiview = viewCount > 1;
     const std::string anchor = "var<uniform> ubuf: Uniform;";
     if (auto at = shaderSource.find(anchor); at != std::string::npos) {
       shaderSource.insert(at + anchor.size(),
-                          "\nstruct XrEye { m: mat4x4f, enabled: vec4u };"
-                          "\n@group(3) @binding(0)\nvar<uniform> xr: XrEye;"
-                          "\nfn gx_proj(p: vec3f) -> vec4f {"
-                          "\n    if (xr.enabled.x != 0u) { return vec4f(p, 1.0) * xr.m; }"
-                          "\n    return vec4f(p, 1.0) * ubuf.proj;"
-                          "\n}");
+                          multiview ? fmt::format("\nstruct XrEye {{ m: array<mat4x4f, {}>, enabled: vec4u }};"
+                                                  "\n@group(3) @binding(0)\nvar<uniform> xr: XrEye;"
+                                                  "\nvar<private> xr_view: u32;"
+                                                  "\nfn gx_proj(p: vec3f) -> vec4f {{"
+                                                  "\n    return vec4f(p, 1.0) * xr.m[xr_view];"
+                                                  "\n}}",
+                                                  viewCount)
+                                    : std::string("\nstruct XrEye { m: mat4x4f, enabled: vec4u };"
+                                                  "\n@group(3) @binding(0)\nvar<uniform> xr: XrEye;"
+                                                  "\nfn gx_proj(p: vec3f) -> vec4f {"
+                                                  "\n    if (xr.enabled.x != 0u) { return vec4f(p, 1.0) * xr.m; }"
+                                                  "\n    return vec4f(p, 1.0) * ubuf.proj;"
+                                                  "\n}"));
+    }
+    if (multiview) {
+      shaderSource.insert(0, "enable chromium_experimental_multiview;\n");
+      const std::string entry = "fn vs_main(";
+      if (auto at = shaderSource.find(entry); at != std::string::npos)
+        shaderSource.insert(at + entry.size(), "@builtin(view_index) xr_view_index: u32, ");
+      const std::string body = "var out: VertexOutput;";
+      if (auto at = shaderSource.find(body); at != std::string::npos)
+        shaderSource.insert(at + body.size(), "\n    xr_view = xr_view_index;");
     }
     for (const std::string_view var : {"mv_pos_a", "mv_pos_b", "mv_pos"}) {
       const std::string from = fmt::format("vec4f({}, 1.0) * ubuf.proj", var);
@@ -2160,7 +2179,8 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config, const gfx::RenderTar
       normalAttachment = i;
     }
   }
-  const auto hash = xxh3_hash(normalAttachment, xxh3_hash(config));
+  const auto hash = layout.viewCount > 1 ? xxh3_hash(layout.viewCount, xxh3_hash(normalAttachment, xxh3_hash(config)))
+                                         : xxh3_hash(normalAttachment, xxh3_hash(config));
 #ifdef __EMSCRIPTEN__
   // Blend/depth variants share shader code. Browser rendering is single-threaded;
   // retain modules for this device rather than compiling them for each pipeline.
@@ -2169,7 +2189,7 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config, const gfx::RenderTar
   if (device != webgpu::g_device.Get()) { modules.clear(); device = webgpu::g_device.Get(); }
   if (auto it = modules.find(hash); it != modules.end()) return it->second;
 #endif
-  const auto shaderSource = build_shader_source(config, normalAttachment);
+  const auto shaderSource = build_shader_source(config, normalAttachment, layout.viewCount);
   wgpu::ShaderSourceWGSL wgslDescriptor{};
   wgslDescriptor.code = shaderSource.c_str();
   const auto label = fmt::format("GX Shader {:x}", hash);

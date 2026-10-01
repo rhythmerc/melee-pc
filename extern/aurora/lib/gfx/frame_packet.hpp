@@ -137,6 +137,9 @@ inline void finalize_render_target_layout(RenderTargetLayout& layout) noexcept {
   }
   hasher.update(static_cast<uint32_t>(layout.depthStencilFormat));
   hasher.update(layout.sampleCount);
+  if (layout.viewCount != 1) { // keeps every single-view key (and cache entry) as it was
+    hasher.update(layout.viewCount);
+  }
   layout.key = hasher.digest();
 }
 

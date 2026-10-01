@@ -4,6 +4,7 @@
 
 #include "../internal.hpp"
 #include "../webgpu/gpu.hpp"
+#include "../gfx/recording.hpp"
 #include "../gfx/xr_replay.hpp"
 #include "../gx/gx.hpp"
 
@@ -123,6 +124,7 @@ struct Stream {
   const char* name = "";
   std::vector<Slot> slots;        // one per swapchain image; sized before Phase::SlotsReady
   uint32_t width = 0, height = 0; // set before the XR thread starts
+  uint32_t layers = 1;            // Stereo with multiview: one per eye
   VkFormat format = VK_FORMAT_R8G8B8A8_UNORM; // what Dawn draws as (bytes already sRGB-encoded)
   int64_t swapFormat = 0;                     // swapchain: the sRGB twin, created mutable-format
   uint64_t acquireSeq = 0;        // g_mutex
@@ -156,6 +158,10 @@ std::array<Stream, kStreamCount> g_streams;
 // the 3D swapchain image, which then has to be in the framebuffer's format.
 wgpu::TextureFormat g_sceneFormat = wgpu::TextureFormat::RGBA8Unorm;
 uint32_t g_sceneSamples = 1;
+// Both eyes in one pass with a view mask over a 2-layer 3D image (Dawn fork
+// multiview), decided by begin_frame before the XR thread starts. Otherwise
+// the eyes are replayed side by side, one after the other.
+bool g_multiview = false;
 
 // Latest predicted eye poses, from the XR thread for the render worker.
 std::mutex g_viewMutex;
@@ -319,7 +325,7 @@ VkImageMemoryBarrier barrier(VkImage img, VkImageLayout from, VkImageLayout to, 
   b.srcQueueFamilyIndex = srcQ;
   b.dstQueueFamilyIndex = dstQ;
   b.image = img;
-  b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, VK_REMAINING_ARRAY_LAYERS};
   return b;
 }
 
@@ -481,7 +487,7 @@ VkImageCreateInfo swapchain_image_info(const Stream& st) {
   ici.format = st.format;
   ici.extent = {st.width, st.height, 1};
   ici.mipLevels = 1;
-  ici.arrayLayers = 1;
+  ici.arrayLayers = st.layers;
   ici.samples = VK_SAMPLE_COUNT_1_BIT;
   ici.tiling = VK_IMAGE_TILING_OPTIMAL;
   ici.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
@@ -499,7 +505,7 @@ bool create_swapchain(Stream& st) {
   ci.width = st.width;
   ci.height = st.height;
   ci.faceCount = 1;
-  ci.arraySize = 1;
+  ci.arraySize = st.layers;
   ci.mipCount = 1;
   XR_TRY(xrCreateSwapchain(B.session, &ci, &st.swapchain));
   uint32_t n = 0;
@@ -541,8 +547,9 @@ bool size_stereo_stream() {
   const auto even = [](float v) { return (static_cast<uint32_t>(v + 0.5f) + 1u) & ~1u; };
   const uint32_t eyeW = even(static_cast<float>(views[0].recommendedImageRectWidth) * scale);
   const uint32_t eyeH = even(static_cast<float>(views[0].recommendedImageRectHeight) * scale);
-  g_streams[kStereo].width = eyeW * 2;
+  g_streams[kStereo].width = g_multiview ? eyeW : eyeW * 2;
   g_streams[kStereo].height = eyeH;
+  g_streams[kStereo].layers = g_multiview ? 2 : 1;
   return true;
 }
 
@@ -611,14 +618,15 @@ bool create_session() {
   }
   Log.info("Swapchains: screen {}x{}, 3D {}x{} (two {}x{} eyes, format {}), HUD {}x{} (format {}), passthrough {}",
            g_streams[kScreen].width, g_streams[kScreen].height, g_streams[kStereo].width, g_streams[kStereo].height,
-           g_streams[kStereo].width / 2, g_streams[kStereo].height, g_streams[kStereo].swapFormat,
+           g_multiview ? g_streams[kStereo].width : g_streams[kStereo].width / 2, g_streams[kStereo].height,
+           g_streams[kStereo].swapFormat,
            g_streams[kHud].width, g_streams[kHud].height, B.swapFormat, B.passthroughLayer ? "on" : "off");
   return true;
 }
 
 bool create_dump_buffer(Stream& st) {
   VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-  bci.size = static_cast<VkDeviceSize>(st.width) * st.height * 4;
+  bci.size = static_cast<VkDeviceSize>(st.width) * st.height * st.layers * 4;
   bci.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
   VK_TRY(vkCreateBuffer(B.dev, &bci, nullptr, &st.dumpBuf));
   VkMemoryRequirements mr;
@@ -637,14 +645,14 @@ void write_dump(const Stream& st) {
   const auto* px = static_cast<const uint8_t*>(st.dumpPtr);
   const std::string base = B.dumpDir + "/xr_" + st.name;
   if (FILE* f = std::fopen((base + ".ppm").c_str(), "wb")) {
-    std::fprintf(f, "P6\n%u %u\n255\n", st.width, st.height);
-    for (size_t i = 0; i < static_cast<size_t>(st.width) * st.height; ++i)
+    std::fprintf(f, "P6\n%u %u\n255\n", st.width, st.height * st.layers);
+    for (size_t i = 0; i < static_cast<size_t>(st.width) * st.height * st.layers; ++i)
       std::fwrite(px + i * 4, 1, 3, f);
     std::fclose(f);
   }
   if (FILE* f = std::fopen((base + "_alpha.pgm").c_str(), "wb")) {
-    std::fprintf(f, "P5\n%u %u\n255\n", st.width, st.height);
-    for (size_t i = 0; i < static_cast<size_t>(st.width) * st.height; ++i)
+    std::fprintf(f, "P5\n%u %u\n255\n", st.width, st.height * st.layers);
+    for (size_t i = 0; i < static_cast<size_t>(st.width) * st.height * st.layers; ++i)
       std::fputc(px[i * 4 + 3], f);
     std::fclose(f);
   }
@@ -951,7 +959,7 @@ bool release_ready(Stream& st, bool& released) {
         vkCmdPipelineBarrier(s.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
                              nullptr, 0, nullptr, 1, &toSrc);
         VkBufferImageCopy rb{};
-        rb.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        rb.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, st.layers}; // layers stack in the dump
         rb.imageExtent = {st.width, st.height, 1};
         vkCmdCopyImageToBuffer(s.cmd, s.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, st.dumpBuf, 1, &rb);
         st.dumpSlot = index;
@@ -1536,13 +1544,16 @@ bool render_xr_frame() {
   if (fs.shouldRender && fight) {
     // Premultiplied alpha (no UNPREMULTIPLIED bit): the arena's coverage
     // hides the room, effects outside it add light over passthrough.
-    const int32_t eyeW = static_cast<int32_t>(stereo.width / 2);
+    // Multiview: one layer per eye. Otherwise the eyes sit side by side.
+    const int32_t eyeW = static_cast<int32_t>(stereo.layers > 1 ? stereo.width : stereo.width / 2);
     for (int i = 0; i < 2; ++i) {
       projViews[i] = {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
       projViews[i].pose = stereo.shownViews[i].pose;
       projViews[i].fov = stereo.shownViews[i].fov;
       projViews[i].subImage.swapchain = stereo.swapchain;
-      projViews[i].subImage.imageRect = {{i * eyeW, 0}, {eyeW, static_cast<int32_t>(stereo.height)}};
+      const int32_t x = stereo.layers > 1 ? 0 : i * eyeW;
+      projViews[i].subImage.imageRect = {{x, 0}, {eyeW, static_cast<int32_t>(stereo.height)}};
+      projViews[i].subImage.imageArrayIndex = stereo.layers > 1 ? static_cast<uint32_t>(i) : 0;
     }
     proj.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
     proj.space = B.space;
@@ -2017,9 +2028,13 @@ struct GpuTiming {
   std::array<double, kZoneCount> ns{};
   std::array<uint64_t, kZoneCount> samples{};
   uint64_t frames = 0;
+  uint64_t worldDraws = 0, worldFrames = 0; // draws replayed for the eyes (both views)
   std::chrono::steady_clock::time_point lastLog = std::chrono::steady_clock::now();
   std::array<wgpu::PassTimestampWrites, kZoneCount> writes{};
 };
+
+// The multiview shader's XrEye: one matrix per eye, then the enabled flags.
+constexpr uint64_t kMultiviewEyeSize = 2 * 64 + 16;
 
 struct Renderer3D {
   uint64_t layoutKey = 0;
@@ -2028,6 +2043,9 @@ struct Renderer3D {
   // Per eye, per world transform index (0 = none).
   std::array<std::array<wgpu::Buffer, gfx::XrMaxTransforms>, 2> eyeUniforms;
   std::array<std::array<wgpu::BindGroup, gfx::XrMaxTransforms>, 2> eyeGroups;
+  // Multiview: both eyes' matrices in one uniform per world transform.
+  std::array<wgpu::Buffer, gfx::XrMaxTransforms> mvUniforms;
+  std::array<wgpu::BindGroup, gfx::XrMaxTransforms> mvGroups;
   wgpu::RenderPipeline compose;
   wgpu::BindGroupLayout composeLayout;
   std::array<wgpu::Buffer, 3> params;
@@ -2127,7 +2145,10 @@ void map_timing() {
             total += us;
             line += fmt::format("{}{} {:.0f}", z ? ", " : "", kZoneNames[z], us);
           }
-          Log.info("GPU 3D passes per frame (us): {} (total {:.0f})", line, total);
+          Log.info("GPU 3D passes per frame (us): {} (total {:.0f}); {:.0f} world draws per frame", line, total,
+                   t.worldFrames ? static_cast<double>(t.worldDraws) / t.worldFrames : 0.0);
+          t.worldDraws = 0;
+          t.worldFrames = 0;
           t.ns = {};
           t.samples = {};
           t.frames = 0;
@@ -2215,6 +2236,14 @@ bool ensure_renderer(const gfx::RenderTargetLayout& layout) {
     }
     R.targets[i].target.views[0].xrBindGroups = R.eyeGroups[i];
   }
+  if (g_multiview) {
+    for (uint32_t t = 0; t < gfx::XrMaxTransforms; ++t) {
+      R.mvUniforms[t] = make_buffer(kMultiviewEyeSize, wgpu::BufferUsage::Uniform, "XR eye matrices (multiview)");
+      const wgpu::BindGroupEntry e{.binding = 0, .buffer = R.mvUniforms[t], .size = kMultiviewEyeSize};
+      const wgpu::BindGroupDescriptor bg{.layout = gx::g_xrEyeBindGroupLayout, .entryCount = 1, .entries = &e};
+      R.mvGroups[t] = device.CreateBindGroup(&bg);
+    }
+  }
 
   // Composite pipeline into the shared images (RGBA8Unorm).
   std::string source = kComposeShader;
@@ -2300,7 +2329,10 @@ bool ensure_direct(const gfx::RenderTargetLayout& layout) {
     return true;
   auto& device = webgpu::g_device;
   const auto& stereo = g_streams[kStereo];
-  const wgpu::Extent3D size{stereo.width, stereo.height, 1};
+  const wgpu::Extent3D size{stereo.width, stereo.height, stereo.layers};
+  const wgpu::TextureViewDescriptor layered{.dimension = wgpu::TextureViewDimension::e2DArray,
+                                            .arrayLayerCount = stereo.layers};
+  const wgpu::TextureViewDescriptor* viewDesc = stereo.layers > 1 ? &layered : nullptr;
   const wgpu::TextureDescriptor dd{.label = "XR 3D depth",
                                    .usage = wgpu::TextureUsage::RenderAttachment,
                                    .size = size,
@@ -2316,7 +2348,7 @@ bool ensure_direct(const gfx::RenderTargetLayout& layout) {
                                      .size = size,
                                      .format = layout.colorAttachments[i].format};
     auto tex = device.CreateTexture(&td);
-    R.directExtraViews[i] = tex.CreateView();
+    R.directExtraViews[i] = tex.CreateView(viewDesc);
     R.directExtras.push_back(tex);
   }
   wgpu::ShaderSourceWGSL wgsl{};
@@ -2339,7 +2371,10 @@ bool ensure_direct(const gfx::RenderTargetLayout& layout) {
     const wgpu::DepthStencilState depth{.format = layout.depthStencilFormat,
                                         .depthWriteEnabled = wgpu::OptionalBool::False,
                                         .depthCompare = compare};
+    wgpu::RenderPipelineMultiview multiview{};
+    multiview.viewMask = (1u << stereo.layers) - 1u;
     const wgpu::RenderPipelineDescriptor rpd{
+        .nextInChain = stereo.layers > 1 ? &multiview : nullptr,
         .label = "XR coverage",
         .layout = pipelineLayout,
         .vertex = {.module = module, .entryPoint = "vs"},
@@ -2409,6 +2444,11 @@ void render_3d(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame)
   const Mat4 cameraToWorld = inverse_affine(frame.xrWorldView);
   const Mat4 arena = arena_transform();
   const size_t transforms = std::min<size_t>(frame.xrTransforms.size() + 1, gfx::XrMaxTransforms);
+  struct {
+    std::array<Mat4, 2> m;
+    uint32_t enabled[4];
+  } mv[gfx::XrMaxTransforms]{};
+  static_assert(sizeof(mv[0]) == kMultiviewEyeSize);
   for (int eye = 0; eye < 2; ++eye) {
     const Mat4 eyeToClip = mul(projection(views[eye].fov, 0.05f), view_from_pose(views[eye].pose));
     for (size_t t = 0; t < transforms; ++t) {
@@ -2423,8 +2463,17 @@ void render_3d(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame)
         uint32_t enabled[4];
       } u{mul(mul(eyeToClip, arena), world), {1, 0, 0, 0}};
       static_assert(sizeof(u) == gx::XrEyeUniformSize);
-      webgpu::g_queue.WriteBuffer(R.eyeUniforms[eye][t], 0, &u, sizeof(u));
+      if (g_multiview) {
+        mv[t].m[eye] = u.m;
+        mv[t].enabled[0] = 1;
+      } else {
+        webgpu::g_queue.WriteBuffer(R.eyeUniforms[eye][t], 0, &u, sizeof(u));
+      }
     }
+  }
+  if (g_multiview) {
+    for (size_t t = 0; t < transforms; ++t)
+      webgpu::g_queue.WriteBuffer(R.mvUniforms[t], 0, &mv[t], sizeof(mv[t]));
   }
 
   // Direct path: the framebuffer's format matches the shared 3D image and
@@ -2441,8 +2490,8 @@ void render_3d(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame)
     Log.info("3D eyes render {}", direct ? "straight into the shared image" : "privately, then composed");
     R.loggedPath = true;
   }
-  if (!direct && stereoFormat != wgpu::TextureFormat::RGBA8Unorm) {
-    return; // fallback compose writes RGBA8 only (MSAA switched on mid-session)
+  if (!direct && (stereoFormat != wgpu::TextureFormat::RGBA8Unorm || g_multiview)) {
+    return; // fallback compose writes side-by-side RGBA8 only (MSAA switched on mid-session)
   }
   if (direct) {
     if (!ensure_direct(layout))
@@ -2451,20 +2500,35 @@ void render_3d(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame)
       gfx::XrReplayTarget t;
       t.layout = layout;
       t.size = {stereo.width, stereo.height, 1};
-      const auto dstView = dst.CreateView();
+      const wgpu::TextureViewDescriptor layered{.dimension = wgpu::TextureViewDimension::e2DArray,
+                                                .arrayLayerCount = stereo.layers};
+      const auto* viewDesc = g_multiview ? &layered : nullptr;
+      const auto dstView = dst.CreateView(viewDesc);
       t.colorViews = R.directExtraViews;
       t.colorViews[gfx::SceneColorAttachmentIndex] = dstView;
-      t.depthView = R.directDepth.CreateView();
+      t.depthView = R.directDepth.CreateView(viewDesc);
       t.clearColor = {0, 0, 0, 0};
       t.clearDepth = gx::UseReversedZ ? 0.f : 1.f;
       t.depthStore = wgpu::StoreOp::Discard;
-      const float eyeW = static_cast<float>(stereo.width / 2), eyeH = static_cast<float>(stereo.height);
-      t.views[0] = {R.eyeGroups[0], 0.f, 0.f, eyeW, eyeH};
-      t.views[1] = {R.eyeGroups[1], eyeW, 0.f, eyeW, eyeH};
-      t.viewCount = 2;
+      if (g_multiview) {
+        // One replay draws both eyes: view mask 0b11 over the image's two layers.
+        t.views[0] = {R.mvGroups, 0.f, 0.f, static_cast<float>(stereo.width), static_cast<float>(stereo.height)};
+        t.viewCount = 1;
+        t.viewMask = 0b11;
+      } else {
+        const float eyeW = static_cast<float>(stereo.width / 2), eyeH = static_cast<float>(stereo.height);
+        t.views[0] = {R.eyeGroups[0], 0.f, 0.f, eyeW, eyeH};
+        t.views[1] = {R.eyeGroups[1], eyeW, 0.f, eyeW, eyeH};
+        // AURORA_XR_ONE_EYE: replay the left eye only (measuring per-eye cost).
+        t.viewCount = env_flag("AURORA_XR_ONE_EYE", false) ? 1 : 2;
+      }
+      uint32_t draws = 0;
+      t.drawCount = &draws;
       t.finish = &draw_coverage;
       t.timestampWrites = zone_writes(kZone3D);
       gfx::encode_xr_replay(cmd, frame, gfx::XrCategory::World, t);
+      R.timing.worldDraws += draws;
+      ++R.timing.worldFrames;
       R.renderedViews = views;
       R.renderedStereo = true;
       g_skipPresent = !env_flag("AURORA_XR_FIGHT_SCREEN", false);
@@ -2524,6 +2588,10 @@ void add_required_features(const wgpu::Adapter& adapter, std::vector<wgpu::Featu
     if (adapter.HasFeature(f) && std::find(features.begin(), features.end(), f) == features.end())
       features.push_back(f);
   }
+  // Both eyes in one pass (Dawn fork multiview).
+  if (adapter.HasFeature(wgpu::FeatureName::ChromiumExperimentalMultiview) &&
+      std::find(features.begin(), features.end(), wgpu::FeatureName::ChromiumExperimentalMultiview) == features.end())
+    features.push_back(wgpu::FeatureName::ChromiumExperimentalMultiview);
   // XR GPU timing (AURORA_XR_TIMING).
   if (env_flag("AURORA_XR_TIMING", true) && adapter.HasFeature(wgpu::FeatureName::TimestampQuery) &&
       std::find(features.begin(), features.end(), wgpu::FeatureName::TimestampQuery) == features.end())
@@ -2576,6 +2644,10 @@ wgpu::Texture begin_frame(uint32_t width, uint32_t height) noexcept {
     const auto layout = gfx::scene_render_target_layout();
     g_sceneFormat = layout.colorAttachments[gfx::SceneColorAttachmentIndex].format;
     g_sceneSamples = layout.sampleCount;
+    // Multiview needs the direct path (single-sample framebuffer).
+    g_multiview = webgpu::g_device.HasFeature(wgpu::FeatureName::ChromiumExperimentalMultiview) &&
+                  g_sceneSamples == 1 && env_flag("AURORA_XR_MULTIVIEW", true);
+    Log.info("3D eyes: {}", g_multiview ? "multiview, both in one pass" : "side by side, one pass each");
     g_phase = Phase::Starting;
     g_thread = std::thread(thread_main);
     return {};
@@ -2592,6 +2664,13 @@ wgpu::Texture begin_frame(uint32_t width, uint32_t height) noexcept {
   }
   if (phase != Phase::Imported)
     return {};
+  if (g_multiview) {
+    // World draws recorded from now on resolve their multiview twins.
+    auto mvLayout = gfx::scene_render_target_layout();
+    mvLayout.viewCount = 2;
+    gfx::detail::finalize_render_target_layout(mvLayout);
+    gfx::set_xr_multiview_layout(mvLayout);
+  }
   auto& screen = g_streams[kScreen];
   if (width != screen.width || height != screen.height) {
     static bool warned = false;

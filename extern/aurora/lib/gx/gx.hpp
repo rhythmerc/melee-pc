@@ -565,7 +565,8 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, const gfx::Ren
 #ifdef __EMSCRIPTEN__
 bool take_browser_pipeline(gfx::PipelineRef ref, wgpu::RenderPipeline& pipeline);
 #endif
-std::string build_shader_source(const ShaderConfig& config, uint32_t normalAttachment = UINT32_MAX) noexcept;
+std::string build_shader_source(const ShaderConfig& config, uint32_t normalAttachment = UINT32_MAX,
+                                uint32_t viewCount = 1) noexcept;
 wgpu::ShaderModule build_shader(const ShaderConfig& config, const gfx::RenderTargetLayout& layout) noexcept;
 GXBindGroups build_bind_groups(const ShaderInfo& info) noexcept;
 

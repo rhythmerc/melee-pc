@@ -40,6 +40,11 @@ struct XrReplayTarget {
   void (*finish)(const wgpu::RenderPassEncoder& pass, void* user) = nullptr;
   void* finishUser = nullptr;
   const wgpu::PassTimestampWrites* timestampWrites = nullptr; // XR GPU timing
+  uint32_t* drawCount = nullptr; // incremented per draw encoded (all views)
+  // Multiview (Dawn fork): the pass draws every view in the mask at once, into
+  // 2D-array attachments with one layer per view, using each world draw's
+  // multiview twin pipeline (gx::DrawData::xrPipeline). Use one view then.
+  uint32_t viewMask = 0;
 };
 
 // Render worker only. Encodes the frame's draws tagged `category`, in

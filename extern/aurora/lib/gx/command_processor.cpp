@@ -5,6 +5,7 @@
 #include "command_processor.hpp"
 
 #include "../gfx/depth_peek.hpp"
+#include "../gfx/pipeline_cache.hpp"
 #include "../gfx/recording.hpp"
 #include "../internal.hpp"
 #include "dolphin/gd/GDGeometry.h"
@@ -135,6 +136,10 @@ struct DrawCache {
   PipelineConfig config{};
   ShaderInfo shaderInfo{};
   gfx::PipelineRef pipelineRef{};
+  // XR multiview twin of pipelineRef, for world draws (and what it was made for).
+  gfx::PipelineRef xrPipelineRef{};
+  gfx::PipelineRef xrForPipeline{};
+  uint64_t xrForLayout = 0;
   GXBindGroups bindGroups{};
   uint64_t bindGeneration = 0;
   GXVtxFmt fmt = GX_MAX_VTXFMT;
@@ -546,8 +551,22 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   }
 
   cache.lastDrawFmt = fmt;
+  gfx::PipelineRef xrPipeline = 0;
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+  if (gfx::xr_recording_world()) {
+    if (const auto* mv = gfx::xr_multiview_layout()) {
+      if (cache.xrForPipeline != cache.pipelineRef || cache.xrForLayout != mv->key) {
+        cache.xrPipelineRef = gfx::find_pipeline(cache.config, *mv);
+        cache.xrForPipeline = cache.pipelineRef;
+        cache.xrForLayout = mv->key;
+      }
+      xrPipeline = cache.xrPipelineRef;
+    }
+  }
+#endif
   gfx::push_draw_command(DrawData{
       .pipeline = cache.pipelineRef,
+      .xrPipeline = xrPipeline,
       .vertRange = vertRange,
       .idxRange = idxRange,
       .uniformRange = cache.uniformRange,

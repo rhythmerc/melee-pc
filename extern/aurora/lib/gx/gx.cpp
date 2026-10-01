@@ -376,7 +376,14 @@ wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, const gfx::Ren
       .targetCount = layout.colorAttachmentCount,
       .targets = colorTargets.data(),
   };
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+  wgpu::RenderPipelineMultiview multiview{};
+  multiview.viewMask = (1u << layout.viewCount) - 1u;
+#endif
   const wgpu::RenderPipelineDescriptor descriptor{
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+      .nextInChain = layout.viewCount > 1 ? &multiview : nullptr,
+#endif
       .label = label,
       .layout = sPipelineLayout,
       .vertex =

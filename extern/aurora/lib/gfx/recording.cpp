@@ -18,6 +18,7 @@
 #endif
 #include "../window.hpp"
 
+#include <atomic>
 #include <array>
 #include <cstring>
 #include <new>
@@ -1247,6 +1248,26 @@ void xr_set_category(XrCategory category, const float* view3x4) {
   } else if (category == XrCategory::Hud) {
     frame.xrHasHud = true;
   }
+}
+
+bool xr_recording_world() noexcept { return g_recorder.xrCategory == XrCategory::World; }
+
+namespace {
+std::atomic<const RenderTargetLayout*> g_xrMultiviewLayout{nullptr};
+} // namespace
+
+void set_xr_multiview_layout(const RenderTargetLayout& layout) noexcept {
+  const auto* current = g_xrMultiviewLayout.load(std::memory_order_acquire);
+  if (current != nullptr && current->key == layout.key) {
+    return;
+  }
+  // Published for the FIFO thread; an older copy is kept alive (it is tiny and
+  // changes only with the framebuffer format or MSAA).
+  g_xrMultiviewLayout.store(new RenderTargetLayout(layout), std::memory_order_release);
+}
+
+const RenderTargetLayout* xr_multiview_layout() noexcept {
+  return g_xrMultiviewLayout.load(std::memory_order_acquire);
 }
 
 void xr_set_world_transform(const float* m3x4) {

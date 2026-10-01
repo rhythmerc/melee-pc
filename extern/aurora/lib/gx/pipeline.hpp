@@ -6,6 +6,9 @@
 namespace aurora::gx {
 struct DrawData {
   gfx::PipelineRef pipeline;
+  // XR multiview twin of `pipeline` (same config, multiview layout), for world
+  // draws while lib/xr replays them with a view mask; 0 = none.
+  gfx::PipelineRef xrPipeline;
   gfx::Range vertRange;
   gfx::Range idxRange;
   gfx::Range uniformRange;

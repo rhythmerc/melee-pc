@@ -91,6 +91,33 @@ Checked on desktop against Monado (`AURORA_XR_DUMP` images):
   scene) render in 3D at 60 frames per second.
 - **The title screen** stays on the virtual screen.
 
+### Multiview
+
+Both eyes draw in one pass. The 3D swapchain has one layer per eye, and the
+replay pass has a view mask of `0b11`. Every world draw uses a twin pipeline:
+- same GX config, multiview layout (`RenderTargetLayout::viewCount = 2`);
+- its shader reads `@builtin(view_index)` and picks that eye's matrix from
+  group 3.
+
+The command processor resolves the twin when a world draw is recorded
+(`gx::DrawData::xrPipeline`), and the replay binds it. Until a twin is
+compiled, its draw is skipped. This needs the Dawn fork's multiview
+(`ChromiumExperimentalMultiview`, Vulkan dynamic rendering).
+`AURORA_XR_MULTIVIEW=0` goes back to replaying the eyes side by side, as
+does MSAA.
+
+On a Quest 3 (2026-10-01), Temple with 4 CPU players:
+
+| | Two passes | Multiview |
+|---|---|---|
+| World draws per frame | ~840 | ~420 |
+| 3D eye pass | 12.5 to 13.5 ms | 10.7 to 12 ms |
+
+Halving the draws saved only 10 to 15%. On this GPU the cost of a world
+draw is per view (vertex and rasterization work), not draw overhead, and
+resolution barely changes it (17 to 21 µs per draw per eye at both 0.7 and
+1.0 scale).
+
 ### Placing the arena
 
 Pause the fight to move the arena. Each controller shows a laser, and the
@@ -309,6 +336,8 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_EYE_SCALE` | 1.0 | Eye resolution, as a fraction of the runtime's recommendation |
 | `AURORA_XR_REFRESH` | unset | Display rate to request if offered (otherwise 60, then 120) |
 | `AURORA_XR_LOCKSTEP` | 1 | Pace the game to the display when it runs at a multiple of 60 Hz |
+| `AURORA_XR_MULTIVIEW` | 1 | Both eyes in one pass (multiview) when the device supports it |
+| `AURORA_XR_ONE_EYE` | 0 | Measurement: replay the left eye only (side-by-side path) |
 | `AURORA_XR_DIRECT` | 1 | Render both eyes straight into the shared 3D image when possible |
 | `AURORA_XR_FIGHT_SCREEN` | 0 | Keep presenting the flat screen during fights (debugging) |
 | `AURORA_XR_HUD_SCALE` | 0.5 | HUD texture resolution, relative to the screen |

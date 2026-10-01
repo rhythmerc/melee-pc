@@ -465,6 +465,7 @@ bool bind_pipeline(PipelineRef ref, const wgpu::RenderPassEncoder& pass) {
 #if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
 namespace {
 XrFrameHook g_xrFrameHook = nullptr;
+bool g_xrMultiviewReplay = false; // render worker only
 
 bool same_formats(const RenderTargetLayout& a, const RenderTargetLayout& b) {
   if (a.colorAttachmentCount != b.colorAttachmentCount || a.depthStencilFormat != b.depthStencilFormat ||
@@ -502,7 +503,10 @@ void encode_xr_replay(const wgpu::CommandEncoder& cmd, FramePacket& frame, XrCat
       .depthStoreOp = target.depthStore,
       .depthClearValue = target.clearDepth,
   };
+  wgpu::RenderPassMultiview multiview{};
+  multiview.viewMask = target.viewMask;
   const wgpu::RenderPassDescriptor desc{
+      .nextInChain = target.viewMask != 0 ? &multiview : nullptr,
       .label = category == XrCategory::World ? "XR eye replay" : "XR HUD replay",
       .colorAttachmentCount = target.layout.colorAttachmentCount,
       .colorAttachments = attachments.data(),
@@ -511,6 +515,7 @@ void encode_xr_replay(const wgpu::CommandEncoder& cmd, FramePacket& frame, XrCat
   };
   auto pass = cmd.BeginRenderPass(&desc);
   g_currentPipeline = UINTPTR_MAX;
+  g_xrMultiviewReplay = target.viewMask != 0;
   pass.SetBindGroup(0, resources().staticBindGroup);
   pass.SetBindGroup(2, gx::g_emptyTextureBindGroup);
 
@@ -574,6 +579,9 @@ void encode_xr_replay(const wgpu::CommandEncoder& cmd, FramePacket& frame, XrCat
               pass.SetBindGroup(3, group(boundTransform));
             }
             c.data.draw.encoder(c.data.draw.payload.data(), pass, info);
+            if (target.drawCount != nullptr) {
+              ++*target.drawCount;
+            }
           }
           break;
         default:
@@ -588,6 +596,10 @@ void encode_xr_replay(const wgpu::CommandEncoder& cmd, FramePacket& frame, XrCat
     target.finish(pass, target.finishUser);
   }
   pass.End();
+  g_xrMultiviewReplay = false;
+  g_currentPipeline = UINTPTR_MAX;
 }
+
+bool xr_multiview_replay() noexcept { return g_xrMultiviewReplay; }
 #endif
 } // namespace aurora::gfx
