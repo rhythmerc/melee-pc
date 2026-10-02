@@ -41,6 +41,7 @@
 #include <deque>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 
 namespace aurora::xr {
@@ -231,6 +232,8 @@ struct Bridge {
   bool prepared = false; // prepare_device ran and Dawn's hooks are set
 
   bool hasRefreshRateExt = false;
+  bool hasPerfSettingsExt = false;
+  PFN_xrPerfSettingsSetPerformanceLevelEXT setPerformanceLevel = nullptr;
   PFN_xrEnumerateDisplayRefreshRatesFB enumerateRefreshRates = nullptr;
   PFN_xrRequestDisplayRefreshRateFB requestRefreshRate = nullptr;
   PFN_xrGetDisplayRefreshRateFB getRefreshRate = nullptr;
@@ -357,6 +360,7 @@ bool create_instance() {
     B.hasPassthroughExt |= !std::strcmp(p.extensionName, XR_FB_PASSTHROUGH_EXTENSION_NAME);
     B.hasRefreshRateExt |= !std::strcmp(p.extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
     B.hasColorScaleBias |= !std::strcmp(p.extensionName, XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME);
+    B.hasPerfSettingsExt |= !std::strcmp(p.extensionName, XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
   }
   if (!hasVk2) {
     Log.error("OpenXR runtime lacks XR_KHR_vulkan_enable2");
@@ -369,6 +373,8 @@ bool create_instance() {
     exts.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
   if (B.hasColorScaleBias)
     exts.push_back(XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME);
+  if (B.hasPerfSettingsExt)
+    exts.push_back(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
   XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
 #ifdef __ANDROID__
   exts.push_back(XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME);
@@ -404,6 +410,8 @@ bool create_instance() {
     B.requestRefreshRate = xr_proc<PFN_xrRequestDisplayRefreshRateFB>("xrRequestDisplayRefreshRateFB");
     B.getRefreshRate = xr_proc<PFN_xrGetDisplayRefreshRateFB>("xrGetDisplayRefreshRateFB");
   }
+  if (B.hasPerfSettingsExt)
+    B.setPerformanceLevel = xr_proc<PFN_xrPerfSettingsSetPerformanceLevelEXT>("xrPerfSettingsSetPerformanceLevelEXT");
   return true;
 }
 
@@ -993,6 +1001,35 @@ bool release_ready(Stream& st, bool& released) {
     ++st.releases;
     released = true;
   }
+}
+
+// CPU and GPU clock levels (XR_EXT_performance_settings), off by default.
+// On a Quest 3 a sustained-high request succeeded but left the GPU at the
+// level the runtime already picked (2, 640 MHz) and changed nothing measurable
+// (Temple 4P, 2026-10-01), so the runtime keeps its dynamic clocks.
+// AURORA_XR_PERF_GPU / AURORA_XR_PERF_CPU = low, high, boost opt in.
+void request_performance_levels() {
+  if (!B.setPerformanceLevel) {
+    Log.info("XR_EXT_performance_settings unavailable; the runtime picks clock levels");
+    return;
+  }
+  const auto level = [](const char* name) {
+    const char* v = std::getenv(name);
+    const std::string_view s = v != nullptr ? v : "high";
+    if (s == "low")
+      return XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT;
+    if (s == "boost")
+      return XR_PERF_SETTINGS_LEVEL_BOOST_EXT;
+    return XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT;
+  };
+  const char* gpuEnv = std::getenv("AURORA_XR_PERF_GPU");
+  if (gpuEnv == nullptr || *gpuEnv == '\0' || std::string_view{gpuEnv} == "off")
+    return; // the runtime's own clock levels
+  const auto cpu = level("AURORA_XR_PERF_CPU"), gpu = level("AURORA_XR_PERF_GPU");
+  const XrResult rc = B.setPerformanceLevel(B.session, XR_PERF_SETTINGS_DOMAIN_CPU_EXT, cpu);
+  const XrResult rg = B.setPerformanceLevel(B.session, XR_PERF_SETTINGS_DOMAIN_GPU_EXT, gpu);
+  Log.info("Performance levels requested: CPU {} ({}), GPU {} ({})", static_cast<int>(cpu), static_cast<int>(rc),
+           static_cast<int>(gpu), static_cast<int>(rg));
 }
 
 void request_refresh_rate() {
@@ -1632,6 +1669,7 @@ bool poll_events() {
         XR_TRY(xrBeginSession(B.session, &bi));
         B.running = true;
         request_refresh_rate();
+        request_performance_levels();
         update_pacing();
         B.statsStart = std::chrono::steady_clock::now();
       } else if (state == XR_SESSION_STATE_STOPPING) {
@@ -2424,7 +2462,17 @@ void compose(const wgpu::CommandEncoder& cmd, const wgpu::Texture& dst, std::ini
 
 // gfx frame hook: runs on the render worker once every pass of a frame is
 // encoded. Re-draws the fight per eye and the HUD into the shared images.
+void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame);
+
+// Frame hook: the 3D views, then whether the next frame's flat world draws
+// are needed (not while fights go to the headset with no flat present).
 void render_3d(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame) {
+  R.renderedStereo = false;
+  render_3d_frame(cmd, frame);
+  gfx::set_xr_drop_flat_world(R.renderedStereo && g_skipPresent && !env_flag("AURORA_XR_FLAT_WORLD", false));
+}
+
+void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame) {
   if (g_phase != Phase::Imported || !g_sessionRunning || !frame.xrHasWorld ||
       !env_flag("AURORA_XR_3D", true))
     return;

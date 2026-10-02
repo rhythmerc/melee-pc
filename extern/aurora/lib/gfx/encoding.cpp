@@ -29,6 +29,10 @@
 #include <tracy/Tracy.hpp>
 
 namespace aurora::gfx {
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+// Render worker only; set_xr_drop_flat_world.
+static bool g_xrDropFlatWorld = false;
+#endif
 using namespace detail;
 using webgpu::g_device;
 using webgpu::g_queue;
@@ -111,6 +115,9 @@ void execute_encoder_task(wgpu::CommandEncoder& cmd, FramePacket& frame, const E
 void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, RenderPass& passInfo) {
   ZoneScoped;
   g_currentPipeline = UINTPTR_MAX;
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+  const bool dropWorld = g_xrDropFlatWorld && !passInfo.has_consumer();
+#endif
 #ifdef AURORA_GFX_DEBUG_GROUPS
   std::vector<std::string> lastDebugGroupStack;
 #endif
@@ -161,6 +168,11 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
     } break;
     case CommandType::Draw: {
       auto& draw = cmd.data.draw;
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+      if (dropWorld && cmd.xrCategory == XrCategory::World) {
+        break;
+      }
+#endif
       if (draw.encoder != nullptr) {
         draw.encoder(draw.payload.data(), pass, passInfo);
       }
@@ -482,6 +494,7 @@ bool same_formats(const RenderTargetLayout& a, const RenderTargetLayout& b) {
 } // namespace
 
 void set_xr_frame_hook(XrFrameHook hook) noexcept { g_xrFrameHook = hook; }
+void set_xr_drop_flat_world(bool drop) noexcept { g_xrDropFlatWorld = drop; }
 XrFrameHook xr_frame_hook() noexcept { return g_xrFrameHook; }
 
 void encode_xr_replay(const wgpu::CommandEncoder& cmd, FramePacket& frame, XrCategory category,

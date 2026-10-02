@@ -56,6 +56,12 @@ void encode_xr_replay(const wgpu::CommandEncoder& cmd, detail::FramePacket& fram
 // is encoded and before the frame's packet is released and the present
 // callback runs. Set by lib/xr.
 using XrFrameHook = void (*)(const wgpu::CommandEncoder& cmd, detail::FramePacket& frame);
+
+// Render worker. While on, the normal frame leaves out world-tagged draws in
+// passes no EFB copy or snapshot reads: nothing shows the flat frame during a
+// 3D fight, and the eye replays draw the world themselves. Passes are encoded
+// as they are recorded, so lib/xr sets this from the previous frame.
+void set_xr_drop_flat_world(bool drop) noexcept;
 void set_xr_frame_hook(XrFrameHook hook) noexcept;
 XrFrameHook xr_frame_hook() noexcept;
 

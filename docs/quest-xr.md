@@ -124,6 +124,30 @@ Resolution barely matters there. Same setup with multiview, eye scale 0.7
 8%. Temple's eye pass is limited by geometry, not pixels, so fixed foveated
 rendering wouldn't help it much.
 
+### Flat frame during fights
+
+The flat frame nobody sees during a 3D fight no longer draws the world.
+While the previous frame went to the headset as a 3D fight with the flat
+present skipped, the normal frame leaves out world-tagged draws
+(`set_xr_drop_flat_world`). Passes that an EFB copy or snapshot reads keep
+them, so Pokémon Stadium's screen still shows the fight.
+`AURORA_XR_FLAT_WORLD=1` keeps them all.
+
+On a Quest 3 (2026-10-01), Temple with 4 CPU players, controlled runs at the
+default arena size with multiview:
+
+| | Flat world drawn | Flat world dropped |
+|---|---|---|
+| Display | 88 to 100 of 120 fps, 50 to 64 stale per second | 114 to 121 of 120, 0 to 22 stale |
+
+The eye pass's own time doesn't change. Dropping the world from the flat
+frame frees the GPU time it took on top of the eyes.
+
+Requesting sustained-high clocks (`XR_EXT_performance_settings`) succeeded
+but left the GPU at level 2 (640 MHz) with no measurable change, so it's
+off by default (`AURORA_XR_PERF_GPU` / `AURORA_XR_PERF_CPU` = `low`, `high`,
+`boost` to try).
+
 ### Placing the arena
 
 Pause the fight to move the arena. Each controller shows a laser, and the
@@ -342,6 +366,8 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_EYE_SCALE` | 1.0 | Eye resolution, as a fraction of the runtime's recommendation |
 | `AURORA_XR_REFRESH` | unset | Display rate to request if offered (otherwise 60, then 120) |
 | `AURORA_XR_LOCKSTEP` | 1 | Pace the game to the display when it runs at a multiple of 60 Hz |
+| `AURORA_XR_FLAT_WORLD` | 0 | Keep world draws in the unseen flat frame during 3D fights |
+| `AURORA_XR_PERF_GPU`, `AURORA_XR_PERF_CPU` | unset | Request `low`, `high` or `boost` clocks (XR_EXT_performance_settings) |
 | `AURORA_XR_MULTIVIEW` | 1 | Both eyes in one pass (multiview) when the device supports it |
 | `AURORA_XR_ONE_EYE` | 0 | Measurement: replay the left eye only (side-by-side path) |
 | `AURORA_XR_DIRECT` | 1 | Render both eyes straight into the shared 3D image when possible |
