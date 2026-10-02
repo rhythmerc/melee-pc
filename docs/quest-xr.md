@@ -94,6 +94,28 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     - Rainbow Cruise and Icicle Mountain: scrolling stages.
     - Flat Zone: the Game & Watch frame.
     - Mute City and Big Blue: left for their own treatment.
+  - **Second pass (2026-10-02), after the first headset look:**
+    - Fountain of Dreams: the pole below the ornament is clipped away. The
+      reflection isn't rendered in mixed reality: it was a flat-camera
+      picture that couldn't line up in 3D, and it cost a whole extra scene
+      render (`MELEE_XR_IZUMI_REFLECTION=1` keeps it).
+    - Kongo Jungle: the waterfall is clipped below the plateau.
+    - Corneria: centered on the Great Fox, and the coastline that scrolls
+      past after about a minute is hidden.
+    - Yoshi's Story: clipped below the Shy Guys' path.
+    - Great Bay: the sea is shrunk to the stage's footprint and moved under
+      it, and the turtle and the pier's stilts, rocks and screw are clipped
+      at the waterline.
+    - Yoshi's Island: the ground is clipped halfway down.
+- **Mixed reality vs full VR.** Every hide, clip and move applies only in
+  mixed reality (`pc_xr_mixed_reality`). `MELEE_XR_MODE=vr` renders stages
+  whole, for the planned full-VR mode. Per-stage centering applies in both.
+- **Clip planes.** `aurora_xr_world_clip` cuts the following world draws
+  below a game-space plane in the 3D view, using clip distances in the
+  multiview eye shaders. `xr_scene.c` sets one around a stage part
+  (`ClipRule`), so fighters and items are never clipped.
+- **Arena center.** `aurora_xr_set_arena_center` puts a game point at the
+  arena position (`CenterRule`).
 - **Moving pieces.** A rule can also move a joint in the 3D view only.
   `aurora_xr_world_transform` gives the following world draws an extra
   world-space placement, and the replay binds a separate eye matrix for
@@ -412,6 +434,11 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `MELEE_XR_PARTS` | unset | Overrides, e.g. `16:1,-16:1/12,-16:2/2.27` (`stage:part[/joint[.mesh]]`, `-` hides) |
 | `MELEE_XR_STAGE_LOG` | unset | Log each stage part's id and layer once |
 | `MELEE_XR_JUMBOTRON` | `0.55,0,-10,-75` | Pokémon Stadium big screen in 3D: `scale,x,y,z` (game units) for its base |
+| `MELEE_XR_MODE` | mixed reality | `vr`: no stage hides, clips or moves (full stage) |
+| `MELEE_XR_CLIP` | unset | Try clips: `grkind:part:y,...` cuts that part below y |
+| `MELEE_XR_MOVE` | unset | Try moves: `gk:part:joint:scale:px:py:pz:tx:ty:tz;...` |
+| `MELEE_XR_CENTER` | per stage | Arena center override, `x,y,z` game units |
+| `MELEE_XR_IZUMI_REFLECTION` | unset | Keep Fountain of Dreams' reflection render in mixed reality |
 | `MELEE_XR_JOINT_LOG` | unset | Log each part's joints (index, depth, meshes, position) once |
 | `AURORA_XR_DUMP_AFTER` | 300 | Stream frames to wait before `AURORA_XR_DUMP` writes |
 

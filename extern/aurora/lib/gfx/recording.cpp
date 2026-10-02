@@ -37,6 +37,9 @@ namespace aurora::gfx {
 using namespace detail;
 
 namespace {
+// Current placement and clip for world draws (FIFO thread).
+std::optional<std::array<float, 12>> g_xrMove;
+std::optional<std::array<float, 4>> g_xrClip;
 constexpr Module Log{"aurora::gfx"};
 
 struct FrameRecorder {
@@ -580,6 +583,8 @@ void begin_recording(FramePacket& packet, size_t frameSlot) {
   g_recorder.suspendedEfbPass.reset();
   g_recorder.xrCategory = XrCategory::Mono;
   g_recorder.xrTransform = 0;
+  g_xrMove.reset();
+  g_xrClip.reset();
   packet.xrHasWorld = false;
   packet.xrHasHud = false;
   packet.xrTransforms.clear();
@@ -1270,20 +1275,22 @@ const RenderTargetLayout* xr_multiview_layout() noexcept {
   return g_xrMultiviewLayout.load(std::memory_order_acquire);
 }
 
-void xr_set_world_transform(const float* m3x4) {
-  if (!g_recorder.active()) {
-    return;
-  }
+namespace {
+
+void update_xr_transform() {
   uint8_t index = 0;
-  if (m3x4 != nullptr) {
+  if (g_xrMove || g_xrClip) {
+    std::array<float, 16> entry{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    if (g_xrMove)
+      std::copy_n(g_xrMove->begin(), 12, entry.begin());
+    if (g_xrClip)
+      std::copy_n(g_xrClip->begin(), 4, entry.begin() + 12);
     auto& list = g_recorder.frame().xrTransforms;
-    std::array<float, 12> m;
-    std::copy_n(m3x4, 12, m.begin());
-    const auto it = std::find(list.begin(), list.end(), m);
+    const auto it = std::find(list.begin(), list.end(), entry);
     if (it != list.end()) {
       index = static_cast<uint8_t>(it - list.begin() + 1);
     } else if (list.size() + 1 < XrMaxTransforms) {
-      list.push_back(m);
+      list.push_back(entry);
       index = static_cast<uint8_t>(list.size());
     }
   }
@@ -1293,6 +1300,33 @@ void xr_set_world_transform(const float* m3x4) {
       push_command(CommandType::XrMarker, Command::Data{}); // keeps draws from merging across it
     }
   }
+}
+} // namespace
+
+void xr_set_world_transform(const float* m3x4) {
+  if (!g_recorder.active()) {
+    return;
+  }
+  if (m3x4 != nullptr) {
+    g_xrMove.emplace();
+    std::copy_n(m3x4, 12, g_xrMove->begin());
+  } else {
+    g_xrMove.reset();
+  }
+  update_xr_transform();
+}
+
+void xr_set_world_clip(const float* plane) {
+  if (!g_recorder.active()) {
+    return;
+  }
+  if (plane != nullptr) {
+    g_xrClip.emplace();
+    std::copy_n(plane, 4, g_xrClip->begin());
+  } else {
+    g_xrClip.reset();
+  }
+  update_xr_transform();
 }
 
 void insert_debug_marker(std::string label) {

@@ -217,9 +217,10 @@ struct FramePacket {
   bool xrHasWorld = false;
   bool xrHasHud = false;
   std::array<float, 12> xrWorldView{};
-  // World-space placements for tagged world draws (row-major 3x4, game
-  // world units); Command::xrTransform - 1 indexes this.
-  std::vector<std::array<float, 12>> xrTransforms;
+  // World-space placements for tagged world draws: a row-major 3x4 transform
+  // (game world units) then a clip plane (game world; 0,0,0,1 = none).
+  // Command::xrTransform - 1 indexes this.
+  std::vector<std::array<float, 16>> xrTransforms;
 };
 
 } // namespace aurora::gfx::detail

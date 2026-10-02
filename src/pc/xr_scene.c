@@ -59,7 +59,9 @@ static const PartRule s_builtin_rules[] = {
     {0x0C, 1, -1, -1, false},
     /* Kongo Jungle: the jungle and cliffs around the waterfall. */
     {0x04, 6, -1, -1, false},
-    /* Corneria: the terrain under the Great Fox. */
+    /* Corneria: the terrain under the Great Fox, and the coastline that
+     * scrolls past about a minute in. */
+    {0x0E, 4, -1, -1, false},
     {0x0E, 8, -1, -1, false},
     {0x0E, 9, -1, -1, false},
     /* Yoshi's Story: the cardboard sea and hills (part 3 joints 13-21). */
@@ -101,10 +103,44 @@ typedef struct {
  * shrink it. Moved at joint 1, the parent of everything the screen shows:
  * the frame (2), the picture (3), and the overlays the game unhides during
  * a transformation (4-10). MELEE_XR_JUMBOTRON="scale,x,y,z" overrides. */
-static MoveRule s_moves[] = {
+static MoveRule s_moves[16] = {
     {GRKIND_PSTADIUM, PSTYPE_DISPLAY, 1, {0, -30, -215}, {0, -10, -75}, 0.55f},
+    /* Great Bay: the sea, shrunk to the stage's footprint and moved under
+     * it (it only extended toward the player). */
+    {0x06, 4, 2, {0, 0, 0}, {10, 0, -35}, 0.35f},
 };
-#define MOVE_COUNT ((int)(sizeof s_moves / sizeof s_moves[0]))
+static int s_move_count = -1; /* built-ins, then MELEE_XR_MOVE entries */
+#define MOVE_COUNT s_move_count
+
+/* Stage parts cut below a height in the 3D view only (game units; the stage
+ * stays whole in the flat frame). Fighters and items are never clipped. */
+typedef struct {
+    int grkind;
+    int map_id;
+    float y;
+} ClipRule;
+
+static const ClipRule s_clips[] = {
+    {0x0C, 3, -80.f}, /* Fountain of Dreams: the pole under the ornament */
+    {0x04, 4, -20.f}, /* Kongo Jungle: the waterfall under the plateau */
+    {0x0A, 3, -30.f}, /* Yoshi's Story: the pillar under the Shy Guys' path */
+    {0x06, 1, 0.f},   /* Great Bay: the turtle below the waterline */
+    {0x06, 2, 0.f},   /* Great Bay: the pier's stilts, rocks and screw */
+    {0x0B, 1, -40.f}, /* Yoshi's Island: the ground, halfway down */
+};
+#define CLIP_COUNT ((int)(sizeof s_clips / sizeof s_clips[0]))
+
+/* The game point placed at the arena's center, for stages whose action is
+ * far from the world origin. */
+typedef struct {
+    int grkind;
+    float x, y, z;
+} CenterRule;
+
+static const CenterRule s_centers[] = {
+    {0x0E, 40.f, 255.f, 0.f}, /* Corneria: the Great Fox flies far above the origin */
+};
+#define CENTER_COUNT ((int)(sizeof s_centers / sizeof s_centers[0]))
 
 #define MAX_RULES 256
 static PartRule s_rules[MAX_RULES];
@@ -145,6 +181,21 @@ static void load_rules(void) {
     }
     s_log_parts = getenv("MELEE_XR_STAGE_LOG") != NULL;
     s_log_joints = getenv("MELEE_XR_JOINT_LOG") != NULL;
+    s_move_count = 0;
+    while (s_move_count < (int)(sizeof s_moves / sizeof s_moves[0]) && s_moves[s_move_count].scale != 0.f) {
+        s_move_count++;
+    }
+    /* MELEE_XR_MOVE="gk:part:joint:scale:px:py:pz:tx:ty:tz;...": try moves. */
+    for (const char* m = getenv("MELEE_XR_MOVE"); m != NULL && *m != '\0';) {
+        MoveRule r;
+        if (s_move_count < (int)(sizeof s_moves / sizeof s_moves[0]) &&
+            sscanf(m, "%d:%d:%d:%f:%f:%f:%f:%f:%f:%f", &r.grkind, &r.map_id, &r.jobj, &r.scale, &r.pivot[0],
+                &r.pivot[1], &r.pivot[2], &r.to[0], &r.to[1], &r.to[2]) == 10) {
+            s_moves[s_move_count++] = r;
+        }
+        m = strchr(m, ';');
+        m = m != NULL ? m + 1 : NULL;
+    }
     const char* jumbo = getenv("MELEE_XR_JUMBOTRON");
     float js, jx, jy, jz;
     if (jumbo != NULL && sscanf(jumbo, "%f,%f,%f,%f", &js, &jx, &jy, &jz) == 4) {
@@ -319,9 +370,61 @@ static bool joint_log_due(int grkind, int map_id) {
     return ++*n == 60;
 }
 
+static int s_center_grkind = -1;
+static bool s_clip_active;
+
+bool pc_xr_mixed_reality(void) {
+    static int mode = -1; /* 1 mixed reality, 0 full VR */
+    if (mode < 0) {
+        const char* m = getenv("MELEE_XR_MODE");
+        mode = m == NULL || strcmp(m, "vr") != 0;
+    }
+    return mode == 1 && aurora_xr_active();
+}
+
 bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {
     if (s_category != AURORA_XR_WORLD) {
         return false;
+    }
+    if (grkind != s_center_grkind) {
+        s_center_grkind = grkind;
+        float c[3] = {0.f, 0.f, 0.f};
+        for (int i = 0; i < CENTER_COUNT; i++) {
+            if (s_centers[i].grkind == grkind && grkind != 0) {
+                c[0] = s_centers[i].x;
+                c[1] = s_centers[i].y;
+                c[2] = s_centers[i].z;
+            }
+        }
+        const char* env = getenv("MELEE_XR_CENTER");
+        if (env != NULL) {
+            sscanf(env, "%f,%f,%f", &c[0], &c[1], &c[2]);
+        }
+        aurora_xr_set_arena_center(c[0], c[1], c[2]);
+    }
+    s_clip_active = false;
+    if (!pc_xr_mixed_reality()) {
+        return false; /* full VR: the whole stage, unmoved and unclipped */
+    }
+    for (int i = 0; i < CLIP_COUNT; i++) {
+        if (s_clips[i].grkind == grkind && s_clips[i].map_id == map_id && grkind != 0) {
+            const float plane[4] = {0.f, 1.f, 0.f, -s_clips[i].y};
+            aurora_xr_world_clip(plane);
+            s_clip_active = true;
+        }
+    }
+    /* MELEE_XR_CLIP="<grkind>:<map_id>:<y>,...": try clip heights. */
+    const char* env = getenv("MELEE_XR_CLIP");
+    while (env != NULL && *env != '\0') {
+        int gk, id;
+        float y;
+        if (sscanf(env, "%d:%d:%f", &gk, &id, &y) == 3 && gk == grkind && id == map_id) {
+            const float plane[4] = {0.f, 1.f, 0.f, -y};
+            aurora_xr_world_clip(plane);
+            s_clip_active = true;
+        }
+        env = strchr(env, ',');
+        env = env != NULL ? env + 1 : NULL;
     }
     const bool visible = part_visible(grkind, map_id, layer);
     const bool log = s_log_joints && joint_log_due(grkind, map_id);
@@ -344,6 +447,10 @@ bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {
 
 void pc_xr_stage_part_end(bool hidden) {
     s_joint_mode = false;
+    if (s_clip_active) {
+        aurora_xr_world_clip(NULL);
+        s_clip_active = false;
+    }
     if (hidden) {
         aurora_xr_camera(AURORA_XR_WORLD, NULL);
     }

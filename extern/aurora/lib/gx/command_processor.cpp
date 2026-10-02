@@ -847,6 +847,8 @@ void handle_aurora(ByteReader& reader) noexcept {
     }
     if (category == 3) { // aurora_xr_world_transform
       gfx::xr_set_world_transform(hasView ? view.data() : nullptr);
+    } else if (category == 4) { // aurora_xr_world_clip
+      gfx::xr_set_world_clip(hasView ? view.data() : nullptr);
     } else {
       gfx::xr_set_category(static_cast<gfx::XrCategory>(category <= 2 ? category : 0), hasView ? view.data() : nullptr);
     }

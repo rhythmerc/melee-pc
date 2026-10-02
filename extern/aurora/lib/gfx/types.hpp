@@ -27,7 +27,7 @@ enum class XrCategory : uint8_t {
 };
 // World draws can carry an extra placement in the 3D view
 // (aurora_xr_world_transform): index 0 is none, 1.. index the frame's list.
-constexpr uint32_t XrMaxTransforms = 4;
+constexpr uint32_t XrMaxTransforms = 8;
 
 using BindGroupRef = HashType;
 using PipelineRef = HashType;

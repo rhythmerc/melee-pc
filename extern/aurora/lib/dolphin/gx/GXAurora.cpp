@@ -49,6 +49,15 @@ void aurora_xr_camera(int category, const float view[3][4]) {
 }
 
 void aurora_xr_world_transform(const float m[3][4]) { aurora_xr_camera(3, m); }
+
+void aurora_xr_world_clip(const float plane[4]) {
+  if (plane == nullptr) {
+    aurora_xr_camera(4, nullptr);
+    return;
+  }
+  const float m[3][4] = {{plane[0], plane[1], plane[2], plane[3]}, {}, {}};
+  aurora_xr_camera(4, m);
+}
 #endif
 
 void AuroraSetViewportPolicy(AuroraViewportPolicy policy) {

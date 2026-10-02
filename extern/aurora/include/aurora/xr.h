@@ -40,6 +40,14 @@ bool aurora_xr_pace(void);
  * draws. While paused, the controllers show lasers and the grips grab the
  * arena to move, turn and scale it instead of pressing Z. */
 void aurora_xr_set_paused(bool paused);
+
+/* The game point (world units) that sits at the arena position; 0,0,0 by
+ * default. For stages whose action happens far from the world origin. Any
+ * thread. */
+void aurora_xr_set_arena_center(float x, float y, float z);
+
+/* True while an OpenXR session is presenting the game. Any thread. */
+bool aurora_xr_active(void);
 void aurora_xr_camera(int category, const float view[3][4]);
 
 /* Extra placement for the following AURORA_XR_WORLD draws in the 3D view
@@ -48,6 +56,13 @@ void aurora_xr_camera(int category, const float view[3][4]);
  * three distinct transforms a frame; the rest draw unmoved. Same thread and
  * FIFO ordering as aurora_xr_camera. */
 void aurora_xr_world_transform(const float m[3][4]);
+
+/* Clip plane for the following AURORA_XR_WORLD draws in the 3D view only, in
+ * game world units: geometry where a*x + b*y + c*z + d < 0 is cut away (e.g.
+ * {0, 1, 0, -y0} keeps everything above y0). Applies with or without an
+ * aurora_xr_world_transform, before it. NULL = none. Needs multiview and the
+ * ClipDistances feature; otherwise ignored. */
+void aurora_xr_world_clip(const float plane[4]);
 
 #ifdef __cplusplus
 }

@@ -27,6 +27,11 @@ struct HSD_JObj;
  * that to pc_xr_stage_part_end. Only acts under the fight camera. */
 bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, struct HSD_JObj* root);
 void pc_xr_stage_part_end(bool hidden);
+/* Mixed-reality staging (stage parts hidden, clipped and moved for the arena
+ * over passthrough) is in effect: an XR session is presenting and
+ * MELEE_XR_MODE is not "vr". A full-VR mode renders the stage whole; only
+ * per-stage centering applies there. */
+bool pc_xr_mixed_reality(void);
 /* Around one joint's geometry (HSD_JObjDisp): leaves joints a part rule
  * hides out of the 3D view, and places joints a rule moves. Returns what
  * it changed; hand that to pc_xr_jobj_end. Cheap when no stage part with
@@ -48,6 +53,7 @@ static inline bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, str
     return false;
 }
 static inline void pc_xr_stage_part_end(bool hidden) { (void)hidden; }
+static inline bool pc_xr_mixed_reality(void) { return false; }
 static inline int pc_xr_jobj_begin(struct HSD_JObj* jobj) {
     (void)jobj;
     return 0;

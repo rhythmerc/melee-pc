@@ -116,6 +116,8 @@ void xr_set_category(XrCategory category, const float* view3x4);
 // Placement for the following world draws in the 3D view (row-major 3x4,
 // game world units, applied before the arena transform); null = none.
 void xr_set_world_transform(const float* m3x4);
+// Clip plane (game world, 4 floats) for the following world draws; null = none.
+void xr_set_world_clip(const float* plane);
 // FIFO thread: the current draw is tagged World.
 bool xr_recording_world() noexcept;
 // The layout lib/xr replays world draws into with multiview (null = none),

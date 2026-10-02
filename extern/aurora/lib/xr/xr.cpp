@@ -189,6 +189,9 @@ struct ArenaPose {
 };
 std::mutex g_arenaMutex;
 ArenaPose g_arena;
+// The game point (game units) placed at the arena position: a stage whose
+// geometry sits far from the origin is centered by aurora_xr_set_arena_center.
+std::array<float, 3> g_arenaCenter{};
 bool g_arenaInit = false;
 float g_defaultArenaScale = 0.006f;
 
@@ -1190,7 +1193,11 @@ constexpr float kMinArenaScale = 0.0015f, kMaxArenaScale = 0.05f;
 
 // Distance along the ray (meters) to the arena's grab box, or -1 for a miss.
 float hit_arena(const ArenaPose& a, XrVector3f origin, XrVector3f dir) {
-  const XrVector3f o = rot_y(origin - a.pos, -a.yaw) * (1.f / a.scale);
+  XrVector3f o = rot_y(origin - a.pos, -a.yaw) * (1.f / a.scale);
+  {
+    std::lock_guard lock{g_arenaMutex};
+    o = o + XrVector3f{g_arenaCenter[0], g_arenaCenter[1], g_arenaCenter[2]};
+  }
   const XrVector3f d = rot_y(dir, -a.yaw) * (1.f / a.scale);
   const float os[3] = {o.x, o.y, o.z}, ds[3] = {d.x, d.y, d.z};
   const float lo[3] = {kGrabBoxMin.x, kGrabBoxMin.y, kGrabBoxMin.z};
@@ -2003,8 +2010,17 @@ Mat4 projection(const XrFovf& fov, float near) {
 // turn and scale the arena during a pause.
 Mat4 arena_transform() {
   const ArenaPose a = arena_pose();
+  std::array<float, 3> ctr;
+  {
+    std::lock_guard lock{g_arenaMutex};
+    ctr = g_arenaCenter;
+  }
   const float c = std::cos(a.yaw) * a.scale, s = std::sin(a.yaw) * a.scale;
-  return {c, 0.f, s, a.pos.x, 0.f, a.scale, 0.f, a.pos.y, -s, 0.f, c, a.pos.z, 0.f, 0.f, 0.f, 1.f};
+  // T(pos) · R_y(yaw) · S(scale) · T(-center)
+  const float tx = a.pos.x - (c * ctr[0] + s * ctr[2]);
+  const float ty = a.pos.y - a.scale * ctr[1];
+  const float tz = a.pos.z - (-s * ctr[0] + c * ctr[2]);
+  return {c, 0.f, s, tx, 0.f, a.scale, 0.f, ty, -s, 0.f, c, tz, 0.f, 0.f, 0.f, 1.f};
 }
 
 constexpr char kComposeShader[] = R"(
@@ -2071,8 +2087,9 @@ struct GpuTiming {
   std::array<wgpu::PassTimestampWrites, kZoneCount> writes{};
 };
 
-// The multiview shader's XrEye: one matrix per eye, then the enabled flags.
-constexpr uint64_t kMultiviewEyeSize = 2 * 64 + 16;
+// The multiview shader's XrEye: one matrix per eye, the enabled flags, then
+// a clip plane in game camera space (aurora_xr_world_clip).
+constexpr uint64_t kMultiviewEyeSize = 2 * 64 + 16 + 16;
 
 struct Renderer3D {
   uint64_t layoutKey = 0;
@@ -2495,16 +2512,25 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
   struct {
     std::array<Mat4, 2> m;
     uint32_t enabled[4];
+    float clip[4];
   } mv[gfx::XrMaxTransforms]{};
   static_assert(sizeof(mv[0]) == kMultiviewEyeSize);
   for (int eye = 0; eye < 2; ++eye) {
     const Mat4 eyeToClip = mul(projection(views[eye].fov, 0.05f), view_from_pose(views[eye].pose));
     for (size_t t = 0; t < transforms; ++t) {
       Mat4 world = cameraToWorld;
+      // Clip plane, game world -> game camera space (the shader clips the
+      // camera-space position): plane_cam = plane_world · V_game⁻¹.
+      std::array<float, 4> clipCam{0.f, 0.f, 0.f, 1.f};
       if (t > 0) {
         const auto& m = frame.xrTransforms[t - 1];
         world = mul(Mat4{m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], 0.f, 0.f, 0.f, 1.f},
                     cameraToWorld);
+        for (int j = 0; j < 4; ++j) {
+          clipCam[j] = 0.f;
+          for (int i = 0; i < 4; ++i)
+            clipCam[j] += m[12 + i] * cameraToWorld[i * 4 + j];
+        }
       }
       struct {
         Mat4 m;
@@ -2514,6 +2540,7 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
       if (g_multiview) {
         mv[t].m[eye] = u.m;
         mv[t].enabled[0] = 1;
+        std::copy(clipCam.begin(), clipCam.end(), mv[t].clip);
       } else {
         webgpu::g_queue.WriteBuffer(R.eyeUniforms[eye][t], 0, &u, sizeof(u));
       }
@@ -2640,6 +2667,10 @@ void add_required_features(const wgpu::Adapter& adapter, std::vector<wgpu::Featu
   if (adapter.HasFeature(wgpu::FeatureName::ChromiumExperimentalMultiview) &&
       std::find(features.begin(), features.end(), wgpu::FeatureName::ChromiumExperimentalMultiview) == features.end())
     features.push_back(wgpu::FeatureName::ChromiumExperimentalMultiview);
+  // Clip planes for stage geometry in the 3D view (aurora_xr_world_clip).
+  if (adapter.HasFeature(wgpu::FeatureName::ClipDistances) &&
+      std::find(features.begin(), features.end(), wgpu::FeatureName::ClipDistances) == features.end())
+    features.push_back(wgpu::FeatureName::ClipDistances);
   // XR GPU timing (AURORA_XR_TIMING).
   if (env_flag("AURORA_XR_TIMING", true) && adapter.HasFeature(wgpu::FeatureName::TimestampQuery) &&
       std::find(features.begin(), features.end(), wgpu::FeatureName::TimestampQuery) == features.end())
@@ -2806,6 +2837,13 @@ extern "C" bool aurora_xr_get_pad(PADStatus* out) {
 }
 
 extern "C" void aurora_xr_set_paused(bool paused) { aurora::xr::g_fightPaused = paused; }
+
+extern "C" bool aurora_xr_active(void) { return aurora::xr::active(); }
+
+extern "C" void aurora_xr_set_arena_center(float x, float y, float z) {
+  std::lock_guard lock{aurora::xr::g_arenaMutex};
+  aurora::xr::g_arenaCenter = {x, y, z};
+}
 
 extern "C" bool aurora_xr_pace(void) {
   using namespace aurora::xr;

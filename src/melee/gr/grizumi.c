@@ -1,3 +1,7 @@
+#ifdef TARGET_PC
+#include "pc/xr_scene.h"
+#include <stdlib.h>
+#endif
 #include "grizumi.h"
 
 #include "granime.h"
@@ -756,6 +760,14 @@ void grIzumi_801CCEA0(HSD_GObj* gobj, intptr_t renderpass)
     HSD_GObj* src_gobj;
     HSD_CObj* cobj;
 
+#ifdef TARGET_PC
+    /* XR mixed reality: the reflection is a flat-camera picture that can't
+     * line up in 3D, and rendering it costs a whole extra scene pass. The
+     * water shows without it. MELEE_XR_IZUMI_REFLECTION=1 keeps it. */
+    if (pc_xr_mixed_reality() && getenv("MELEE_XR_IZUMI_REFLECTION") == NULL) {
+        return;
+    }
+#endif
     if (refl->image != NULL) {
         cobj = GET_COBJ(gobj);
         ftDrawCommon_80081140();
