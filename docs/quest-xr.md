@@ -119,6 +119,11 @@ same unattended launch at the default arena scale, with only
 That's about 30% off the eye pass. An earlier hand-played run had the stage
 shrunk to minimum size, so it isn't comparable.
 
+Resolution barely matters there. Same setup with multiview, eye scale 0.7
+(half the pixels) against 1.0: 9.8 to 9.9 ms against 10.6 to 11.0 ms, about
+8%. Temple's eye pass is limited by geometry, not pixels, so fixed foveated
+rendering wouldn't help it much.
+
 ### Placing the arena
 
 Pause the fight to move the arena. Each controller shows a laser, and the
