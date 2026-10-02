@@ -795,9 +795,10 @@ void grIzumi_801CCEA0(HSD_GObj* gobj, intptr_t renderpass)
         if (HSD_CObjSetCurrent(cobj)) {
 #ifdef TARGET_PC
             if (xr_plain_water) {
-                /* Comes out with red and blue swapped through the water's
-                 * material: this is a mid blue. */
-                int r = 160, g = 100, b = 60;
+                /* A mid blue. (The desktop build's BGRA framebuffer swaps red
+                 * and blue in this copy, so it looks orange there; the Quest
+                 * is RGBA.) */
+                int r = 60, g = 100, b = 160;
                 const char* c = getenv("MELEE_XR_IZUMI_WATER");
                 if (c != NULL) {
                     sscanf(c, "%d,%d,%d", &r, &g, &b);

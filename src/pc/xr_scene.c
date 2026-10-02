@@ -107,7 +107,7 @@ static MoveRule s_moves[16] = {
     {GRKIND_PSTADIUM, PSTYPE_DISPLAY, 1, {0, -30, -215}, {0, -10, -75}, 0.55f},
     /* Great Bay: the sea, shrunk to the stage's footprint and moved under
      * it (it only extended toward the player). */
-    {0x06, 4, 2, {0, 0, 0}, {10, 0, -80}, 0.35f},
+    {0x06, 4, 2, {0, 0, 0}, {10, 0, -80}, 0.56f},
 };
 static int s_move_count = -1; /* built-ins, then MELEE_XR_MOVE entries */
 #define MOVE_COUNT s_move_count
@@ -131,7 +131,7 @@ static const ClipRule s_clips[] = {
     /* Kongo Jungle: the waterfall down to the floating rock, fading out, and
      * cut short behind the stage. */
     CLIP_BELOW(0x04, 4, -70.f, 35.f),
-    CLIP_BEHIND(0x04, 4, -30.f, 10.f),
+    CLIP_BEHIND(0x04, 4, -70.f, 15.f),
     CLIP_BELOW(0x0A, 3, -40.f, 0.f), /* Yoshi's Story: the pillar under the Shy Guys' path */
     CLIP_BELOW(0x06, 1, 0.f, 0.f),   /* Great Bay: the turtle below the waterline */
     CLIP_BELOW(0x06, 2, 0.f, 0.f),   /* Great Bay: the pier's stilts, rocks and screw */

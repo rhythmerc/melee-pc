@@ -117,8 +117,8 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     - Yoshi's Story: the cut is lower, so the Shy Guys' path shows.
     - Great Bay: the sea is moved back to the rear of the pier.
     - Fountain of Dreams: the reflection image is cleared to a water colour
-      instead of left stale (`MELEE_XR_IZUMI_WATER`; the water's material
-      swaps red and blue).
+      instead of left stale (`MELEE_XR_IZUMI_WATER`; the desktop build's
+      BGRA framebuffer swaps red and blue in that copy).
 - **Mixed reality vs full VR.** Every hide, clip and move applies only in
   mixed reality (`pc_xr_mixed_reality`). `MELEE_XR_MODE=vr` renders stages
   whole, for the planned full-VR mode. Per-stage centering applies in both.
@@ -458,7 +458,7 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `MELEE_XR_MOVE` | unset | Try moves: `gk:part:joint:scale:px:py:pz:tx:ty:tz;...` |
 | `MELEE_XR_CENTER` | per stage | Arena center override, `x,y,z` game units |
 | `MELEE_XR_IZUMI_REFLECTION` | unset | Keep Fountain of Dreams' reflection render in mixed reality |
-| `MELEE_XR_IZUMI_WATER` | `160,100,60` | Fountain water colour in mixed reality (written red/blue swapped) |
+| `MELEE_XR_IZUMI_WATER` | `60,100,160` | Fountain water colour in mixed reality (looks red/blue swapped in the desktop build) |
 | `MELEE_XR_CLIPZ` | unset | Try back cuts: `grkind:part:z[:fade],...` cuts that part behind z |
 | `MELEE_XR_JOINT_LOG` | unset | Log each part's joints (index, depth, meshes, position) once |
 | `AURORA_XR_DUMP_AFTER` | 300 | Stream frames to wait before `AURORA_XR_DUMP` writes |
