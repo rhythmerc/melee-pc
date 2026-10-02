@@ -51,6 +51,37 @@ static const PartRule s_builtin_rules[] = {
     {GRKIND_PSTADIUM, 2, 3, 29, false},
     {GRKIND_PSTADIUM, 2, 3, 30, false},
     {GRKIND_PSTADIUM, 2, 3, 31, false},
+
+    /* Survey of 2026-10-01 (desktop dumps; layer 2 is already out). Only the
+     * obvious stage/background splits; the rest are listed in
+     * docs/quest-xr.md. */
+    /* Fountain of Dreams: the vortex, pink sea and rings. */
+    {0x0C, 1, -1, -1, false},
+    /* Kongo Jungle: the jungle and cliffs around the waterfall. */
+    {0x04, 6, -1, -1, false},
+    /* Corneria: the terrain under the Great Fox. */
+    {0x0E, 8, -1, -1, false},
+    {0x0E, 9, -1, -1, false},
+    /* Yoshi's Story: the cardboard sea and hills (part 3 joints 13-21). */
+    {0x0A, 3, 13, -1, false},
+    {0x0A, 3, 14, -1, false},
+    {0x0A, 3, 15, -1, false},
+    {0x0A, 3, 16, -1, false},
+    {0x0A, 3, 17, -1, false},
+    {0x0A, 3, 18, -1, false},
+    {0x0A, 3, 19, -1, false},
+    {0x0A, 3, 20, -1, false},
+    {0x0A, 3, 21, -1, false},
+    /* Great Bay: land, sky and mountains. The sea (part 4) stays: it hides
+     * the turtle's and the stilts' underwater parts. */
+    {0x06, 3, -1, -1, false},
+    /* Venom: the canyon walls and floor around the Great Fox. */
+    {0x0F, 7, -1, -1, false},
+    /* Kongo Jungle 64: the jungle (part 3 joint 7) and the sky (joint 34). */
+    {0x1E, 3, 7, -1, false},
+    {0x1E, 3, 34, -1, false},
+    /* Yoshi's Island: the sky (part 1 joint 28). */
+    {0x0B, 1, 28, -1, false},
 };
 
 /* Joints moved in the 3D view only: the joint and everything under it are
@@ -75,7 +106,7 @@ static MoveRule s_moves[] = {
 };
 #define MOVE_COUNT ((int)(sizeof s_moves / sizeof s_moves[0]))
 
-#define MAX_RULES 64
+#define MAX_RULES 256
 static PartRule s_rules[MAX_RULES];
 static int s_rule_count = -1;
 /* Stage passes draw layers 2, 1, 0, 3 in that order. Layer 2 is the far

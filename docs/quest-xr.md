@@ -68,6 +68,32 @@ and the investigation behind it are in docs/xr-3d-plan.md.
       28-31).
     - **Moved:** the big screen is pulled in from z -215 to just behind the
       stage and shrunk to 0.55, in 3D only (`MELEE_XR_JUMBOTRON`).
+  - **Survey of 2026-10-01**, obvious splits only:
+    - Fountain of Dreams: vortex, sea and rings.
+    - Kongo Jungle: the jungle.
+    - Corneria: the terrain.
+    - Yoshi's Story: the cardboard sea and hills.
+    - Great Bay: land, sky and mountains (the sea stays, because it hides
+      underwater geometry).
+    - Venom: the canyon.
+    - Kongo Jungle 64: the jungle and sky.
+    - Yoshi's Island: the sky.
+    - Already fine: Temple, Brinstar Depths, Green Greens, Poké Floats,
+      Dream Land, Yoshi's Island 64, Battlefield, Final Destination.
+  - **Open questions** (left as they are):
+    - Peach's Castle: the castle body and the red grounds share joints with
+      the roof you fight on.
+    - Kongo Jungle: the waterfall shares a part with the plateau.
+    - Yoshi's Island: the rock pillars and clouds share joints with the
+      stage blocks.
+    - Mushroom Kingdom and Mushroom Kingdom II: the sky and hills are mixed
+      into the stage meshes.
+    - Jungle Japes: the jungle part also holds the river hazard.
+    - Brinstar: the acid hazard and the cave walls.
+    - Onett and Fourside: which buildings count as stage.
+    - Rainbow Cruise and Icicle Mountain: scrolling stages.
+    - Flat Zone: the Game & Watch frame.
+    - Mute City and Big Blue: left for their own treatment.
 - **Moving pieces.** A rule can also move a joint in the 3D view only.
   `aurora_xr_world_transform` gives the following world draws an extra
   world-space placement, and the replay binds a separate eye matrix for
