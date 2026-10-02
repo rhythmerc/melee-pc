@@ -525,6 +525,67 @@ void pc_xr_stage_part_end(bool hidden) {
     }
 }
 
+/* Stage particles left out of the 3D view, by GrKind and the particle's
+ * bank and id (HSD_Particle bank/idnum; id -1 is the whole bank, and ids
+ * number instances, so most rules want that). Extend with MELEE_XR_PTCL
+ * "<grkind>:<bank>:<id>,..."; MELEE_XR_PTCL_LOG lists each one drawn. */
+typedef struct {
+    int grkind;
+    int bank;
+    int id;
+} ParticleRule;
+
+static const ParticleRule s_particles[] = {
+    /* Kongo Jungle: the river's splashes (bank 30 is the stage's own), left
+     * floating once the river is hidden. */
+    {0x04, 30, -1},
+};
+#define PARTICLE_COUNT ((int)(sizeof s_particles / sizeof s_particles[0]))
+
+static bool particle_rule(int grkind, int bank, int id) {
+    for (int i = 0; i < PARTICLE_COUNT; i++) {
+        const ParticleRule* r = &s_particles[i];
+        if (r->grkind == grkind && r->bank == bank && (r->id < 0 || r->id == id)) {
+            return true;
+        }
+    }
+    for (const char* q = getenv("MELEE_XR_PTCL"); q != NULL && *q != '\0';) {
+        int g, b, n;
+        if (sscanf(q, "%d:%d:%d", &g, &b, &n) == 3 && g == grkind && b == bank && (n < 0 || n == id)) {
+            return true;
+        }
+        q = strchr(q, ',');
+        q = q != NULL ? q + 1 : NULL;
+    }
+    return false;
+}
+
+bool pc_xr_particle_begin(int bank, int id, const float pos[3]) {
+    if (s_category != AURORA_XR_WORLD || s_center_grkind <= 0) {
+        return false;
+    }
+    if (getenv("MELEE_XR_PTCL_LOG") != NULL) {
+        static unsigned char seen[256][64];
+        unsigned char* f = &seen[bank & 255][(id & 511) >> 3];
+        if (!(*f & (1u << (id & 7)))) {
+            *f |= 1u << (id & 7);
+            pc_log_line("xr: stage %d particle %d:%d at %.0f,%.0f,%.0f", s_center_grkind, bank, id, pos[0], pos[1],
+                        pos[2]);
+        }
+    }
+    if (!pc_xr_mixed_reality() || !particle_rule(s_center_grkind, bank, id)) {
+        return false;
+    }
+    aurora_xr_camera(AURORA_XR_MONO, NULL);
+    return true;
+}
+
+void pc_xr_particle_end(bool hidden) {
+    if (hidden) {
+        aurora_xr_camera(AURORA_XR_WORLD, NULL);
+    }
+}
+
 int pc_xr_jobj_begin(HSD_JObj* jobj) {
     const HiddenJoint* h = find_joint(jobj);
     if (h == NULL) {

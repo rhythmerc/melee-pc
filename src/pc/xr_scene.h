@@ -40,6 +40,10 @@ int pc_xr_jobj_begin(struct HSD_JObj* jobj);
 /* Same, for one mesh (the joint's dobj_index'th DObj); hides only. */
 int pc_xr_dobj_begin(struct HSD_JObj* jobj, int dobj_index);
 void pc_xr_jobj_end(int changed);
+/* Around one particle's draw (psDispParticles): leaves the stage's listed
+ * particles out of the 3D view under mixed reality. `pos` is its position. */
+bool pc_xr_particle_begin(int bank, int id, const float pos[3]);
+void pc_xr_particle_end(bool hidden);
 #else
 static inline void pc_xr_world_camera(const float view[3][4]) { (void)view; }
 static inline void pc_xr_hud_camera(void) {}
@@ -64,6 +68,13 @@ static inline int pc_xr_dobj_begin(struct HSD_JObj* jobj, int dobj_index) {
     return 0;
 }
 static inline void pc_xr_jobj_end(int changed) { (void)changed; }
+static inline bool pc_xr_particle_begin(int bank, int id, const float pos[3]) {
+    (void)bank;
+    (void)id;
+    (void)pos;
+    return false;
+}
+static inline void pc_xr_particle_end(bool hidden) { (void)hidden; }
 #endif
 
 #ifdef __cplusplus

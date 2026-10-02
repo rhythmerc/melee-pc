@@ -13,6 +13,7 @@
 #include "psstructs.h"
 #include "state.h"
 #include "util.h"
+#include "pc/xr_scene.h"
 #include <dolphin/gx.h>
 
 #include <dolphin/os.h>
@@ -1865,6 +1866,7 @@ void psDispParticles(u32 target_link, u32 sw)
     s32 prev_tex_interp_near;
     u32 prev_kind;
     HSD_Particle* pp;
+    bool xr_hidden;
 
     alpha_compare_mode = 0;
     prev_tex_interp_near = 0;
@@ -1910,7 +1912,10 @@ void psDispParticles(u32 target_link, u32 sw)
                 if ((sw == 1) && !(pp->kind & TexEdge)) {
                     break;
                 }
+                xr_hidden = false;
                 if (!(pp->size < FLT_EPSILON)) {
+                    xr_hidden = pc_xr_particle_begin(pp->bank, pp->idnum,
+                                                     &pp->pos.x);
                     if (needs_setup != 0) {
                         sp79C = NULL;
                         prevPointSize = -1;
@@ -2255,6 +2260,7 @@ void psDispParticles(u32 target_link, u32 sw)
                     }
                 }
 
+                pc_xr_particle_end(xr_hidden);
                 prev_kind = pp->kind;
                 pp = pp->next;
             }
