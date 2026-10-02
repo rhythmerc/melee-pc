@@ -59,6 +59,14 @@ static const PartRule s_builtin_rules[] = {
     {0x0C, 1, -1, -1, false},
     /* Kongo Jungle: the jungle and cliffs around the waterfall. */
     {0x04, 6, -1, -1, false},
+    /* Kongo Jungle: the flat river behind the waterfall (joints 7 and 9) and
+     * the surface layers over it, leaving the waterfall at the front. */
+    {0x04, 4, 5, -1, false},
+    {0x04, 4, 7, -1, false},
+    {0x04, 4, 9, -1, false},
+    {0x04, 4, 10, -1, false},
+    {0x04, 4, 26, -1, false},
+    {0x04, 4, 35, -1, false},
     /* Corneria: the terrain under the Great Fox, and the coastline that
      * scrolls past about a minute in. */
     {0x0E, 4, -1, -1, false},
@@ -132,18 +140,16 @@ typedef struct {
 static const ClipRule s_clips[] = {
     CLIP_BELOW(0x0C, 3, -80.f, 0.f), /* Fountain of Dreams: the pole under the ornament */
     /* Kongo Jungle: the waterfall down to the floating rock, fading out, and
-     * cut short behind the stage; a diagonal hard cut trims the flat river's
-     * left overhang up top while sparing the rock below. */
+     * cut short behind the stage. */
     CLIP_BELOW(0x04, 4, -70.f, 35.f),
     CLIP_BEHIND(0x04, 4, -90.f, 15.f),
-    {0x04, 4, {1.f, -1.f, 0.f, 45.f}, 0.f},
     CLIP_BELOW(0x0A, 3, -40.f, 0.f), /* Yoshi's Story: the pillar under the Shy Guys' path */
     CLIP_BELOW(0x06, 1, 0.f, 0.f),   /* Great Bay: the turtle below the waterline */
     CLIP_BELOW(0x06, 2, 0.f, 0.f),   /* Great Bay: the pier's stilts, rocks and screw */
     /* Great Bay: the sea bounded to the stage's footprint. */
-    CLIP_LEFT(0x06, 4, -220.f, 10.f),
-    CLIP_RIGHT(0x06, 4, 120.f, 10.f),
-    CLIP_FRONT(0x06, 4, 140.f, 10.f),
+    CLIP_LEFT(0x06, 4, -320.f, 10.f),
+    CLIP_RIGHT(0x06, 4, 220.f, 10.f),
+    CLIP_FRONT(0x06, 4, 220.f, 10.f),
     CLIP_BELOW(0x0B, 1, -40.f, 0.f), /* Yoshi's Island: the ground, halfway down */
 };
 #define CLIP_COUNT ((int)(sizeof s_clips / sizeof s_clips[0]))
