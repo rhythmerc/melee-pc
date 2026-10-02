@@ -5,6 +5,7 @@
 #include "command_processor.hpp"
 
 #include "../gfx/depth_peek.hpp"
+#include "../gfx/frame_packet.hpp"
 #include "../gfx/pipeline_cache.hpp"
 #include "../gfx/recording.hpp"
 #include "../internal.hpp"
@@ -555,10 +556,24 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
 #if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
   if (gfx::xr_recording_world()) {
     if (const auto* mv = gfx::xr_multiview_layout()) {
-      if (cache.xrForPipeline != cache.pipelineRef || cache.xrForLayout != mv->key) {
-        cache.xrPipelineRef = gfx::find_pipeline(cache.config, *mv);
+      // Soft-clipped stage parts use a dithering variant; everything else
+      // keeps early depth (no discard).
+      static gfx::RenderTargetLayout soft;
+      static uint64_t softFor = 0;
+      const gfx::RenderTargetLayout* layout = mv;
+      if (gfx::xr_soft_clip_active()) {
+        if (softFor != mv->key) {
+          softFor = mv->key;
+          soft = *mv;
+          soft.xrSoftClip = 1;
+          gfx::detail::finalize_render_target_layout(soft);
+        }
+        layout = &soft;
+      }
+      if (cache.xrForPipeline != cache.pipelineRef || cache.xrForLayout != layout->key) {
+        cache.xrPipelineRef = gfx::find_pipeline(cache.config, *layout);
         cache.xrForPipeline = cache.pipelineRef;
-        cache.xrForLayout = mv->key;
+        cache.xrForLayout = layout->key;
       }
       xrPipeline = cache.xrPipelineRef;
     }

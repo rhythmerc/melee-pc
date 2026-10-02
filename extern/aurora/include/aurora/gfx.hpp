@@ -33,6 +33,9 @@ struct RenderTargetLayout {
   uint32_t sampleCount = 1;
   // XR multiview (Dawn fork): views drawn per draw, one attachment layer each.
   uint32_t viewCount = 1;
+  // XR soft clip: the eye shaders fade geometry out (ordered dither) across a
+  // band above the clip plane (aurora_xr_world_clip with a fade band).
+  uint32_t xrSoftClip = 0;
 };
 
 /// Generational handle: 0 is never valid, and IDs are not reused after unregister_draw_type.

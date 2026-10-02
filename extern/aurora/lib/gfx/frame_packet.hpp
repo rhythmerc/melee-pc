@@ -140,6 +140,9 @@ inline void finalize_render_target_layout(RenderTargetLayout& layout) noexcept {
   if (layout.viewCount != 1) { // keeps every single-view key (and cache entry) as it was
     hasher.update(layout.viewCount);
   }
+  if (layout.xrSoftClip != 0) {
+    hasher.update(layout.xrSoftClip + 0x50f7u);
+  }
   layout.key = hasher.digest();
 }
 
@@ -220,7 +223,8 @@ struct FramePacket {
   // World-space placements for tagged world draws: a row-major 3x4 transform
   // (game world units) then a clip plane (game world; 0,0,0,1 = none).
   // Command::xrTransform - 1 indexes this.
-  std::vector<std::array<float, 16>> xrTransforms;
+  // Then the plane's fade band (game units; 0 = a hard cut) and padding.
+  std::vector<std::array<float, 20>> xrTransforms;
 };
 
 } // namespace aurora::gfx::detail

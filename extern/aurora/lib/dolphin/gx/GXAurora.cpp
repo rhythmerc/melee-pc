@@ -50,12 +50,14 @@ void aurora_xr_camera(int category, const float view[3][4]) {
 
 void aurora_xr_world_transform(const float m[3][4]) { aurora_xr_camera(3, m); }
 
-void aurora_xr_world_clip(const float plane[4]) {
+void aurora_xr_world_clip(const float plane[4]) { aurora_xr_world_clip_soft(plane, 0.f); }
+
+void aurora_xr_world_clip_soft(const float plane[4], float fade) {
   if (plane == nullptr) {
     aurora_xr_camera(4, nullptr);
     return;
   }
-  const float m[3][4] = {{plane[0], plane[1], plane[2], plane[3]}, {}, {}};
+  const float m[3][4] = {{plane[0], plane[1], plane[2], plane[3]}, {fade, 0.f, 0.f, 0.f}, {}};
   aurora_xr_camera(4, m);
 }
 #endif

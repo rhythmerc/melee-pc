@@ -118,11 +118,13 @@ typedef struct {
     int grkind;
     int map_id;
     float y;
+    float fade; /* > 0: dissolve across this many units above y (soft clip) */
 } ClipRule;
 
 static const ClipRule s_clips[] = {
     {0x0C, 3, -80.f}, /* Fountain of Dreams: the pole under the ornament */
-    {0x04, 4, -20.f}, /* Kongo Jungle: the waterfall under the plateau */
+    /* Kongo Jungle: the waterfall down to the floating rock, fading out. */
+    {0x04, 4, -70.f, 35.f},
     {0x0A, 3, -30.f}, /* Yoshi's Story: the pillar under the Shy Guys' path */
     {0x06, 1, 0.f},   /* Great Bay: the turtle below the waterline */
     {0x06, 2, 0.f},   /* Great Bay: the pier's stilts, rocks and screw */
@@ -409,18 +411,18 @@ bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {
     for (int i = 0; i < CLIP_COUNT; i++) {
         if (s_clips[i].grkind == grkind && s_clips[i].map_id == map_id && grkind != 0) {
             const float plane[4] = {0.f, 1.f, 0.f, -s_clips[i].y};
-            aurora_xr_world_clip(plane);
+            aurora_xr_world_clip_soft(plane, s_clips[i].fade);
             s_clip_active = true;
         }
     }
-    /* MELEE_XR_CLIP="<grkind>:<map_id>:<y>,...": try clip heights. */
+    /* MELEE_XR_CLIP="<grkind>:<map_id>:<y>[:<fade>],...": try clip heights. */
     const char* env = getenv("MELEE_XR_CLIP");
     while (env != NULL && *env != '\0') {
         int gk, id;
-        float y;
-        if (sscanf(env, "%d:%d:%f", &gk, &id, &y) == 3 && gk == grkind && id == map_id) {
+        float y, fade = 0.f;
+        if (sscanf(env, "%d:%d:%f:%f", &gk, &id, &y, &fade) >= 3 && gk == grkind && id == map_id) {
             const float plane[4] = {0.f, 1.f, 0.f, -y};
-            aurora_xr_world_clip(plane);
+            aurora_xr_world_clip_soft(plane, fade);
             s_clip_active = true;
         }
         env = strchr(env, ',');

@@ -114,6 +114,13 @@ and the investigation behind it are in docs/xr-3d-plan.md.
   below a game-space plane in the 3D view, using clip distances in the
   multiview eye shaders. `xr_scene.c` sets one around a stage part
   (`ClipRule`), so fighters and items are never clipped.
+- **Soft clips.** `aurora_xr_world_clip_soft` (a `ClipRule` with a fade)
+  dissolves geometry across a band above the plane with a 4x4 ordered dither
+  instead of cutting it. Passthrough shows through gradually and depth stays
+  exact. Only draws under a soft clip use the dithering pipeline variant
+  (`RenderTargetLayout::xrSoftClip`), because discard costs early depth. Kongo
+  Jungle's waterfall now hangs below the plateau and fades out by the
+  floating rock (y −35 to −70).
 - **Arena center.** `aurora_xr_set_arena_center` puts a game point at the
   arena position (`CenterRule`).
 - **Moving pieces.** A rule can also move a joint in the 3D view only.
@@ -435,7 +442,7 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `MELEE_XR_STAGE_LOG` | unset | Log each stage part's id and layer once |
 | `MELEE_XR_JUMBOTRON` | `0.55,0,-10,-75` | Pokémon Stadium big screen in 3D: `scale,x,y,z` (game units) for its base |
 | `MELEE_XR_MODE` | mixed reality | `vr`: no stage hides, clips or moves (full stage) |
-| `MELEE_XR_CLIP` | unset | Try clips: `grkind:part:y,...` cuts that part below y |
+| `MELEE_XR_CLIP` | unset | Try clips: `grkind:part:y[:fade],...` cuts that part below y, fading across `fade` units |
 | `MELEE_XR_MOVE` | unset | Try moves: `gk:part:joint:scale:px:py:pz:tx:ty:tz;...` |
 | `MELEE_XR_CENTER` | per stage | Arena center override, `x,y,z` game units |
 | `MELEE_XR_IZUMI_REFLECTION` | unset | Keep Fountain of Dreams' reflection render in mixed reality |

@@ -871,7 +871,8 @@ auto lighting_func(const ShaderConfig& config, const ColorChannelConfig& cc, u8 
 absl::flat_hash_set<gfx::ShaderRef> s_seenShaders;
 } // namespace
 
-std::string build_shader_source(const ShaderConfig& config, uint32_t normalAttachment, uint32_t viewCount) noexcept {
+std::string build_shader_source(const ShaderConfig& config, uint32_t normalAttachment, uint32_t viewCount,
+                                bool softClip) noexcept {
   ZoneScoped;
   const auto hash = xxh3_hash(normalAttachment, xxh3_hash(config));
   const auto info = build_shader_info(config);
@@ -2130,7 +2131,7 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}{11}
     const std::string anchor = "var<uniform> ubuf: Uniform;";
     if (auto at = shaderSource.find(anchor); at != std::string::npos) {
       shaderSource.insert(at + anchor.size(),
-                          multiview ? fmt::format("\nstruct XrEye {{ m: array<mat4x4f, {}>, enabled: vec4u, clip: vec4f }};"
+                          multiview ? fmt::format("\nstruct XrEye {{ m: array<mat4x4f, {}>, enabled: vec4u, clip: vec4f, fade: vec4f }};"
                                                   "\n@group(3) @binding(0)\nvar<uniform> xr: XrEye;"
                                                   "\nvar<private> xr_view: u32;"
                                                   "\nvar<private> xr_cam: vec3f;"
@@ -2154,6 +2155,32 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}{11}
       const std::string body = "var out: VertexOutput;";
       if (auto at = shaderSource.find(body); at != std::string::npos)
         shaderSource.insert(at + body.size(), "\n    xr_view = xr_view_index;");
+      // Soft clip: fade across a band above the clip plane with an ordered
+      // dither, so passthrough shows through gradually and depth stays exact.
+      // Only these pipelines discard (discard costs early depth).
+      if (softClip) {
+        const std::string vsHead = "struct VertexOutput {";
+        const auto v0 = shaderSource.find(vsHead);
+        const auto v1 = v0 == std::string::npos ? v0 : shaderSource.find("};", v0);
+        const auto vsAt = shaderSource.find("fn vs_main(");
+        const auto retAt = vsAt == std::string::npos ? vsAt : shaderSource.find("return out;", vsAt);
+        const auto fsAt = shaderSource.find("fn fs_main(");
+        const auto fsBody = fsAt == std::string::npos ? fsAt : shaderSource.find("{", fsAt);
+        if (v1 != std::string::npos && retAt != std::string::npos && fsBody != std::string::npos) {
+          int loc = -1;
+          for (size_t at = shaderSource.find("@location(", v0); at != std::string::npos && at < v1;
+               at = shaderSource.find("@location(", at + 1))
+            loc = std::max(loc, std::atoi(shaderSource.c_str() + at + 10));
+          shaderSource.insert(fsBody + 1, "\n    if (xr_bayer(in.pos.xy) >= in.xr_fade) { discard; }");
+          shaderSource.insert(retAt, "out.xr_fade = clamp(dot(xr.clip, vec4f(xr_cam, 1.0)) / max(xr.fade.x, 0.0001), 0.0, 1.0);\n    ");
+          shaderSource.insert(v1, fmt::format("    @location({}) xr_fade: f32,\n", loc + 1));
+          shaderSource.insert(v0, "fn xr_bayer(p: vec2f) -> f32 {\n"
+                                  "    var m = array<f32, 16>(0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0,"
+                                  " 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);\n"
+                                  "    let i = vec2u(p) % vec2u(4u);\n"
+                                  "    return (m[i.y * 4u + i.x] + 0.5) / 16.0;\n}\n\n");
+        }
+      }
       // Clip planes (aurora_xr_world_clip): clip_distances may only be a
       // vertex output, and VertexOutput is also the fragment input, so the
       // vertex stage returns a copy of it with the extra builtin.
@@ -2208,8 +2235,10 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config, const gfx::RenderTar
       normalAttachment = i;
     }
   }
-  const auto hash = layout.viewCount > 1 ? xxh3_hash(layout.viewCount, xxh3_hash(normalAttachment, xxh3_hash(config)))
-                                         : xxh3_hash(normalAttachment, xxh3_hash(config));
+  const auto hash = layout.viewCount > 1
+                        ? xxh3_hash(layout.viewCount + (layout.xrSoftClip << 8),
+                                    xxh3_hash(normalAttachment, xxh3_hash(config)))
+                        : xxh3_hash(normalAttachment, xxh3_hash(config));
 #ifdef __EMSCRIPTEN__
   // Blend/depth variants share shader code. Browser rendering is single-threaded;
   // retain modules for this device rather than compiling them for each pipeline.
@@ -2218,7 +2247,7 @@ wgpu::ShaderModule build_shader(const ShaderConfig& config, const gfx::RenderTar
   if (device != webgpu::g_device.Get()) { modules.clear(); device = webgpu::g_device.Get(); }
   if (auto it = modules.find(hash); it != modules.end()) return it->second;
 #endif
-  const auto shaderSource = build_shader_source(config, normalAttachment, layout.viewCount);
+  const auto shaderSource = build_shader_source(config, normalAttachment, layout.viewCount, layout.xrSoftClip != 0);
   wgpu::ShaderSourceWGSL wgslDescriptor{};
   wgslDescriptor.code = shaderSource.c_str();
   const auto label = fmt::format("GX Shader {:x}", hash);

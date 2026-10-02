@@ -39,7 +39,7 @@ using namespace detail;
 namespace {
 // Current placement and clip for world draws (FIFO thread).
 std::optional<std::array<float, 12>> g_xrMove;
-std::optional<std::array<float, 4>> g_xrClip;
+std::optional<std::array<float, 5>> g_xrClip; // plane, then fade band
 constexpr Module Log{"aurora::gfx"};
 
 struct FrameRecorder {
@@ -1256,6 +1256,7 @@ void xr_set_category(XrCategory category, const float* view3x4) {
 }
 
 bool xr_recording_world() noexcept { return g_recorder.xrCategory == XrCategory::World; }
+bool xr_soft_clip_active() noexcept { return g_xrClip.has_value() && (*g_xrClip)[4] > 0.f; }
 
 namespace {
 std::atomic<const RenderTargetLayout*> g_xrMultiviewLayout{nullptr};
@@ -1280,11 +1281,11 @@ namespace {
 void update_xr_transform() {
   uint8_t index = 0;
   if (g_xrMove || g_xrClip) {
-    std::array<float, 16> entry{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    std::array<float, 20> entry{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0};
     if (g_xrMove)
       std::copy_n(g_xrMove->begin(), 12, entry.begin());
     if (g_xrClip)
-      std::copy_n(g_xrClip->begin(), 4, entry.begin() + 12);
+      std::copy_n(g_xrClip->begin(), 5, entry.begin() + 12);
     auto& list = g_recorder.frame().xrTransforms;
     const auto it = std::find(list.begin(), list.end(), entry);
     if (it != list.end()) {
@@ -1322,7 +1323,7 @@ void xr_set_world_clip(const float* plane) {
   }
   if (plane != nullptr) {
     g_xrClip.emplace();
-    std::copy_n(plane, 4, g_xrClip->begin());
+    std::copy_n(plane, 5, g_xrClip->begin());
   } else {
     g_xrClip.reset();
   }

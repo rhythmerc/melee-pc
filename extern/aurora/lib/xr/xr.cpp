@@ -2089,7 +2089,7 @@ struct GpuTiming {
 
 // The multiview shader's XrEye: one matrix per eye, the enabled flags, then
 // a clip plane in game camera space (aurora_xr_world_clip).
-constexpr uint64_t kMultiviewEyeSize = 2 * 64 + 16 + 16;
+constexpr uint64_t kMultiviewEyeSize = 2 * 64 + 16 + 16 + 16; // ... clip plane, fade band
 
 struct Renderer3D {
   uint64_t layoutKey = 0;
@@ -2513,6 +2513,7 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
     std::array<Mat4, 2> m;
     uint32_t enabled[4];
     float clip[4];
+    float fade[4]; // x: band (game units)
   } mv[gfx::XrMaxTransforms]{};
   static_assert(sizeof(mv[0]) == kMultiviewEyeSize);
   for (int eye = 0; eye < 2; ++eye) {
@@ -2541,6 +2542,7 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
         mv[t].m[eye] = u.m;
         mv[t].enabled[0] = 1;
         std::copy(clipCam.begin(), clipCam.end(), mv[t].clip);
+        mv[t].fade[0] = t > 0 ? frame.xrTransforms[t - 1][16] : 0.f;
       } else {
         webgpu::g_queue.WriteBuffer(R.eyeUniforms[eye][t], 0, &u, sizeof(u));
       }

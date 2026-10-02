@@ -63,6 +63,9 @@ void aurora_xr_world_transform(const float m[3][4]);
  * aurora_xr_world_transform, before it. NULL = none. Needs multiview and the
  * ClipDistances feature; otherwise ignored. */
 void aurora_xr_world_clip(const float plane[4]);
+/* Same, faded: geometry within `fade` units above the plane dissolves out
+ * (ordered dither) instead of ending in a hard edge. */
+void aurora_xr_world_clip_soft(const float plane[4], float fade);
 
 #ifdef __cplusplus
 }
