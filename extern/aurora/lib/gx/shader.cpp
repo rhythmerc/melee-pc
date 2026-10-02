@@ -2155,9 +2155,11 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}{11}
       const std::string body = "var out: VertexOutput;";
       if (auto at = shaderSource.find(body); at != std::string::npos)
         shaderSource.insert(at + body.size(), "\n    xr_view = xr_view_index;");
-      // Soft clip: fade across a band above the clip plane with an ordered
-      // dither, so passthrough shows through gradually and depth stays exact.
-      // Only these pipelines discard (discard costs early depth).
+      // Clipped stage parts (aurora_xr_world_clip / _soft): discard below the
+      // plane, and across a fade band above it with an ordered dither, so
+      // passthrough shows through gradually and depth stays exact. Only these
+      // pipelines discard (discard costs early depth). Not clip_distances:
+      // Adreno 740 fails to create multiview pipelines that write them.
       if (softClip) {
         const std::string vsHead = "struct VertexOutput {";
         const auto v0 = shaderSource.find(vsHead);
@@ -2166,13 +2168,21 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}{11}
         const auto retAt = vsAt == std::string::npos ? vsAt : shaderSource.find("return out;", vsAt);
         const auto fsAt = shaderSource.find("fn fs_main(");
         const auto fsBody = fsAt == std::string::npos ? fsAt : shaderSource.find("{", fsAt);
-        if (v1 != std::string::npos && retAt != std::string::npos && fsBody != std::string::npos) {
+        if (v1 == std::string::npos || retAt == std::string::npos || fsBody == std::string::npos) {
+          Log.warn("XR clip shader variant: anchors missing (struct {}, return {}, fs {}); drawn unclipped",
+                   v1 != std::string::npos, retAt != std::string::npos, fsBody != std::string::npos);
+        } else {
           int loc = -1;
           for (size_t at = shaderSource.find("@location(", v0); at != std::string::npos && at < v1;
                at = shaderSource.find("@location(", at + 1))
             loc = std::max(loc, std::atoi(shaderSource.c_str() + at + 10));
-          shaderSource.insert(fsBody + 1, "\n    if (xr_bayer(in.pos.xy) >= in.xr_fade) { discard; }");
-          shaderSource.insert(retAt, "out.xr_fade = clamp(dot(xr.clip, vec4f(xr_cam, 1.0)) / max(xr.fade.x, 0.0001), 0.0, 1.0);\n    ");
+          shaderSource.insert(fsBody + 1, "\n    if (xr_bayer(in.pos.xy) >= clamp(in.xr_fade, 0.0, 1.0)) { discard; }");
+          // The distance to the plane in fade bands, interpolated (it is
+          // linear, so exact) and clamped per fragment. A per-vertex 0/1 would
+          // blend across triangles that span the plane. Fade band 0 is a hard
+          // cut: a huge scale makes the ramp sub-pixel.
+          shaderSource.insert(retAt, "out.xr_fade = dot(xr.clip, vec4f(xr_cam, 1.0)) * "
+                                     "select(1.0e6, 1.0 / xr.fade.x, xr.fade.x > 0.0);\n    ");
           shaderSource.insert(v1, fmt::format("    @location({}) xr_fade: f32,\n", loc + 1));
           shaderSource.insert(v0, "fn xr_bayer(p: vec2f) -> f32 {\n"
                                   "    var m = array<f32, 16>(0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0,"
@@ -2181,33 +2191,7 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}{11}
                                   "    return (m[i.y * 4u + i.x] + 0.5) / 16.0;\n}\n\n");
         }
       }
-      // Clip planes (aurora_xr_world_clip): clip_distances may only be a
-      // vertex output, and VertexOutput is also the fragment input, so the
-      // vertex stage returns a copy of it with the extra builtin.
-      if (webgpu::g_device.HasFeature(wgpu::FeatureName::ClipDistances)) {
-        const std::string structHead = "struct VertexOutput {";
-        const auto s0 = shaderSource.find(structHead);
-        const auto s1 = s0 == std::string::npos ? s0 : shaderSource.find("};", s0);
-        const auto vsAt = shaderSource.find("fn vs_main(");
-        const std::string ret = "-> VertexOutput {";
-        const auto retAt = vsAt == std::string::npos ? vsAt : shaderSource.find(ret, vsAt);
-        const std::string decl = "var out: VertexOutput;";
-        const auto declAt = vsAt == std::string::npos ? vsAt : shaderSource.find(decl, vsAt);
-        const std::string tail = "return out;";
-        const auto tailAt = vsAt == std::string::npos ? vsAt : shaderSource.find(tail, vsAt);
-        if (s1 != std::string::npos && retAt != std::string::npos && declAt != std::string::npos &&
-            tailAt != std::string::npos) {
-          // Back to front so earlier offsets stay valid.
-          shaderSource.insert(tailAt, "out.xr_clip[0] = dot(xr.clip, vec4f(xr_cam, 1.0));\n    ");
-          shaderSource.replace(declAt, decl.size(), "var out: XrVertexOutput;");
-          shaderSource.replace(retAt, ret.size(), "-> XrVertexOutput {");
-          std::string copy = shaderSource.substr(s0, s1 - s0);
-          copy.replace(0, structHead.size(), "struct XrVertexOutput {");
-          copy += "    @builtin(clip_distances) xr_clip: array<f32, 1>,\n";
-          shaderSource.insert(s1 + 2, "\n" + copy + "};");
-          shaderSource.insert(0, "enable clip_distances;\n");
-        }
-      }
+
     }
     for (const std::string_view var : {"mv_pos_a", "mv_pos_b", "mv_pos"}) {
       const std::string from = fmt::format("vec4f({}, 1.0) * ubuf.proj", var);

@@ -60,8 +60,8 @@ void aurora_xr_world_transform(const float m[3][4]);
 /* Clip plane for the following AURORA_XR_WORLD draws in the 3D view only, in
  * game world units: geometry where a*x + b*y + c*z + d < 0 is cut away (e.g.
  * {0, 1, 0, -y0} keeps everything above y0). Applies with or without an
- * aurora_xr_world_transform, before it. NULL = none. Needs multiview and the
- * ClipDistances feature; otherwise ignored. */
+ * aurora_xr_world_transform, before it. NULL = none. Needs multiview;
+ * otherwise ignored. */
 void aurora_xr_world_clip(const float plane[4]);
 /* Same, faded: geometry within `fade` units above the plane dissolves out
  * (ordered dither) instead of ending in a hard edge. */

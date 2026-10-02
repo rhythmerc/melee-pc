@@ -121,7 +121,7 @@ void xr_set_world_transform(const float* m3x4);
 void xr_set_world_clip(const float* plane);
 // FIFO thread: the current draw is tagged World.
 bool xr_recording_world() noexcept;
-// FIFO thread: the current world clip fades (needs the soft-clip pipelines).
+// FIFO thread: a world clip is set (its draws need the clipping pipelines).
 bool xr_soft_clip_active() noexcept;
 // The layout lib/xr replays world draws into with multiview (null = none),
 // published once from the render worker and read by the FIFO thread.

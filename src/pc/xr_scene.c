@@ -408,6 +408,12 @@ bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {
     if (!pc_xr_mixed_reality()) {
         return false; /* full VR: the whole stage, unmoved and unclipped */
     }
+    if (getenv("MELEE_XR_CLIP_LOG") != NULL) {
+        static unsigned n;
+        if (n++ < 40) {
+            pc_log_line("xr: part begin stage %d part %d layer %d", grkind, map_id, layer);
+        }
+    }
     for (int i = 0; i < CLIP_COUNT; i++) {
         if (s_clips[i].grkind == grkind && s_clips[i].map_id == map_id && grkind != 0) {
             const float plane[4] = {0.f, 1.f, 0.f, -s_clips[i].y};

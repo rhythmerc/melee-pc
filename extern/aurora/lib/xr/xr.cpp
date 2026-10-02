@@ -2669,10 +2669,6 @@ void add_required_features(const wgpu::Adapter& adapter, std::vector<wgpu::Featu
   if (adapter.HasFeature(wgpu::FeatureName::ChromiumExperimentalMultiview) &&
       std::find(features.begin(), features.end(), wgpu::FeatureName::ChromiumExperimentalMultiview) == features.end())
     features.push_back(wgpu::FeatureName::ChromiumExperimentalMultiview);
-  // Clip planes for stage geometry in the 3D view (aurora_xr_world_clip).
-  if (adapter.HasFeature(wgpu::FeatureName::ClipDistances) &&
-      std::find(features.begin(), features.end(), wgpu::FeatureName::ClipDistances) == features.end())
-    features.push_back(wgpu::FeatureName::ClipDistances);
   // XR GPU timing (AURORA_XR_TIMING).
   if (env_flag("AURORA_XR_TIMING", true) && adapter.HasFeature(wgpu::FeatureName::TimestampQuery) &&
       std::find(features.begin(), features.end(), wgpu::FeatureName::TimestampQuery) == features.end())

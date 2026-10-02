@@ -1256,7 +1256,7 @@ void xr_set_category(XrCategory category, const float* view3x4) {
 }
 
 bool xr_recording_world() noexcept { return g_recorder.xrCategory == XrCategory::World; }
-bool xr_soft_clip_active() noexcept { return g_xrClip.has_value() && (*g_xrClip)[4] > 0.f; }
+bool xr_soft_clip_active() noexcept { return g_xrClip.has_value(); }
 
 namespace {
 std::atomic<const RenderTargetLayout*> g_xrMultiviewLayout{nullptr};
