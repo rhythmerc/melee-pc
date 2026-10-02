@@ -119,6 +119,8 @@ void xr_set_world_transform(const float* m3x4);
 // Clip plane (game world, 4 floats) then its fade band (game units, 0 = hard)
 // for the following world draws; null = none.
 void xr_set_world_clip(const float* plane);
+// Planes 3 and 4 for the current clip (same 12-float layout).
+void xr_set_world_clip_more(const float* planes);
 // FIFO thread: the current draw is tagged World.
 bool xr_recording_world() noexcept;
 // FIFO thread: a world clip is set (its draws need the clipping pipelines).

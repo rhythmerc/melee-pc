@@ -39,7 +39,8 @@ using namespace detail;
 namespace {
 // Current placement and clip for world draws (FIFO thread).
 std::optional<std::array<float, 12>> g_xrMove;
-std::optional<std::array<float, 10>> g_xrClip; // plane 1, plane 2, fade bands
+// Planes 1-4 (16 floats), then their fade bands (4).
+std::optional<std::array<float, 20>> g_xrClip;
 constexpr Module Log{"aurora::gfx"};
 
 struct FrameRecorder {
@@ -1281,11 +1282,12 @@ namespace {
 void update_xr_transform() {
   uint8_t index = 0;
   if (g_xrMove || g_xrClip) {
-    std::array<float, 24> entry{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0};
+    std::array<float, 32> entry{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
+                                0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0};
     if (g_xrMove)
       std::copy_n(g_xrMove->begin(), 12, entry.begin());
     if (g_xrClip)
-      std::copy_n(g_xrClip->begin(), 10, entry.begin() + 12);
+      std::copy_n(g_xrClip->begin(), 20, entry.begin() + 12);
     auto& list = g_recorder.frame().xrTransforms;
     const auto it = std::find(list.begin(), list.end(), entry);
     if (it != list.end()) {
@@ -1322,11 +1324,24 @@ void xr_set_world_clip(const float* plane) {
     return;
   }
   if (plane != nullptr) {
-    g_xrClip.emplace();
-    std::copy_n(plane, 10, g_xrClip->begin()); // the marker's rows: plane 1, plane 2, fades
+    // The marker's rows: plane 1, plane 2, fades 1-2. Planes 3-4 pass.
+    g_xrClip.emplace(std::array<float, 20>{0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0});
+    std::copy_n(plane, 8, g_xrClip->begin());
+    (*g_xrClip)[16] = plane[8];
+    (*g_xrClip)[17] = plane[9];
   } else {
     g_xrClip.reset();
   }
+  update_xr_transform();
+}
+
+void xr_set_world_clip_more(const float* planes) {
+  if (!g_recorder.active() || !g_xrClip) {
+    return;
+  }
+  std::copy_n(planes, 8, g_xrClip->begin() + 8);
+  (*g_xrClip)[18] = planes[8];
+  (*g_xrClip)[19] = planes[9];
   update_xr_transform();
 }
 

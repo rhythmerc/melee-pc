@@ -56,15 +56,35 @@ void aurora_xr_world_clip_soft(const float plane[4], float fade) { aurora_xr_wor
 
 void aurora_xr_world_clips(const float plane1[4], float fade1, const float plane2[4], float fade2) {
   if (plane1 == nullptr) {
+    aurora_xr_world_clips4(nullptr, nullptr, 0);
+    return;
+  }
+  const float planes[2][4] = {{plane1[0], plane1[1], plane1[2], plane1[3]},
+                              {plane2 ? plane2[0] : 0.f, plane2 ? plane2[1] : 0.f, plane2 ? plane2[2] : 0.f,
+                               plane2 ? plane2[3] : 1.f}};
+  const float fades[2] = {fade1, plane2 ? fade2 : 0.f};
+  aurora_xr_world_clips4(planes, fades, 2);
+}
+
+// Two markers: planes 1-2 (category 4; also clears 3-4) then planes 3-4
+// (category 5). Rows: plane, plane, fades. 0,0,0,1 always passes.
+void aurora_xr_world_clips4(const float planes[][4], const float fades[], int count) {
+  if (planes == nullptr || count <= 0) {
     aurora_xr_camera(4, nullptr);
     return;
   }
-  // Rows: plane 1, plane 2 (0,0,0,1 = always passes), fade bands.
-  const float m[3][4] = {{plane1[0], plane1[1], plane1[2], plane1[3]},
-                         {plane2 ? plane2[0] : 0.f, plane2 ? plane2[1] : 0.f, plane2 ? plane2[2] : 0.f,
-                          plane2 ? plane2[3] : 1.f},
-                         {fade1, plane2 ? fade2 : 0.f, 0.f, 0.f}};
-  aurora_xr_camera(4, m);
+  for (int half = 0; half < 2 && half * 2 < count; ++half) {
+    float m[3][4] = {{0.f, 0.f, 0.f, 1.f}, {0.f, 0.f, 0.f, 1.f}, {}};
+    for (int k = 0; k < 2; ++k) {
+      const int i = half * 2 + k;
+      if (i < count) {
+        for (int c = 0; c < 4; ++c)
+          m[k][c] = planes[i][c];
+        m[2][k] = fades[i];
+      }
+    }
+    aurora_xr_camera(4 + half, m);
+  }
 }
 #endif
 

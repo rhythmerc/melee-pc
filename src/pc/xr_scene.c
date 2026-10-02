@@ -121,20 +121,29 @@ typedef struct {
     float fade;     /* > 0: dissolve across this many units (soft clip) */
 } ClipRule;
 
-/* Cut below y / behind z (toward -z, away from the player). Up to two rules
- * per part combine. */
+/* Cut below y / behind z (toward -z, away from the player) / in front of z
+ * / left of x / right of x. Up to four rules per part combine. */
 #define CLIP_BELOW(gk, part, y, fade) {gk, part, {0.f, 1.f, 0.f, -(y)}, fade}
 #define CLIP_BEHIND(gk, part, z, fade) {gk, part, {0.f, 0.f, 1.f, -(z)}, fade}
+#define CLIP_FRONT(gk, part, z, fade) {gk, part, {0.f, 0.f, -1.f, (z)}, fade}
+#define CLIP_LEFT(gk, part, x, fade) {gk, part, {1.f, 0.f, 0.f, -(x)}, fade}
+#define CLIP_RIGHT(gk, part, x, fade) {gk, part, {-1.f, 0.f, 0.f, (x)}, fade}
 
 static const ClipRule s_clips[] = {
     CLIP_BELOW(0x0C, 3, -80.f, 0.f), /* Fountain of Dreams: the pole under the ornament */
     /* Kongo Jungle: the waterfall down to the floating rock, fading out, and
-     * cut short behind the stage. */
+     * cut short behind the stage; a diagonal hard cut trims the flat river's
+     * left overhang up top while sparing the rock below. */
     CLIP_BELOW(0x04, 4, -70.f, 35.f),
-    CLIP_BEHIND(0x04, 4, -70.f, 15.f),
+    CLIP_BEHIND(0x04, 4, -90.f, 15.f),
+    {0x04, 4, {1.f, -1.f, 0.f, 45.f}, 0.f},
     CLIP_BELOW(0x0A, 3, -40.f, 0.f), /* Yoshi's Story: the pillar under the Shy Guys' path */
     CLIP_BELOW(0x06, 1, 0.f, 0.f),   /* Great Bay: the turtle below the waterline */
     CLIP_BELOW(0x06, 2, 0.f, 0.f),   /* Great Bay: the pier's stilts, rocks and screw */
+    /* Great Bay: the sea bounded to the stage's footprint. */
+    CLIP_LEFT(0x06, 4, -220.f, 10.f),
+    CLIP_RIGHT(0x06, 4, 120.f, 10.f),
+    CLIP_FRONT(0x06, 4, 140.f, 10.f),
     CLIP_BELOW(0x0B, 1, -40.f, 0.f), /* Yoshi's Island: the ground, halfway down */
 };
 #define CLIP_COUNT ((int)(sizeof s_clips / sizeof s_clips[0]))
@@ -421,27 +430,27 @@ bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {
             pc_log_line("xr: part begin stage %d part %d layer %d", grkind, map_id, layer);
         }
     }
-    const ClipRule* found[2] = {NULL, NULL};
-    for (int i = 0; i < CLIP_COUNT; i++) {
+    float planes[4][4];
+    float fades[4];
+    int n_planes = 0;
+    for (int i = 0; i < CLIP_COUNT && n_planes < 4; i++) {
         if (s_clips[i].grkind == grkind && s_clips[i].map_id == map_id && grkind != 0) {
-            found[found[0] == NULL ? 0 : 1] = &s_clips[i];
+            memcpy(planes[n_planes], s_clips[i].plane, sizeof planes[0]);
+            fades[n_planes++] = s_clips[i].fade;
         }
     }
-    if (found[0] != NULL) {
-        aurora_xr_world_clips(found[0]->plane, found[0]->fade, found[1] ? found[1]->plane : NULL,
-            found[1] ? found[1]->fade : 0.f);
-        s_clip_active = true;
-    }
     /* MELEE_XR_CLIP="<grkind>:<map_id>:<y>[:<fade>],...": try clip heights;
-     * MELEE_XR_CLIPZ the same for a cut behind z. One of each combines. */
-    float env_planes[2][4];
-    float env_fades[2] = {0.f, 0.f};
+     * MELEE_XR_CLIPZ the same for a cut behind z; MELEE_XR_CLIPP
+     * "<grkind>:<map_id>:<a>:<b>:<c>:<d>[:<fade>];..." any plane (kept where
+     * ax+by+cz+d >= 0). Any env plane replaces the built-in ones (up to 4). */
+    float env_planes[4][4];
+    float env_fades[4] = {0.f, 0.f, 0.f, 0.f};
     int env_n = 0;
     const char* env = getenv("MELEE_XR_CLIP");
     while (env != NULL && *env != '\0') {
         int gk, id;
         float y, fade = 0.f;
-        if (sscanf(env, "%d:%d:%f:%f", &gk, &id, &y, &fade) >= 3 && gk == grkind && id == map_id && env_n < 2) {
+        if (sscanf(env, "%d:%d:%f:%f", &gk, &id, &y, &fade) >= 3 && gk == grkind && id == map_id && env_n < 4) {
             const float plane[4] = {0.f, 1.f, 0.f, -y};
             memcpy(env_planes[env_n], plane, sizeof plane);
             env_fades[env_n++] = fade;
@@ -452,7 +461,7 @@ bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {
     for (const char* z = getenv("MELEE_XR_CLIPZ"); z != NULL && *z != '\0';) {
         int gk, id;
         float v, fade = 0.f;
-        if (sscanf(z, "%d:%d:%f:%f", &gk, &id, &v, &fade) >= 3 && gk == grkind && id == map_id && env_n < 2) {
+        if (sscanf(z, "%d:%d:%f:%f", &gk, &id, &v, &fade) >= 3 && gk == grkind && id == map_id && env_n < 4) {
             const float plane[4] = {0.f, 0.f, 1.f, -v};
             memcpy(env_planes[env_n], plane, sizeof plane);
             env_fades[env_n++] = fade;
@@ -460,8 +469,24 @@ bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {
         z = strchr(z, ',');
         z = z != NULL ? z + 1 : NULL;
     }
+    for (const char* q = getenv("MELEE_XR_CLIPP"); q != NULL && *q != '\0';) {
+        int gk, id;
+        float pl[4], fade = 0.f;
+        if (sscanf(q, "%d:%d:%f:%f:%f:%f:%f", &gk, &id, &pl[0], &pl[1], &pl[2], &pl[3], &fade) >= 6 &&
+            gk == grkind && id == map_id && env_n < 4) {
+            memcpy(env_planes[env_n], pl, sizeof pl);
+            env_fades[env_n++] = fade;
+        }
+        q = strchr(q, ';');
+        q = q != NULL ? q + 1 : NULL;
+    }
     if (env_n > 0) {
-        aurora_xr_world_clips(env_planes[0], env_fades[0], env_n > 1 ? env_planes[1] : NULL, env_fades[1]);
+        memcpy(planes, env_planes, sizeof planes);
+        memcpy(fades, env_fades, sizeof fades);
+        n_planes = env_n;
+    }
+    if (n_planes > 0) {
+        aurora_xr_world_clips4((const float(*)[4])planes, fades, n_planes);
         s_clip_active = true;
     }
     const bool visible = part_visible(grkind, map_id, layer);

@@ -119,6 +119,10 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     - Fountain of Dreams: the reflection image is cleared to a water colour
       instead of left stale (`MELEE_XR_IZUMI_WATER`; the desktop build's
       BGRA framebuffer swaps red and blue in that copy).
+  - **To revisit: Fountain of Dreams.** It runs badly on the Quest even
+    without the reflection render. Profile it, then build a proper 3D
+    reflection: mirror the world draws about the water plane per eye,
+    clipped to above the water, under the translucent surface.
 - **Mixed reality vs full VR.** Every hide, clip and move applies only in
   mixed reality (`pc_xr_mixed_reality`). `MELEE_XR_MODE=vr` renders stages
   whole, for the planned full-VR mode. Per-stage centering applies in both.

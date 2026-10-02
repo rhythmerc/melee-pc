@@ -2089,7 +2089,7 @@ struct GpuTiming {
 
 // The multiview shader's XrEye: one matrix per eye, the enabled flags, then
 // a clip plane in game camera space (aurora_xr_world_clip).
-constexpr uint64_t kMultiviewEyeSize = 2 * 64 + 16 + 16 + 16 + 16; // ... clip planes, fade bands
+constexpr uint64_t kMultiviewEyeSize = 2 * 64 + 16 + 4 * 16 + 16; // ... 4 clip planes, fade bands
 
 struct Renderer3D {
   uint64_t layoutKey = 0;
@@ -2512,9 +2512,8 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
   struct {
     std::array<Mat4, 2> m;
     uint32_t enabled[4];
-    float clip[4];
-    float clip2[4];
-    float fade[4]; // x, y: bands (game units)
+    float clip[4][4];
+    float fade[4]; // bands (game units)
   } mv[gfx::XrMaxTransforms]{};
   static_assert(sizeof(mv[0]) == kMultiviewEyeSize);
   for (int eye = 0; eye < 2; ++eye) {
@@ -2523,18 +2522,19 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
       Mat4 world = cameraToWorld;
       // Clip plane, game world -> game camera space (the shader clips the
       // camera-space position): plane_cam = plane_world · V_game⁻¹.
-      std::array<float, 4> clipCam{0.f, 0.f, 0.f, 1.f}, clipCam2{0.f, 0.f, 0.f, 1.f};
+      std::array<std::array<float, 4>, 4> clipCam{};
+      for (auto& c : clipCam)
+        c = {0.f, 0.f, 0.f, 1.f};
       if (t > 0) {
         const auto& m = frame.xrTransforms[t - 1];
         world = mul(Mat4{m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], 0.f, 0.f, 0.f, 1.f},
                     cameraToWorld);
-        for (int j = 0; j < 4; ++j) {
-          clipCam[j] = clipCam2[j] = 0.f;
-          for (int i = 0; i < 4; ++i) {
-            clipCam[j] += m[12 + i] * cameraToWorld[i * 4 + j];
-            clipCam2[j] += m[16 + i] * cameraToWorld[i * 4 + j];
+        for (int k = 0; k < 4; ++k)
+          for (int j = 0; j < 4; ++j) {
+            clipCam[k][j] = 0.f;
+            for (int i = 0; i < 4; ++i)
+              clipCam[k][j] += m[12 + k * 4 + i] * cameraToWorld[i * 4 + j];
           }
-        }
       }
       struct {
         Mat4 m;
@@ -2544,10 +2544,10 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
       if (g_multiview) {
         mv[t].m[eye] = u.m;
         mv[t].enabled[0] = 1;
-        std::copy(clipCam.begin(), clipCam.end(), mv[t].clip);
-        std::copy(clipCam2.begin(), clipCam2.end(), mv[t].clip2);
-        mv[t].fade[0] = t > 0 ? frame.xrTransforms[t - 1][20] : 0.f;
-        mv[t].fade[1] = t > 0 ? frame.xrTransforms[t - 1][21] : 0.f;
+        for (int k = 0; k < 4; ++k) {
+          std::copy(clipCam[k].begin(), clipCam[k].end(), mv[t].clip[k]);
+          mv[t].fade[k] = t > 0 ? frame.xrTransforms[t - 1][28 + k] : 0.f;
+        }
       } else {
         webgpu::g_queue.WriteBuffer(R.eyeUniforms[eye][t], 0, &u, sizeof(u));
       }

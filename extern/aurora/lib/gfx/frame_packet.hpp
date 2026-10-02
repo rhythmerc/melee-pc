@@ -223,9 +223,9 @@ struct FramePacket {
   // World-space placements for tagged world draws: a row-major 3x4 transform
   // (game world units) then a clip plane (game world; 0,0,0,1 = none).
   // Command::xrTransform - 1 indexes this.
-  // Then a second plane (both must pass), the two fade bands (game units;
-  // 0 = a hard cut) and padding.
-  std::vector<std::array<float, 24>> xrTransforms;
+  // Then four clip planes (all must pass; 0,0,0,1 always passes) and their
+  // fade bands (game units; 0 = a hard cut).
+  std::vector<std::array<float, 32>> xrTransforms;
 };
 
 } // namespace aurora::gfx::detail
