@@ -66,6 +66,8 @@ void aurora_xr_world_clip(const float plane[4]);
 /* Same, faded: geometry within `fade` units above the plane dissolves out
  * (ordered dither) instead of ending in a hard edge. */
 void aurora_xr_world_clip_soft(const float plane[4], float fade);
+/* Two planes at once (both must pass); plane2 may be NULL. */
+void aurora_xr_world_clips(const float plane1[4], float fade1, const float plane2[4], float fade2);
 
 #ifdef __cplusplus
 }

@@ -1,5 +1,6 @@
 #ifdef TARGET_PC
 #include "pc/xr_scene.h"
+#include <stdio.h>
 #include <stdlib.h>
 #endif
 #include "grizumi.h"
@@ -762,11 +763,12 @@ void grIzumi_801CCEA0(HSD_GObj* gobj, intptr_t renderpass)
 
 #ifdef TARGET_PC
     /* XR mixed reality: the reflection is a flat-camera picture that can't
-     * line up in 3D, and rendering it costs a whole extra scene pass. The
-     * water shows without it. MELEE_XR_IZUMI_REFLECTION=1 keeps it. */
-    if (pc_xr_mixed_reality() && getenv("MELEE_XR_IZUMI_REFLECTION") == NULL) {
-        return;
-    }
+     * line up in 3D, and rendering it costs a whole extra scene pass. Only
+     * clear the reflection image to a water colour (the water samples it;
+     * left alone it shows stale memory). MELEE_XR_IZUMI_REFLECTION=1 keeps
+     * the real reflection; MELEE_XR_IZUMI_WATER="r,g,b" sets the colour. */
+    const bool xr_plain_water =
+        pc_xr_mixed_reality() && getenv("MELEE_XR_IZUMI_REFLECTION") == NULL;
 #endif
     if (refl->image != NULL) {
         cobj = GET_COBJ(gobj);
@@ -791,6 +793,21 @@ void grIzumi_801CCEA0(HSD_GObj* gobj, intptr_t renderpass)
             }
         }
         if (HSD_CObjSetCurrent(cobj)) {
+#ifdef TARGET_PC
+            if (xr_plain_water) {
+                /* Comes out with red and blue swapped through the water's
+                 * material: this is a mid blue. */
+                int r = 160, g = 100, b = 60;
+                const char* c = getenv("MELEE_XR_IZUMI_WATER");
+                if (c != NULL) {
+                    sscanf(c, "%d,%d,%d", &r, &g, &b);
+                }
+                HSD_SetEraseColor((u8) r, (u8) g, (u8) b, 1);
+                HSD_CObjEraseScreen(cobj, 1, 0, 0);
+                HSD_CObjEndCurrent();
+                goto copy;
+            }
+#endif
             HSD_SetEraseColor(0xFF, 0xFF, 0xFF, 1);
             HSD_CObjEraseScreen(cobj, 1, 0, 0);
             HSD_LObjDeleteCurrentAll(0);
@@ -806,6 +823,9 @@ void grIzumi_801CCEA0(HSD_GObj* gobj, intptr_t renderpass)
             HSD_GObj_80390ED0(gobj, 7);
             HSD_CObjEndCurrent();
         }
+#ifdef TARGET_PC
+    copy:
+#endif
         lb_800122C8(refl->image, 0, 0, 1);
 #ifdef TARGET_PC
         /* Built from the projection actually submitted: the reflection was

@@ -2131,7 +2131,7 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}{11}
     const std::string anchor = "var<uniform> ubuf: Uniform;";
     if (auto at = shaderSource.find(anchor); at != std::string::npos) {
       shaderSource.insert(at + anchor.size(),
-                          multiview ? fmt::format("\nstruct XrEye {{ m: array<mat4x4f, {}>, enabled: vec4u, clip: vec4f, fade: vec4f }};"
+                          multiview ? fmt::format("\nstruct XrEye {{ m: array<mat4x4f, {}>, enabled: vec4u, clip: vec4f, clip2: vec4f, fade: vec4f }};"
                                                   "\n@group(3) @binding(0)\nvar<uniform> xr: XrEye;"
                                                   "\nvar<private> xr_view: u32;"
                                                   "\nvar<private> xr_cam: vec3f;"
@@ -2176,14 +2176,16 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}{11}
           for (size_t at = shaderSource.find("@location(", v0); at != std::string::npos && at < v1;
                at = shaderSource.find("@location(", at + 1))
             loc = std::max(loc, std::atoi(shaderSource.c_str() + at + 10));
-          shaderSource.insert(fsBody + 1, "\n    if (xr_bayer(in.pos.xy) >= clamp(in.xr_fade, 0.0, 1.0)) { discard; }");
+          shaderSource.insert(fsBody + 1, "\n    if (xr_bayer(in.pos.xy) >= clamp(min(in.xr_fade.x, in.xr_fade.y), 0.0, 1.0)) { discard; }");
           // The distance to the plane in fade bands, interpolated (it is
           // linear, so exact) and clamped per fragment. A per-vertex 0/1 would
           // blend across triangles that span the plane. Fade band 0 is a hard
           // cut: a huge scale makes the ramp sub-pixel.
-          shaderSource.insert(retAt, "out.xr_fade = dot(xr.clip, vec4f(xr_cam, 1.0)) * "
-                                     "select(1.0e6, 1.0 / xr.fade.x, xr.fade.x > 0.0);\n    ");
-          shaderSource.insert(v1, fmt::format("    @location({}) xr_fade: f32,\n", loc + 1));
+          shaderSource.insert(retAt, "out.xr_fade = vec2f(dot(xr.clip, vec4f(xr_cam, 1.0)) * "
+                                     "select(1.0e6, 1.0 / xr.fade.x, xr.fade.x > 0.0), "
+                                     "dot(xr.clip2, vec4f(xr_cam, 1.0)) * "
+                                     "select(1.0e6, 1.0 / xr.fade.y, xr.fade.y > 0.0));\n    ");
+          shaderSource.insert(v1, fmt::format("    @location({}) xr_fade: vec2f,\n", loc + 1));
           shaderSource.insert(v0, "fn xr_bayer(p: vec2f) -> f32 {\n"
                                   "    var m = array<f32, 16>(0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0,"
                                   " 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);\n"

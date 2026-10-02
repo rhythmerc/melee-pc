@@ -52,12 +52,18 @@ void aurora_xr_world_transform(const float m[3][4]) { aurora_xr_camera(3, m); }
 
 void aurora_xr_world_clip(const float plane[4]) { aurora_xr_world_clip_soft(plane, 0.f); }
 
-void aurora_xr_world_clip_soft(const float plane[4], float fade) {
-  if (plane == nullptr) {
+void aurora_xr_world_clip_soft(const float plane[4], float fade) { aurora_xr_world_clips(plane, fade, nullptr, 0.f); }
+
+void aurora_xr_world_clips(const float plane1[4], float fade1, const float plane2[4], float fade2) {
+  if (plane1 == nullptr) {
     aurora_xr_camera(4, nullptr);
     return;
   }
-  const float m[3][4] = {{plane[0], plane[1], plane[2], plane[3]}, {fade, 0.f, 0.f, 0.f}, {}};
+  // Rows: plane 1, plane 2 (0,0,0,1 = always passes), fade bands.
+  const float m[3][4] = {{plane1[0], plane1[1], plane1[2], plane1[3]},
+                         {plane2 ? plane2[0] : 0.f, plane2 ? plane2[1] : 0.f, plane2 ? plane2[2] : 0.f,
+                          plane2 ? plane2[3] : 1.f},
+                         {fade1, plane2 ? fade2 : 0.f, 0.f, 0.f}};
   aurora_xr_camera(4, m);
 }
 #endif
