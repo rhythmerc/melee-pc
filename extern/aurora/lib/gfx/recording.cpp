@@ -1216,6 +1216,16 @@ Range push_storage(const uint8_t* data, size_t length) {
   return push(current_frame_packet().storage, data, length, resources().limits.minStorageBufferOffsetAlignment);
 }
 
+Range push_storage_aligned(const uint8_t* data, size_t length, size_t alignment) {
+  ZoneScoped;
+  if (!check_recording("push_storage_aligned")) {
+    return {};
+  }
+  return push(current_frame_packet().storage, data, length, alignment);
+}
+
+size_t storage_tail() noexcept { return current_frame_packet().storage.size(); }
+
 Range push_texture_data(const uint8_t* data, u32 bytesPerRow, u32 rowsPerImage) {
   // For CopyBufferToTexture, we need an alignment of 256 per row (see Dawn kTextureBytesPerRowAlignment)
   const auto copyBytesPerRow = AURORA_ALIGN(bytesPerRow, 256);

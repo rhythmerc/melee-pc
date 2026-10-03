@@ -317,8 +317,9 @@ half rate and zoom clipped:
 | Fire | 40.4 | 41.5 | 12.6 ms |
 | Rock | 38.4 | 41.1 | 13.2 ms |
 
-In mixed reality the feed shows a player zoom instead
-(`MELEE_XR_PS_ZOOM_ONLY=0` keeps the feed). The screen's states and their RNG
+With `MELEE_XR_PS_ZOOM_ONLY=1`, mixed reality shows a player zoom in place
+of the feed. It's off by default since positions are decoded on the CPU
+(below), which left it nothing to gain. The screen's states and their RNG
 draws are the game's own, and only the grab and the screen's image change,
 in the draw callbacks. The zoom takes turns between the fighters every three
 seconds of the feed. Feed-state runs went from 50.2 / 48.1 / 40.0 / 40.4 /
@@ -332,6 +333,39 @@ form show 38% vertex fetch stall with the shaders busy only 39% of the time.
 Aurora's shaders pull vertices from storage buffers
 (`vbuf`/`abuf: array<u32>`, decoded in the shader), so the eye pass looks
 limited by vertex fetch, not by pixels.
+
+### Decoded positions
+
+Aurora's vertex shaders decode the game's GX vertex data themselves: an
+index from the raw stream, then the attribute from its array, byte by byte,
+byte-swapped and converted from fixed point, each word behind a bounds
+check. On a Quest 3 the rock form's eye pass spent 61% of its binning (38k
+vertices in 2.7 ms) and 57% of its per-bin render stalled on vertex fetch,
+with the shaders busy 17 to 26% of the time (ovrgpuprofiler render-stage
+metrics). A tiler runs the vertex shader in binning and again per bin.
+
+`AURORA_POS_DECODE` decodes positions to float3 on the CPU as each draw is
+recorded, from the same `AttrConfig` the shader generator reads, into the
+storage pool. The pipeline takes them as vertex attribute 0
+(`ShaderConfig::decodedPos`, a spare bit, so the persisted pipeline cache
+stays valid), and the GPU fetches them in hardware. A merged draw merges
+only while its decoded range can grow in place. Normals, colors and texture
+coordinates still come through the shader. On by default on Android; `0` or
+`1` overrides.
+
+Quest 3, mixed reality, four CPUs, game fps, decode off -> on:
+
+| Stage | Off | On |
+|---|---|---|
+| Fountain of Dreams | 47.8 | 59.9 |
+| Brinstar | 46.6 | 59.8 |
+| Jungle Japes | 54.7 | 59.9 |
+| Battlefield | 59.5 | 59.7 |
+| Pokémon Stadium, rock (zoom only) | 41.5 | 58.6 |
+
+Pokémon Stadium's full feed with the decode: default 59.9, grass 59.5,
+water 57.6, fire 57.2, rock 58.3. The eye pass on rock went from 13.2 to
+8.7 ms.
 
 Fire and rock are limited by their own scenery (360 to 380 world draws),
 not by the jumbotron. In fire form the zoom went from 30.1 to 35.1 fps with

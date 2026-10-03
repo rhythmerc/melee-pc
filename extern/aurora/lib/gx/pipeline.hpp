@@ -11,6 +11,7 @@ struct DrawData {
   gfx::PipelineRef xrPipeline;
   gfx::Range vertRange;
   gfx::Range idxRange;
+  gfx::Range posRange; // decoded float3 positions (AURORA_POS_DECODE), in the storage buffer
   gfx::Range uniformRange;
   DrawImmediateData immediateData;
 #ifdef __EMSCRIPTEN__

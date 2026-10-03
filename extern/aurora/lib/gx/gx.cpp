@@ -341,6 +341,26 @@ void set_render_scissor(const gfx::ClipRect& scissor) noexcept {
 
 const gfx::TextureBind& get_texture(GXTexMapID id) noexcept { return g_gxState.textures[static_cast<size_t>(id)]; }
 
+// AURORA_POS_DECODE: positions are decoded to float3 on the CPU and read
+// through a vertex buffer, instead of pulled from storage buffers in the
+// vertex shader. Adreno stalls on those fetches, and a tiler runs the vertex
+// shader again per bin (docs/quest-xr.md). On by default on Android, where
+// it's measured; 0 or 1 overrides.
+bool pos_decode_enabled() noexcept {
+  static const bool on = [] {
+    const char* v = std::getenv("AURORA_POS_DECODE");
+    if (v != nullptr && *v != '\0') {
+      return *v != '0';
+    }
+#ifdef __ANDROID__
+    return true;
+#else
+    return false;
+#endif
+  }();
+  return on;
+}
+
 wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, const gfx::RenderTargetLayout& layout,
                                     ArrayRef<wgpu::VertexBufferLayout> vtxBuffers, wgpu::ShaderModule shader,
                                     const char* label) noexcept {
@@ -490,6 +510,8 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   } else {
     config.shaderConfig.lineMode = 0;
   }
+  config.shaderConfig.decodedPos = pos_decode_enabled() && config.shaderConfig.lineMode == 0 &&
+                                   config.shaderConfig.attrs[GX_VA_POS].attrType != GX_NONE;
   config.shaderConfig.tevSwapTable = g_gxState.tevSwapTable;
   for (u8 i = 0; i < g_gxState.numTevStages; ++i) {
     config.shaderConfig.tevStages[i] = g_gxState.tevStages[i];

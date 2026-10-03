@@ -513,7 +513,11 @@ struct ShaderConfig {
    * emitted. Takes the spare pad bit, so sizeof is unchanged and the
    * persisted pipeline cache stays valid. */
   u8 zCompLocBeforeTex : 1 = 0;
-  u8 pad2 = 0;
+  /* Positions arrive decoded to float3 in a vertex buffer (location 0)
+   * instead of being pulled from vbuf/abuf (AURORA_POS_DECODE). Takes a
+   * spare pad bit, so sizeof is unchanged. */
+  u8 decodedPos : 1 = 0;
+  u8 pad2 : 7 = 0;
   std::array<AttrConfig, MaxVtxAttr> attrs;
   std::array<TevSwap, MaxTevSwap> tevSwapTable;
   std::array<TevStage, MaxTevStages> tevStages;
@@ -530,6 +534,7 @@ struct ShaderConfig {
 static_assert(std::has_unique_object_representations_v<ShaderConfig>);
 
 struct PipelineConfig;
+bool pos_decode_enabled() noexcept;
 
 struct GXBindGroups {
   gfx::BindGroupRef textureBindGroup;

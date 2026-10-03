@@ -453,7 +453,9 @@ void initialize() {
                "Shared Vertex Buffer");
   createBuffer(g_resources.indexBuffer, wgpu::BufferUsage::Index | wgpu::BufferUsage::CopyDst, IndexBufferSize,
                "Shared Index Buffer");
-  createBuffer(g_resources.storageBuffer, wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst, StorageBufferSize,
+  // Vertex: decoded positions (AURORA_POS_DECODE) live here too.
+  createBuffer(g_resources.storageBuffer,
+               wgpu::BufferUsage::Storage | wgpu::BufferUsage::Vertex | wgpu::BufferUsage::CopyDst, StorageBufferSize,
                "Shared Storage Buffer");
 #ifdef __EMSCRIPTEN__
   g_browserStagingBytes.resize(StagingBufferSize);

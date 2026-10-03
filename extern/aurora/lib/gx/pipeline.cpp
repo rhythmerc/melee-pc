@@ -20,6 +20,13 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config, const gfx::Re
   const auto shader = build_shader(config.shaderConfig, layout);
   const auto label = fmt::format("GX Pipeline {:x}",
                                  xxh3_hash(layout.key, xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX))));
+  if (config.shaderConfig.decodedPos) {
+    static constexpr wgpu::VertexAttribute posAttr{
+        .format = wgpu::VertexFormat::Float32x3, .offset = 0, .shaderLocation = 0};
+    const std::array buffers{wgpu::VertexBufferLayout{
+        .stepMode = wgpu::VertexStepMode::Vertex, .arrayStride = 12, .attributeCount = 1, .attributes = &posAttr}};
+    return build_pipeline(config, layout, buffers, shader, label.c_str());
+  }
   return build_pipeline(config, layout, {}, shader, label.c_str());
 }
 
@@ -124,6 +131,9 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
     pass.SetBindGroup(2, gfx::find_bind_group(data.bindGroups.textureBindGroup));
   }
   pass.SetIndexBuffer(resources.indexBuffer, wgpu::IndexFormat::Uint16, data.idxRange.offset, data.idxRange.size);
+  if (data.posRange.size != 0) {
+    pass.SetVertexBuffer(0, resources.storageBuffer, data.posRange.offset, data.posRange.size);
+  }
   if (data.dstAlpha != UINT32_MAX) {
     const wgpu::Color color{0.f, 0.f, 0.f, data.dstAlpha / 255.f};
     pass.SetBlendConstant(&color);

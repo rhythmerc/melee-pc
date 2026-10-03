@@ -86,7 +86,8 @@ only; none of them fixes anything. User-facing knobs (`MELEE_BACKEND`,
 | `AURORA_XR_HANDS=0` | Leave OpenXR hand tracking off. |
 | `AURORA_XR_FLAT_LOG=1` | Every 10 s, flat passes that kept world/hidden draws because an EFB copy or snapshot reads them, with resolve rect sizes. |
 | `MELEE_XR_PS_GRAB_EVERY=<n>` | Pokémon Stadium's jumbotron grabs the flat frame one time in n in mixed reality (default 2; 1 every time). |
-| `MELEE_XR_PS_ZOOM_ONLY=0` | Pokémon Stadium's jumbotron shows its full-arena feed in mixed reality, not a player zoom. |
+| `MELEE_XR_PS_ZOOM_ONLY=1` | Pokémon Stadium's jumbotron shows a player zoom in mixed reality instead of its full-arena feed. |
+| `AURORA_POS_DECODE=0\|1` | Decode vertex positions on the CPU for hardware vertex fetch (default on Android) or pull them in the shader. |
 | `MELEE_XR_PTCL_TEST_HIDE=1` | Hide every particle from 3D and the flat frame (measuring their cost). |
 | `AURORA_XR_FLAT_CLIP=0` | Don't clip a flat pass kept for an EFB copy to the copied rect. |
 | `MELEE_PS_TEST_FORM=<5\|3\|4\|6\|9>`, `MELEE_PS_TEST_SCREEN=<n>` | Pin Pokémon Stadium's transformation (default, fire, grass, rock, water) or jumbotron state (test fixture; not for netplay). |

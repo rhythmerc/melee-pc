@@ -85,6 +85,10 @@ Range push_uniform(const T& data) {
   return push_uniform(reinterpret_cast<const uint8_t*>(&data), sizeof(T));
 }
 Range push_storage(const uint8_t* data, size_t length);
+// Into the storage pool at a chosen alignment (0 appends with no padding, so
+// a merged draw's range stays contiguous), and the pool's current end.
+Range push_storage_aligned(const uint8_t* data, size_t length, size_t alignment);
+size_t storage_tail() noexcept;
 template <typename T>
 Range push_storage(ArrayRef<T> data) {
   return push_storage(reinterpret_cast<const uint8_t*>(data.data()), data.size() * sizeof(T));

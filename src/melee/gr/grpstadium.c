@@ -680,18 +680,19 @@ typedef struct ImageDescWrapper {
 #define GET_WRAPPER(x) ((ImageDescWrapper*) HSD_GObjGetUserData(x))
 
 #ifdef TARGET_PC
-/* XR mixed reality: the jumbotron's full-arena feed shows a player zoom
- * instead. A feed grab keeps the whole flat world at full size; a zoom grab
- * is clipped to its 124x80 corner (AURORA_XR_FLAT_CLIP), and that was 6 to
- * 7 game fps on most forms. Only the drawing changes: the screen's states
- * and their RNG draws are the game's own, so netplay with non-XR builds is
- * unaffected. MELEE_XR_PS_ZOOM_ONLY=0 keeps the feed. */
+/* MELEE_XR_PS_ZOOM_ONLY=1, mixed reality: the jumbotron's full-arena feed
+ * shows a player zoom instead. A feed grab keeps the whole flat world at
+ * full size; a zoom grab is clipped to its 124x80 corner
+ * (AURORA_XR_FLAT_CLIP). Worth 6 to 7 game fps before positions were
+ * decoded on the CPU (AURORA_POS_DECODE), nothing measurable since, so off
+ * by default. Only the drawing changes: the screen's states and their RNG
+ * draws are the game's own, so netplay with non-XR builds is unaffected. */
 static bool grStadium_XrZoomOnly(void)
 {
     static int on = -1;
     if (on < 0) {
         const char* v = getenv("MELEE_XR_PS_ZOOM_ONLY");
-        on = v == NULL || *v != '0';
+        on = v != NULL && *v == '1';
     }
     return on && pc_xr_mixed_reality();
 }

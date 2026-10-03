@@ -391,8 +391,62 @@ static u32 calc_vtx_size(GXVtxFmt fmt) noexcept {
   return vtxSize;
 }
 
+// AURORA_POS_DECODE: positions decoded to float3 on the CPU, exactly as the
+// shader's fetch_* helpers read them (shader.cpp), for a vertex buffer the
+// GPU fetches in hardware. `raw` is the draw's GX vertex stream (big-endian
+// indices and direct data); indexed positions come from the bound array.
+static float decode_component(const u8* p, u8 compType, u8 frac, bool le) noexcept {
+  const auto u16v = [&] { return le ? u16(p[0] | (p[1] << 8)) : u16((p[0] << 8) | p[1]); };
+  const float scale = 1.f / static_cast<float>(1u << frac);
+  switch (compType) {
+  case GX_U8:
+    return static_cast<float>(p[0]) * scale;
+  case GX_S8:
+    return static_cast<float>(static_cast<s8>(p[0])) * scale;
+  case GX_U16:
+    return static_cast<float>(u16v()) * scale;
+  case GX_S16:
+    return static_cast<float>(static_cast<s16>(u16v())) * scale;
+  case GX_F32: {
+    u32 v = le ? (u32(p[0]) | (u32(p[1]) << 8) | (u32(p[2]) << 16) | (u32(p[3]) << 24))
+               : ((u32(p[0]) << 24) | (u32(p[1]) << 16) | (u32(p[2]) << 8) | u32(p[3]));
+    return std::bit_cast<float>(v);
+  }
+  default:
+    return 0.f;
+  }
+}
+
+static gfx::Range push_decoded_positions(const ShaderConfig& config, const u8* raw, u16 vtxCount,
+                                         size_t alignment) noexcept {
+  static std::vector<float> out;
+  const auto& m = config.attrs[GX_VA_POS];
+  const auto& array = g_gxState.arrays[GX_VA_POS];
+  const u32 compSize = m.compType == GX_F32 ? 4 : m.compType == GX_U16 || m.compType == GX_S16 ? 2 : 1;
+  out.resize(static_cast<size_t>(vtxCount) * 3);
+  for (u32 v = 0; v < vtxCount; ++v) {
+    const u8* vtx = raw + v * config.vtxStride + m.offset;
+    const u8* src = vtx;
+    bool le = false;
+    if (m.attrType == GX_INDEX8 || m.attrType == GX_INDEX16) {
+      const u32 idx = m.attrType == GX_INDEX8 ? vtx[0] : (u32(vtx[0]) << 8) | vtx[1];
+      const size_t at = static_cast<size_t>(idx) * m.stride;
+      if (array.data == nullptr || at + compSize * m.cnt > array.size) {
+        out[v * 3] = out[v * 3 + 1] = out[v * 3 + 2] = 0.f;
+        continue;
+      }
+      src = static_cast<const u8*>(array.data) + at;
+      le = m.le;
+    }
+    out[v * 3] = decode_component(src, m.compType, m.frac, le);
+    out[v * 3 + 1] = decode_component(src + compSize, m.compType, m.frac, le);
+    out[v * 3 + 2] = m.cnt >= 3 ? decode_component(src + 2 * compSize, m.compType, m.frac, le) : 0.f;
+  }
+  return gfx::push_storage_aligned(reinterpret_cast<const u8*>(out.data()), out.size() * sizeof(float), alignment);
+}
+
 static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
-                         u32 numIndices) noexcept {
+                         u32 numIndices, const u8* raw) noexcept {
   auto& state = g_gxState;
   auto& cache = sDrawCache;
 
@@ -552,6 +606,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   }
 
   cache.lastDrawFmt = fmt;
+  const gfx::Range posRange =
+      cache.config.shaderConfig.decodedPos ? push_decoded_positions(cache.config.shaderConfig, raw, vtxCount, 4) : gfx::Range{};
   gfx::PipelineRef xrPipeline = 0;
 #if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
   if (gfx::xr_recording_world()) {
@@ -584,6 +640,7 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .xrPipeline = xrPipeline,
       .vertRange = vertRange,
       .idxRange = idxRange,
+      .posRange = posRange,
       .uniformRange = cache.uniformRange,
       .immediateData = immediates,
 #ifdef __EMSCRIPTEN__
@@ -598,7 +655,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   });
 }
 
-static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange) noexcept {
+static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange,
+                                 const u8* raw) noexcept {
   ZoneScoped;
   u32 numIndices = 0;
   gfx::Range idxRange;
@@ -611,7 +669,7 @@ static void handle_draw_unmerged(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, g
     idxBuf.clear();
   }
 
-  push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, numIndices);
+  push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, numIndices, raw);
 }
 
 static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& reader) noexcept {
@@ -629,7 +687,11 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& 
   const bool cleanState = g_gxState.dirty == 0 && fmt == sDrawCache.lastDrawFmt && sDrawCache.lineMode == 0 &&
                           prim != GX_LINES && prim != GX_LINESTRIP && prim != GX_POINTS;
   auto* lastDraw = cleanState ? gfx::get_last_draw_command<DrawData>() : nullptr;
-  const bool canMerge = lastDraw != nullptr && lastDraw->instanceCount == 1;
+  // A draw with decoded positions merges only while its range can grow in
+  // place: nothing else may have been pushed to the storage pool since.
+  const bool canMerge = lastDraw != nullptr && lastDraw->instanceCount == 1 &&
+                        (lastDraw->posRange.size == 0 ||
+                         gfx::storage_tail() == size_t{lastDraw->posRange.offset} + lastDraw->posRange.size);
 
   // Push raw vertex data to buffer. Merged draws must remain contiguous with the previous range.
   const auto vertexData = reader.take(totalVtxBytes);
@@ -693,6 +755,10 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& 
             idxRange.offset);
     }
     lastDraw->vertRange.size += vertRange.size;
+    if (lastDraw->posRange.size != 0) {
+      lastDraw->posRange.size +=
+          push_decoded_positions(sDrawCache.config.shaderConfig, vertexData.data(), vtxCount, 0).size;
+    }
     if (lastDraw->idxRange.size == 0) {
       lastDraw->idxRange = idxRange;
     } else {
@@ -704,7 +770,7 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& 
     return;
   }
 
-  handle_draw_unmerged(prim, fmt, vtxCount, vertRange);
+  handle_draw_unmerged(prim, fmt, vtxCount, vertRange, vertexData.data());
 }
 
 static void handle_draw(u8 cmd, ByteReader& reader) noexcept {
@@ -925,7 +991,7 @@ void handle_aurora(ByteReader& reader) noexcept {
     const auto vertexData = reader.take(totalVtxBytes);
     const gfx::Range vertRange = gfx::push_verts(vertexData.data(), vertexData.size(), 4);
     if (indexCount != 0) {
-      push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, indexCount);
+      push_gx_draw(prim, fmt, vtxCount, vertRange, idxRange, indexCount, vertexData.data());
     }
   } else if (subCmd == GX_AURORA_DEBUG_GROUP_PUSH) {
     auto label = reader.read_string();

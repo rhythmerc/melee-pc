@@ -1002,6 +1002,11 @@ std::string build_shader_source(const ShaderConfig& config, uint32_t normalAttac
       continue;
     }
     // in_pnmtxidx and in_pos written above for line mode
+    if (attr == GX_VA_POS && config.decodedPos) {
+      vtxInAttrs += ",\n    @location(0) dpos: vec3f";
+      vtxXfrAttrsPre += fmt::format("\n    let {} = dpos;", vtx_attr(config, attr));
+      continue;
+    }
     if ((attr != GX_VA_PNMTXIDX && attr != GX_VA_POS) || config.lineMode == 0) {
       vtxXfrAttrsPre += fmt::format("\n    let {} = {};", vtx_attr(config, attr), attr_load(config, attr, vidxAttr));
     }
