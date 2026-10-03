@@ -111,6 +111,9 @@ struct Slot {
   uint64_t acquireSeq = 0;       // acquisition order
   PendingAccess fromDawn;        // set when Ready
   std::array<XrView, 2> views{}; // Stereo: the eye poses this image was rendered for
+  std::array<int32_t, 2> rect{};  // Stereo, dynamic resolution: the rendered size (0: all)
+  uint64_t tickFrame = 0;         // lock-step: the display frame of the tick that started its game frame
+  uint64_t readySeen = 0;         // XR thread: the display frame it was first seen Ready (0: not yet)
 
   // XR thread only.
   VkCommandBuffer cmd = VK_NULL_HANDLE;
@@ -137,6 +140,7 @@ struct Stream {
   std::chrono::steady_clock::time_point lastRelease{};
   uint64_t releases = 0;
   std::array<XrView, 2> shownViews{}; // Stereo: poses of the last released image
+  std::array<int32_t, 2> shownRect{};  // Stereo: its rendered size (0: all)
   // Debug dump (AURORA_XR_DUMP)
   VkBuffer dumpBuf = VK_NULL_HANDLE;
   VkDeviceMemory dumpMem = VK_NULL_HANDLE;
@@ -154,6 +158,39 @@ std::atomic<bool> g_stop{false};
 std::atomic<bool> g_sessionRunning{false};
 std::thread g_thread;
 std::array<Stream, kStreamCount> g_streams;
+
+// Dynamic resolution (AURORA_XR_DYNRES=1, multiview only): the stereo
+// swapchain is made at the largest scale, and each frame renders a corner of
+// it at `scale` times the runtime's recommended eye size, reported to the
+// compositor through imageRect. Render worker only, after setup.
+struct DynamicResolution {
+  bool on = false;
+  bool random = false; // AURORA_XR_DYNRES_RANDOM: a random scale every frame (testing)
+  float minScale = 0.8f, maxScale = 1.3f;
+  float scale = 1.f;
+  uint32_t recWidth = 0, recHeight = 0; // recommended eye size (times AURORA_XR_EYE_SCALE)
+  // Controller (update_dynamic_resolution): the frame's GPU time modeled as
+  // fixed + perPixel * scale^2, the scale chosen to fit the target.
+  double targetNs = 12.0e6; // per game frame, compositor preemptions included
+  double loadNs = 9.0e6;    // below this a miss is taken for the CPU's
+  double emaNs = 0;         // frame GPU time at the current scale
+  double perPixelNs = 0;    // d(frame ns) / d(scale^2), learned from settled scale changes
+  uint64_t seenSeq = 0;     // R.timing.frameSeq last read
+  int settle = 0;           // frames measured since the last scale change
+  float settledScale = 0;   // the last settled point, for learning perPixelNs
+  double settledNs = 0;
+  int sinceStep = 0;        // frames since the last step up
+  std::array<uint64_t, 4> recentMisses{};
+  uint32_t recentIndex = 0;
+  uint64_t frameCount = 0;
+  std::chrono::steady_clock::time_point lastFrame{};
+  // Logged every 10 s.
+  double scaleSum = 0, nsSum = 0;
+  uint32_t frames = 0, nsFrames = 0, panics = 0, cpuMisses = 0, lateImages = 0;
+  uint32_t lateSeen = 0;
+  float lowest = 99.f, highest = 0.f;
+  std::chrono::steady_clock::time_point lastLog{};
+} g_dynres;
 // The game framebuffer's format and sample count, read by begin_frame before
 // the XR thread starts: when they allow it, both eyes render straight into
 // the 3D swapchain image, which then has to be in the framebuffer's format.
@@ -177,6 +214,10 @@ std::mutex g_paceMutex;
 std::condition_variable g_paceCv;
 uint64_t g_paceTick = 0;
 std::atomic<int> g_displayPerGameFrame{0};
+std::atomic<uint64_t> g_lastTickFrame{0}; // the display frame of the newest tick
+// 3D images the headset held past their display frames during a fight (XR
+// thread): a missed frame as the user sees it. Dynamic resolution reads it.
+std::atomic<uint32_t> g_stereoLate{0};
 
 // Where the arena sits in the room (meters, starting head space): A =
 // T(pos) · R_y(yaw) · S(scale) takes game units to the room. The XR thread
@@ -281,6 +322,7 @@ struct Bridge {
   bool hasColorScaleBias = false;
 
   uint64_t framesShown = 0, fightFrames = 0;
+  std::array<uint64_t, 4> shownHistogram{}; // 3D images shown for 1, 2, 3, 4+ display frames
   std::array<uint64_t, kStreamCount> releasedSinceStats{};
   std::chrono::steady_clock::time_point statsStart;
 };
@@ -582,8 +624,30 @@ bool size_stereo_stream() {
   }
   const float scale = std::clamp(env_float("AURORA_XR_EYE_SCALE", 1.f), 0.25f, 2.f);
   const auto even = [](float v) { return (static_cast<uint32_t>(v + 0.5f) + 1u) & ~1u; };
-  const uint32_t eyeW = even(static_cast<float>(views[0].recommendedImageRectWidth) * scale);
-  const uint32_t eyeH = even(static_cast<float>(views[0].recommendedImageRectHeight) * scale);
+  auto& dr = g_dynres;
+  dr.recWidth = even(static_cast<float>(views[0].recommendedImageRectWidth) * scale);
+  dr.recHeight = even(static_cast<float>(views[0].recommendedImageRectHeight) * scale);
+  // Multiview only: the side-by-side path packs both eyes in one image.
+#ifdef __ANDROID__
+  dr.on = g_multiview && env_flag("AURORA_XR_DYNRES", true); // measured there
+#else
+  dr.on = g_multiview && env_flag("AURORA_XR_DYNRES", false);
+#endif
+  if (dr.on) {
+    dr.minScale = std::clamp(env_float("AURORA_XR_DYNRES_MIN", 0.8f), 0.5f, 1.f);
+    dr.maxScale = std::clamp(env_float("AURORA_XR_DYNRES_MAX", 1.3f), 1.f, 1.6f);
+    // 13.5 filled the GPU enough for the XR thread to miss submits.
+    dr.targetNs = std::clamp(env_float("AURORA_XR_DYNRES_TARGET_MS", 12.f), 3.f, 16.f) * 1.0e6;
+    dr.loadNs = std::clamp(env_float("AURORA_XR_DYNRES_LOAD_MS", 9.f), 0.f, 16.f) * 1.0e6;
+    dr.random = env_flag("AURORA_XR_DYNRES_RANDOM", false);
+    dr.scale = 1.f;
+  }
+  const float alloc = dr.on ? dr.maxScale : 1.f;
+  const uint32_t eyeW = even(static_cast<float>(dr.recWidth) * alloc);
+  const uint32_t eyeH = even(static_cast<float>(dr.recHeight) * alloc);
+  if (dr.on)
+    Log.info("Dynamic resolution: {:.2f}-{:.2f} of {}x{} per eye, frame GPU target {:.1f} ms", dr.minScale,
+             dr.maxScale, dr.recWidth, dr.recHeight, dr.targetNs / 1.0e6);
   g_streams[kStereo].width = g_multiview ? eyeW : eyeW * 2;
   g_streams[kStereo].height = eyeH;
   g_streams[kStereo].layers = g_multiview ? 2 : 1;
@@ -950,6 +1014,62 @@ bool acquire_ahead(Stream& st) {
   return true;
 }
 
+// Fixed-latency presentation (XR thread). Under lock-step pacing a game
+// frame starts on a tick and its 3D and HUD images are released `latency`
+// display frames after that tick, not as soon as they're ready: released as
+// soon as ready, images finishing right around a frame boundary alternated
+// between being shown 3 display frames and 1 instead of 2 and 2 (about 20
+// such pairs a second on Battlefield). `latency` is the smallest number of
+// display frames by which 97% of recent 3D images were ready, at most one
+// past a game frame's display frames; it rises at once and falls after four
+// steady windows. On with dynamic resolution (see release_ready);
+// AURORA_XR_FIXED_LATENCY=0 turns it off, =<n> forces it on at n.
+struct Presentation {
+  int forced = -1; // AURORA_XR_FIXED_LATENCY
+  int latency = 0;
+  std::array<uint8_t, 120> samples{};
+  size_t count = 0, next = 0;
+  int sinceUpdate = 0, steadyLower = 0;
+  uint64_t held = 0; // images held for their slot (logged)
+} g_present;
+
+void note_ready_latency(uint64_t lat) {
+  auto& p = g_present;
+  p.samples[p.next++ % p.samples.size()] = static_cast<uint8_t>(std::min<uint64_t>(lat, 15));
+  p.count = std::min(p.count + 1, p.samples.size());
+  if (p.forced >= 0) {
+    p.latency = p.forced;
+    return;
+  }
+  if (++p.sinceUpdate < 30)
+    return;
+  p.sinceUpdate = 0;
+  std::array<int, 16> hist{};
+  for (size_t i = 0; i < p.count; ++i)
+    ++hist[p.samples[i]];
+  int k = 0;
+  for (int acc = 0; k < 16; ++k) {
+    acc += hist[k];
+    if (acc * 100 >= static_cast<int>(p.count) * 97)
+      break;
+  }
+  // At most one display frame past the ideal: holding images longer ties up
+  // the swapchain's few images, and the render worker then finds none free
+  // (Pokémon Stadium rock with four CPUs climbed to 4 and missed frames).
+  k = std::min(k, std::max(g_displayPerGameFrame.load(), 1) + 1);
+  if (k > p.latency) {
+    p.latency = k;
+    p.steadyLower = 0;
+  } else if (k < p.latency) {
+    if (++p.steadyLower >= 4) {
+      p.latency = k;
+      p.steadyLower = 0;
+    }
+  } else {
+    p.steadyLower = 0;
+  }
+}
+
 // Releases drawn images in acquisition order: waits (on the GPU, on our
 // queue) for Dawn's semaphores, puts the image back in the layout the
 // runtime expects, then hands it to the runtime.
@@ -959,6 +1079,7 @@ bool release_ready(Stream& st, bool& released) {
     int index = -1;
     PendingAccess fromDawn;
     std::array<XrView, 2> views{};
+    std::array<int32_t, 2> rect{};
     {
       std::lock_guard lock{g_mutex};
       uint64_t oldest = UINT64_MAX;
@@ -971,9 +1092,30 @@ bool release_ready(Stream& st, bool& released) {
       }
       if (index < 0 || st.slots[index].state != SlotState::Ready)
         return true;
+      // Fixed-latency presentation: hold a 3D or HUD image for its slot.
+      auto& sl = st.slots[index];
+      // On with dynamic resolution, which keeps frames on time: without it,
+      // frames running late on an overloaded stage were held into slots the
+      // render worker then lacked (Pokémon Stadium rock, four CPUs: 58.2 ->
+      // 55.5 game fps). AURORA_XR_FIXED_LATENCY=<n> forces it on.
+      const bool fixedLatency = g_present.forced > 0 || (g_present.forced < 0 && g_dynres.on);
+      if (fixedLatency && g_displayPerGameFrame > 0 && sl.tickFrame != 0 &&
+          (&st == &g_streams[kStereo] || &st == &g_streams[kHud])) {
+        if (sl.readySeen == 0) {
+          sl.readySeen = B.displayFrame;
+          if (&st == &g_streams[kStereo] && B.displayFrame >= sl.tickFrame)
+            note_ready_latency(B.displayFrame - sl.tickFrame);
+        }
+        if (B.displayFrame < sl.tickFrame + static_cast<uint64_t>(g_present.latency)) {
+          if (&st == &g_streams[kStereo] && sl.readySeen == B.displayFrame)
+            ++g_present.held;
+          return true;
+        }
+      }
       fromDawn = std::move(st.slots[index].fromDawn);
       st.slots[index].fromDawn = {};
       views = st.slots[index].views;
+      rect = st.slots[index].rect;
     }
     Slot& s = st.slots[index];
     retire_slot(st, s, index);
@@ -1048,38 +1190,43 @@ bool release_ready(Stream& st, bool& released) {
     st.haveImage = true;
     st.lastRelease = std::chrono::steady_clock::now();
     st.shownViews = views;
+    st.shownRect = rect;
     ++st.releases;
     released = true;
   }
 }
 
-// CPU and GPU clock levels (XR_EXT_performance_settings), off by default.
-// On a Quest 3 a sustained-high request succeeded but left the GPU at the
-// level the runtime already picked (2, 640 MHz) and changed nothing measurable
-// (Temple 4P, 2026-10-01), so the runtime keeps its dynamic clocks.
-// AURORA_XR_PERF_GPU / AURORA_XR_PERF_CPU = low, high, boost opt in.
+// CPU and GPU clock levels (XR_EXT_performance_settings), per domain:
+// AURORA_XR_PERF_CPU / AURORA_XR_PERF_GPU = off, low, high, boost.
+// - CPU: high by default on Android. Light scenes let the CPU drop to its
+//   lowest clock, and the XR thread then misses its 120 Hz submits: 2-player
+//   Battlefield showed 6-7 stale frames a second at CPU level 2 and 0.2 at
+//   level 3 with the request (2026-10-03).
+// - GPU: the runtime's own by default. A sustained-high request changed
+//   nothing: passthrough caps a Quest 3's GPU at level 2 (docs/quest-xr.md).
 void request_performance_levels() {
   if (!B.setPerformanceLevel) {
     Log.info("XR_EXT_performance_settings unavailable; the runtime picks clock levels");
     return;
   }
-  const auto level = [](const char* name) {
+  const auto request = [](const char* name, const char* fallback, XrPerfSettingsDomainEXT domain,
+                          const char* label) {
     const char* v = std::getenv(name);
-    const std::string_view s = v != nullptr ? v : "high";
-    if (s == "low")
-      return XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT;
-    if (s == "boost")
-      return XR_PERF_SETTINGS_LEVEL_BOOST_EXT;
-    return XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT;
+    const std::string_view s = v != nullptr && *v != '\0' ? v : fallback;
+    if (s == "off")
+      return;
+    const auto lvl = s == "low"     ? XR_PERF_SETTINGS_LEVEL_SUSTAINED_LOW_EXT
+                     : s == "boost" ? XR_PERF_SETTINGS_LEVEL_BOOST_EXT
+                                    : XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT;
+    const XrResult r = B.setPerformanceLevel(B.session, domain, lvl);
+    Log.info("Performance level requested: {} {} ({})", label, static_cast<int>(lvl), static_cast<int>(r));
   };
-  const char* gpuEnv = std::getenv("AURORA_XR_PERF_GPU");
-  if (gpuEnv == nullptr || *gpuEnv == '\0' || std::string_view{gpuEnv} == "off")
-    return; // the runtime's own clock levels
-  const auto cpu = level("AURORA_XR_PERF_CPU"), gpu = level("AURORA_XR_PERF_GPU");
-  const XrResult rc = B.setPerformanceLevel(B.session, XR_PERF_SETTINGS_DOMAIN_CPU_EXT, cpu);
-  const XrResult rg = B.setPerformanceLevel(B.session, XR_PERF_SETTINGS_DOMAIN_GPU_EXT, gpu);
-  Log.info("Performance levels requested: CPU {} ({}), GPU {} ({})", static_cast<int>(cpu), static_cast<int>(rc),
-           static_cast<int>(gpu), static_cast<int>(rg));
+#ifdef __ANDROID__
+  request("AURORA_XR_PERF_CPU", "high", XR_PERF_SETTINGS_DOMAIN_CPU_EXT, "CPU");
+#else
+  request("AURORA_XR_PERF_CPU", "off", XR_PERF_SETTINGS_DOMAIN_CPU_EXT, "CPU");
+#endif
+  request("AURORA_XR_PERF_GPU", "off", XR_PERF_SETTINGS_DOMAIN_GPU_EXT, "GPU");
 }
 
 void request_refresh_rate() {
@@ -1698,6 +1845,7 @@ bool render_xr_frame() {
     {
       std::lock_guard lock{g_paceMutex};
       ++g_paceTick;
+      g_lastTickFrame = B.displayFrame;
     }
     g_paceCv.notify_all();
   }
@@ -1718,6 +1866,21 @@ bool render_xr_frame() {
   const auto& stereo = g_streams[kStereo];
   const auto& hud = g_streams[kHud];
   const bool fight = stereo.haveImage && now - stereo.lastRelease < std::chrono::milliseconds(250);
+  {
+    // Each 3D image is due for g_displayPerGameFrame display frames under
+    // lock-step pacing; one shown longer is late. Counted once per image.
+    static uint64_t lastReleases = 0;
+    static int shownFor = 0;
+    const int due = g_displayPerGameFrame.load();
+    if (stereo.releases != lastReleases) {
+      if (fight && !g_fightPaused && shownFor > 0)
+        ++B.shownHistogram[std::min(shownFor, 4) - 1];
+      lastReleases = stereo.releases;
+      shownFor = 0;
+    }
+    if (fight && due > 0 && !g_fightPaused && ++shownFor == due + 1)
+      ++g_stereoLate;
+  }
   const bool pointing = fight && g_fightPaused && B.focused;
   locate_hands(fs.predictedDisplayTime);
   update_grab(pointing);
@@ -1748,7 +1911,11 @@ bool render_xr_frame() {
       projViews[i].fov = stereo.shownViews[i].fov;
       projViews[i].subImage.swapchain = stereo.swapchain;
       const int32_t x = stereo.layers > 1 ? 0 : i * eyeW;
-      projViews[i].subImage.imageRect = {{x, 0}, {eyeW, static_cast<int32_t>(stereo.height)}};
+      // Dynamic resolution: only the rendered corner, which the compositor
+      // stretches over the eye's field of view.
+      const bool part = stereo.shownRect[0] > 0 && stereo.shownRect[1] > 0;
+      projViews[i].subImage.imageRect = {
+          {x, 0}, {part ? stereo.shownRect[0] : eyeW, part ? stereo.shownRect[1] : static_cast<int32_t>(stereo.height)}};
       projViews[i].subImage.imageArrayIndex = stereo.layers > 1 ? static_cast<uint32_t>(i) : 0;
     }
     proj.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
@@ -1803,10 +1970,15 @@ bool render_xr_frame() {
 
   const double secs = std::chrono::duration<double>(now - B.statsStart).count();
   if (secs >= 10.0) {
-    Log.info("{:.1f} display fps ({:.0f}% 3D); frames/s released: screen {:.1f}, 3D {:.1f}, HUD {:.1f}",
+    Log.info("{:.1f} display fps ({:.0f}% 3D); frames/s released: screen {:.1f}, 3D {:.1f}, HUD {:.1f}; "
+             "3D images shown 1/2/3/4+ display frames: {}/{}/{}/{}; presented {} display frames after the tick "
+             "({} held)",
              B.framesShown / secs, 100.0 * B.fightFrames / std::max<uint64_t>(B.framesShown, 1),
              B.releasedSinceStats[kScreen] / secs, B.releasedSinceStats[kStereo] / secs,
-             B.releasedSinceStats[kHud] / secs);
+             B.releasedSinceStats[kHud] / secs, B.shownHistogram[0], B.shownHistogram[1], B.shownHistogram[2],
+             B.shownHistogram[3], g_present.latency, g_present.held);
+    B.shownHistogram = {};
+    g_present.held = 0;
     B.framesShown = 0;
     B.fightFrames = 0;
     B.releasedSinceStats = {};
@@ -2054,7 +2226,10 @@ wgpu::Texture acquire_slot(Stream& st, std::chrono::milliseconds wait = std::chr
   bs.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
   wgpu::SharedTextureMemoryBeginAccessDescriptor bd{};
   bd.nextInChain = &bs;
-  bd.initialized = false;
+  // Dynamic resolution renders a corner of the stereo image; marked
+  // initialized, the rest doesn't force Dawn to a full render area (the
+  // compositor only reads the corner, through imageRect).
+  bd.initialized = &st == &g_streams[kStereo] && g_dynres.on;
   if (s.stm.BeginAccess(s.texture, &bd) != wgpu::Status::Success) {
     Log.error("BeginAccess failed ({}); XR presentation disabled", st.name);
     g_phase = Phase::Failed;
@@ -2064,7 +2239,8 @@ wgpu::Texture acquire_slot(Stream& st, std::chrono::milliseconds wait = std::chr
   return s.texture;
 }
 
-void release_slot(Stream& st, const std::array<XrView, 2>* views) {
+void release_slot(Stream& st, const std::array<XrView, 2>* views, std::array<int32_t, 2> rect = {},
+                  uint64_t tickFrame = 0) {
   if (st.renderingSlot < 0)
     return;
   Slot& s = st.slots[st.renderingSlot];
@@ -2096,6 +2272,9 @@ void release_slot(Stream& st, const std::array<XrView, 2>* views) {
   s.fromDawn = std::move(release);
   if (views != nullptr)
     s.views = *views;
+  s.rect = rect;
+  s.tickFrame = tickFrame;
+  s.readySeen = 0;
   s.state = SlotState::Ready;
 }
 
@@ -2222,9 +2401,12 @@ struct ReplayTarget {
 // zone is a pass's begin/end pair, averaged and logged every 10 s.
 // kZone3D times both eyes on the direct path (one pass), or the left eye on
 // the fallback path, where kZone3DRight is the right eye.
-enum TimingZone : uint32_t { kZone3D, kZone3DRight, kZoneCompose3D, kZoneHud, kZoneComposeHud, kZoneCount };
+// kZoneFrame has only a begin, written by the frame's first flat pass; the
+// whole frame runs from it to the last end written (the GPU time dynamic
+// resolution steers by, compositor preemptions included).
+enum TimingZone : uint32_t { kZone3D, kZone3DRight, kZoneCompose3D, kZoneHud, kZoneComposeHud, kZoneFrame, kZoneCount };
 constexpr std::array<const char*, kZoneCount> kZoneNames{"3D eyes", "3D right eye (fallback)", "3D compose", "HUD",
-                                                         "HUD compose"};
+                                                         "HUD compose", "frame"};
 
 struct GpuTiming {
   wgpu::QuerySet queries;
@@ -2241,6 +2423,10 @@ struct GpuTiming {
   std::array<double, kZoneCount> ns{};
   std::array<uint64_t, kZoneCount> samples{};
   uint64_t frames = 0;
+  double last3DNs = 0;    // the newest frame's kZone3D
+  double lastFrameNs = 0; // the newest frame, first flat pass to last XR pass (dynamic resolution)
+  uint64_t frameSeq = 0;  // frames measured, so the controller sees each once
+  std::atomic<bool> frameBegun{false}; // this frame's first pass took the kZoneFrame begin
   uint64_t worldDraws = 0, worldFrames = 0; // draws replayed for the eyes (both views)
   std::chrono::steady_clock::time_point lastLog = std::chrono::steady_clock::now();
   std::array<wgpu::PassTimestampWrites, kZoneCount> writes{};
@@ -2270,6 +2456,8 @@ struct Renderer3D {
   // one, and the flat frame is still nobody's to see.
   bool missedStereo = false;
   uint32_t directSamples = 0; // g_xrSamples the direct attachments were made for
+  std::array<int32_t, 2> renderedRect{}; // dynamic resolution: this frame's eye size (0: all)
+  uint64_t renderedTick = 0;              // the frame's pacing tick (FramePacket::xrTickFrame)
   bool failed = false;
   GpuTiming timing;
   // Direct path: both eyes straight into the shared 3D image, one pass.
@@ -2309,6 +2497,12 @@ void setup_timing() {
   }
   for (uint32_t z = 0; z < kZoneCount; ++z)
     t.writes[z] = {.querySet = t.queries, .beginningOfPassWriteIndex = z * 2, .endOfPassWriteIndex = z * 2 + 1};
+  t.writes[kZoneFrame].endOfPassWriteIndex = wgpu::kQuerySetIndexUndefined;
+  gfx::set_xr_first_pass_timing([]() -> const wgpu::PassTimestampWrites* {
+    if (!g_sessionRunning || R.timing.frameBegun.exchange(true))
+      return nullptr;
+    return zone_writes(kZoneFrame);
+  });
 }
 
 // After the frame's passes are encoded: resolve this frame's timestamps into
@@ -2329,6 +2523,7 @@ void resolve_timing(const wgpu::CommandEncoder& cmd) {
     break;
   }
   t.zones = 0;
+  t.frameBegun = false;
 }
 
 void map_timing() {
@@ -2345,9 +2540,21 @@ void map_timing() {
         if (status == wgpu::MapAsyncStatus::Success) {
           const auto* ts = static_cast<const uint64_t*>(rb.buffer.GetConstMappedRange());
           for (uint32_t z = 0; z < kZoneCount; ++z) {
-            if ((rb.zones & (1u << z)) && ts[z * 2 + 1] > ts[z * 2]) {
+            if (z != kZoneFrame && (rb.zones & (1u << z)) && ts[z * 2 + 1] > ts[z * 2]) {
               t.ns[z] += static_cast<double>(ts[z * 2 + 1] - ts[z * 2]);
               ++t.samples[z];
+              if (z == kZone3D)
+                t.last3DNs = static_cast<double>(ts[z * 2 + 1] - ts[z * 2]);
+            }
+          }
+          if (rb.zones & (1u << kZoneFrame)) {
+            uint64_t end = 0;
+            for (uint32_t z = 0; z < kZoneCount; ++z)
+              if (z != kZoneFrame && (rb.zones & (1u << z)))
+                end = std::max(end, ts[z * 2 + 1]);
+            if (end > ts[kZoneFrame * 2]) {
+              t.lastFrameNs = static_cast<double>(end - ts[kZoneFrame * 2]);
+              ++t.frameSeq;
             }
           }
           ++t.frames;
@@ -2659,6 +2866,106 @@ void compose(const wgpu::CommandEncoder& cmd, const wgpu::Texture& dst, std::ini
 // encoded. Re-draws the fight per eye and the HUD into the shared images.
 void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame);
 
+// Dynamic resolution's controller, once per 3D frame (render worker), after
+// docs on dynamic resolution practice: steer by the whole frame's GPU time
+// (timestamps from the first flat pass to the last XR pass, compositor
+// preemptions included, so the jumbotron's grab or anything else in the frame
+// counts), model it as fixed + perPixel * scale^2, and pick the largest scale
+// predicted to fit the target. Down at once and far enough; up quickly, a
+// little each frame. A missed swapchain image is a panic: 10% down, unless
+// the GPU was lightly loaded (then the CPU missed, and only a run of misses
+// counts). Images the headset held long (g_stereoLate) are only logged.
+void update_dynamic_resolution(bool missed) {
+  auto& dr = g_dynres;
+  const auto now = std::chrono::steady_clock::now();
+  ++dr.frameCount;
+  if (dr.random) {
+    // Exercise every size: resolution-dependent bugs show up as flicker.
+    dr.scale = dr.minScale + (dr.maxScale - dr.minScale) * static_cast<float>(std::rand() % 1000) / 999.f;
+  } else {
+    const auto& t = R.timing;
+    if (t.frameSeq != dr.seenSeq && t.lastFrameNs > 0) {
+      dr.seenSeq = t.frameSeq;
+      // Readbacks lag a few frames: give a new scale time to show.
+      if (++dr.settle > 4) {
+        dr.emaNs = dr.emaNs == 0 ? t.lastFrameNs : dr.emaNs * 0.85 + t.lastFrameNs * 0.15;
+        dr.nsSum += t.lastFrameNs;
+        ++dr.nsFrames;
+      }
+      // Settled at a scale for a while: a point for the per-pixel slope.
+      if (dr.settle == 40) {
+        const double s2 = static_cast<double>(dr.scale) * dr.scale;
+        const double p2 = static_cast<double>(dr.settledScale) * dr.settledScale;
+        if (dr.settledScale > 0 && std::abs(s2 - p2) > 0.05) {
+          const double slope = std::clamp((dr.emaNs - dr.settledNs) / (s2 - p2), 0.0, dr.emaNs / s2);
+          dr.perPixelNs = dr.perPixelNs == 0 ? slope : dr.perPixelNs * 0.7 + slope * 0.3;
+        }
+        dr.settledScale = dr.scale;
+        dr.settledNs = dr.emaNs;
+      }
+    }
+    // Until a slope is learned, assume half the frame scales with pixels.
+    const double s2 = static_cast<double>(dr.scale) * dr.scale;
+    const double b = dr.perPixelNs > 0 ? dr.perPixelNs : 0.5 * dr.emaNs / s2;
+    // A missed 3D image with the GPU under load is the GPU's; otherwise only
+    // a run of three within a second counts. (The render worker's own cadence
+    // jitters, so a long gap between 3D frames is no signal.)
+    bool panic = missed;
+    if (panic) {
+      dr.recentMisses[dr.recentIndex++ % dr.recentMisses.size()] = dr.frameCount;
+      if (dr.emaNs > 0 && dr.emaNs < dr.loadNs) {
+        int recent = 0;
+        for (uint64_t f : dr.recentMisses)
+          recent += f != 0 && dr.frameCount - f < 60 ? 1 : 0;
+        if (recent < 3) {
+          panic = false;
+          ++dr.cpuMisses;
+        }
+      }
+    }
+    float next = dr.scale;
+    if (panic) {
+      next = dr.scale * 0.9f;
+      ++dr.panics;
+    } else if (dr.emaNs > 0 && b > 0 && dr.settle > 4) {
+      const double want2 = s2 + (dr.targetNs - dr.emaNs) / b;
+      const float want = static_cast<float>(std::sqrt(std::max(want2, 0.0)));
+      if (want < dr.scale - 0.005f)
+        next = want; // all the way down at once
+      else if (want > dr.scale + 0.005f && ++dr.sinceStep >= 3)
+        next = std::min(want, dr.scale + 0.01f); // up a little every few frames
+    }
+    next = std::clamp(next, dr.minScale, dr.maxScale);
+    if (std::abs(next - dr.scale) > 0.001f) {
+      if (dr.emaNs > 0)
+        dr.emaNs += b * (static_cast<double>(next) * next - s2); // the model's guess until measured
+      dr.scale = next;
+      dr.settle = 0;
+      dr.sinceStep = 0;
+    }
+  }
+  dr.lastFrame = now;
+  const uint32_t late = g_stereoLate.load();
+  dr.lateImages += late - dr.lateSeen;
+  dr.lateSeen = late;
+  dr.scaleSum += dr.scale;
+  ++dr.frames;
+  dr.lowest = std::min(dr.lowest, dr.scale);
+  dr.highest = std::max(dr.highest, dr.scale);
+  if (now - dr.lastLog >= std::chrono::seconds(10)) {
+    if (dr.lastLog.time_since_epoch().count() != 0 && dr.frames > 0)
+      Log.info("Dynamic resolution: scale {:.2f} average ({:.2f}-{:.2f}); frame GPU {:.1f} ms average, {:.2f} ms "
+               "per scale^2; {} panics, {} misses taken for the CPU; {} images held long",
+               dr.scaleSum / dr.frames, dr.lowest, dr.highest, dr.nsFrames ? dr.nsSum / dr.nsFrames / 1.0e6 : 0.0,
+               dr.perPixelNs / 1.0e6, dr.panics, dr.cpuMisses, dr.lateImages);
+    dr.scaleSum = dr.nsSum = 0;
+    dr.frames = dr.nsFrames = dr.panics = dr.cpuMisses = dr.lateImages = 0;
+    dr.lowest = 99.f;
+    dr.highest = 0.f;
+    dr.lastLog = now;
+  }
+}
+
 // Frame hook: the 3D views, then whether the next frame's flat world draws
 // are needed (not while fights go to the headset with no flat present).
 // A missed 3D image counts too: drawing the flat world then made the next
@@ -2666,6 +2973,8 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
 void render_3d(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame) {
   R.renderedStereo = false;
   R.missedStereo = false;
+  R.renderedRect = {};
+  R.renderedTick = frame.xrTickFrame;
   render_3d_frame(cmd, frame);
   gfx::set_xr_drop_flat_world((R.renderedStereo || R.missedStereo) && g_skipPresent &&
                               !env_flag("AURORA_XR_FLAT_WORLD", false));
@@ -2783,7 +3092,19 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
       t.depthStore = wgpu::StoreOp::Discard;
       if (g_multiview) {
         // One replay draws both eyes: view mask 0b11 over the image's two layers.
-        t.views[0] = {R.mvGroups, 0.f, 0.f, static_cast<float>(stereo.width), static_cast<float>(stereo.height)};
+        float vw = static_cast<float>(stereo.width), vh = static_cast<float>(stereo.height);
+        if (g_dynres.on) {
+          update_dynamic_resolution(false);
+          const auto even = [](float v) { return (static_cast<uint32_t>(v + 0.5f) + 1u) & ~1u; };
+          const uint32_t rw = std::min(stereo.width, even(static_cast<float>(g_dynres.recWidth) * g_dynres.scale));
+          const uint32_t rh = std::min(stereo.height, even(static_cast<float>(g_dynres.recHeight) * g_dynres.scale));
+          vw = static_cast<float>(rw);
+          vh = static_cast<float>(rh);
+          t.renderAreaWidth = rw;
+          t.renderAreaHeight = rh;
+          R.renderedRect = {static_cast<int32_t>(rw), static_cast<int32_t>(rh)};
+        }
+        t.views[0] = {R.mvGroups, 0.f, 0.f, vw, vh};
         t.viewCount = 1;
         t.viewMask = 0b11;
       } else {
@@ -2807,6 +3128,8 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
       // No 3D image this frame: still a fight, so don't present the flat
       // frame nobody sees (the headset keeps showing the last 3D image).
       R.missedStereo = true;
+      if (g_dynres.on)
+        update_dynamic_resolution(true);
       g_skipPresent = !env_flag("AURORA_XR_FIGHT_SCREEN", false);
     }
   } else {
@@ -2867,6 +3190,10 @@ void add_required_features(const wgpu::Adapter& adapter, std::vector<wgpu::Featu
   if (adapter.HasFeature(wgpu::FeatureName::ChromiumExperimentalMultiview) &&
       std::find(features.begin(), features.end(), wgpu::FeatureName::ChromiumExperimentalMultiview) == features.end())
     features.push_back(wgpu::FeatureName::ChromiumExperimentalMultiview);
+  // Dynamic resolution's partial render areas (AURORA_XR_DYNRES).
+  if (adapter.HasFeature(wgpu::FeatureName::RenderPassRenderArea) &&
+      std::find(features.begin(), features.end(), wgpu::FeatureName::RenderPassRenderArea) == features.end())
+    features.push_back(wgpu::FeatureName::RenderPassRenderArea);
   // MSAA eye attachments that never leave tile memory (AURORA_XR_MSAA).
   if (adapter.HasFeature(wgpu::FeatureName::TransientAttachments) &&
       std::find(features.begin(), features.end(), wgpu::FeatureName::TransientAttachments) == features.end())
@@ -2926,6 +3253,12 @@ wgpu::Texture begin_frame(uint32_t width, uint32_t height) noexcept {
     // Multiview needs the direct path (single-sample framebuffer).
     g_multiview = webgpu::g_device.HasFeature(wgpu::FeatureName::ChromiumExperimentalMultiview) &&
                   g_sceneSamples == 1 && env_flag("AURORA_XR_MULTIVIEW", true);
+    {
+      const char* v = std::getenv("AURORA_XR_FIXED_LATENCY");
+      g_present.forced = v != nullptr && *v != '\0' ? std::max(0, std::atoi(v)) : -1;
+      if (g_present.forced > 0)
+        g_present.latency = g_present.forced;
+    }
     // AURORA_XR_MSAA=<1|2|4>: samples for the 3D eyes alone (the flat frame
     // keeps its own), resolved into the shared image at the end of the pass.
     // 4 by default on Android, where it's measured.
@@ -2987,9 +3320,9 @@ void end_frame() noexcept {
   g_skipPresent = false;
   map_timing();
   release_slot(g_streams[kScreen], nullptr);
-  release_slot(g_streams[kStereo], R.renderedStereo ? &R.renderedViews : nullptr);
+  release_slot(g_streams[kStereo], R.renderedStereo ? &R.renderedViews : nullptr, R.renderedRect, R.renderedTick);
   R.renderedStereo = false;
-  release_slot(g_streams[kHud], nullptr);
+  release_slot(g_streams[kHud], nullptr, {}, R.renderedTick);
 }
 
 bool prepare_device() noexcept {
@@ -3068,7 +3401,11 @@ extern "C" bool aurora_xr_pace(void) {
   std::unique_lock lock{g_paceMutex};
   const uint64_t tick = g_paceTick;
   // Bounded: a paused or stopped session falls back to the game's own timer.
-  return g_paceCv.wait_for(lock, std::chrono::milliseconds(50), [&] {
+  const bool ticked = g_paceCv.wait_for(lock, std::chrono::milliseconds(50), [&] {
     return g_paceTick != tick || g_displayPerGameFrame <= 0 || !g_sessionRunning;
   }) && g_paceTick != tick;
+  // The frame the game records next carries this tick (fixed-latency
+  // presentation; 0 without one).
+  aurora::gfx::set_xr_game_frame_tick(ticked ? g_lastTickFrame.load() : 0);
+  return ticked;
 }

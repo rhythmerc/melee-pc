@@ -30,6 +30,9 @@ struct XrReplayTarget {
   float clearDepth = 0.f;
   wgpu::StoreOp depthStore = wgpu::StoreOp::Store; // Discard when nothing reads it after
   wgpu::StoreOp colorStore = wgpu::StoreOp::Store; // Discard for MSAA attachments resolved in the pass
+  // Dynamic resolution: the pass only touches this top-left rectangle (Dawn
+  // RenderPassRenderAreaRect), so tiles outside it cost nothing. 0: all.
+  uint32_t renderAreaWidth = 0, renderAreaHeight = 0;
   // World: each view's rectangle, game viewports ignored.
   // HUD: the game's viewports and scissors, scaled to the target.
   bool fullViewport = true;
@@ -64,6 +67,14 @@ using XrFrameHook = void (*)(const wgpu::CommandEncoder& cmd, detail::FramePacke
 // as they are recorded, so lib/xr sets this from the previous frame.
 void set_xr_drop_flat_world(bool drop) noexcept;
 void set_xr_frame_hook(XrFrameHook hook) noexcept;
+// Timestamp writes for the first render pass of each frame (XR whole-frame
+// GPU timing); returns null for every later pass of the frame.
+using XrFirstPassTiming = const wgpu::PassTimestampWrites* (*)();
+void set_xr_first_pass_timing(XrFirstPassTiming fn) noexcept;
+// Game thread, after a lock-step pacing tick: the tick's display frame, which
+// the frames recorded from now on carry (FramePacket::xrTickFrame).
+void set_xr_game_frame_tick(uint64_t displayFrame) noexcept;
+uint64_t xr_game_frame_tick() noexcept;
 XrFrameHook xr_frame_hook() noexcept;
 
 } // namespace aurora::gfx

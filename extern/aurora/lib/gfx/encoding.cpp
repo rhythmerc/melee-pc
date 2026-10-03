@@ -19,6 +19,7 @@
 #include "../webgpu/gpu_prof.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <cstdlib>
@@ -34,6 +35,8 @@ namespace aurora::gfx {
 #if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
 // Render worker only; set_xr_drop_flat_world.
 static bool g_xrDropFlatWorld = false;
+// set_xr_first_pass_timing (any thread).
+static std::atomic<XrFirstPassTiming> g_xrFirstPassTiming{nullptr};
 #endif
 using namespace detail;
 using webgpu::g_device;
@@ -353,8 +356,16 @@ void render(wgpu::CommandEncoder& cmd, FramePacket& frame, RenderPass& passInfo,
       .depthStencilAttachment = depthStencilAttachmentPtr,
       .timestampWrites = webgpu::gpu_prof::pass_writes(label),
   };
-
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+  wgpu::RenderPassDescriptor timedDescriptor = renderPassDescriptor;
+  if (const auto fn = g_xrFirstPassTiming.load(); fn != nullptr && renderPassDescriptor.timestampWrites == nullptr) {
+    if (const auto* writes = fn())
+      timedDescriptor.timestampWrites = writes;
+  }
+  auto pass = cmd.BeginRenderPass(&timedDescriptor);
+#else
   auto pass = cmd.BeginRenderPass(&renderPassDescriptor);
+#endif
   render_pass(pass, frame, passInfo);
   pass.End();
 
@@ -579,6 +590,10 @@ bool same_formats(const RenderTargetLayout& a, const RenderTargetLayout& b) {
 } // namespace
 
 void set_xr_frame_hook(XrFrameHook hook) noexcept { g_xrFrameHook = hook; }
+void set_xr_first_pass_timing(XrFirstPassTiming fn) noexcept { g_xrFirstPassTiming = fn; }
+static std::atomic<uint64_t> g_xrGameFrameTick{0};
+void set_xr_game_frame_tick(uint64_t displayFrame) noexcept { g_xrGameFrameTick = displayFrame; }
+uint64_t xr_game_frame_tick() noexcept { return g_xrGameFrameTick; }
 void set_xr_drop_flat_world(bool drop) noexcept { g_xrDropFlatWorld = drop; }
 XrFrameHook xr_frame_hook() noexcept { return g_xrFrameHook; }
 
@@ -603,8 +618,20 @@ void encode_xr_replay(const wgpu::CommandEncoder& cmd, FramePacket& frame, XrCat
   };
   wgpu::RenderPassMultiview multiview{};
   multiview.viewMask = target.viewMask;
+  wgpu::RenderPassRenderAreaRect area{};
+  area.size = {target.renderAreaWidth, target.renderAreaHeight};
+  const bool partial = target.renderAreaWidth != 0 && target.renderAreaHeight != 0;
+  const wgpu::ChainedStruct* chain = nullptr;
+  if (partial) {
+    area.nextInChain = chain;
+    chain = &area;
+  }
+  if (target.viewMask != 0) {
+    multiview.nextInChain = chain;
+    chain = &multiview;
+  }
   const wgpu::RenderPassDescriptor desc{
-      .nextInChain = target.viewMask != 0 ? &multiview : nullptr,
+      .nextInChain = chain,
       .label = category == XrCategory::World ? "XR eye replay" : "XR HUD replay",
       .colorAttachmentCount = target.layout.colorAttachmentCount,
       .colorAttachments = attachments.data(),

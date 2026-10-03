@@ -211,6 +211,9 @@ struct FramePacket {
   wgpu::CommandEncoder encoder;
   std::vector<AfterSubmitCallback> afterSubmitCallbacks;
   uint64_t frameId = 0;
+  // XR lock-step: the display frame of the pacing tick that started this
+  // frame (set_xr_game_frame_tick), for fixed-latency presentation.
+  uint64_t xrTickFrame = 0;
   uint32_t frameIndex = 0;
   size_t stagingBuffer = 0;
   StagingHighWater copied;

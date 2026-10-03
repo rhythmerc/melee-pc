@@ -84,6 +84,9 @@ only; none of them fixes anything. User-facing knobs (`MELEE_BACKEND`,
 | `AURORA_LEGACY_TEX_LOD=1` | Restore the unconditional LOD-bias sample (positive control for the black-floor sweep). |
 | `MELEE_XR_CONTROL=<file>` | Switch mixed reality / full VR from the file's `mr` or `vr`, read once a second (unattended runs, `tools/quest_perf.py`). |
 | `AURORA_XR_MSAA=<1\|2\|4>` | Multisample the 3D eyes (default 4 on Android; needs the Dawn fork's multiview resolve). |
+| `AURORA_XR_DYNRES=0\|1` | Dynamic resolution for the 3D eyes (default on Android); `_MIN`, `_MAX`, `_TARGET_MS`, `_LOAD_MS`, `_RANDOM=1` tune or test it. |
+| `AURORA_XR_FIXED_LATENCY=0\|<n>` | Turn off fixed-latency presentation (on with dynamic resolution), or force it on at n display frames. |
+| `AURORA_XR_PERF_CPU`, `AURORA_XR_PERF_GPU` | `off\|low\|high\|boost` clock requests (CPU high by default on Android). |
 | `AURORA_XR_HANDS=0` | Leave OpenXR hand tracking off. |
 | `AURORA_XR_FLAT_LOG=1` | Every 10 s, flat passes that kept world/hidden draws because an EFB copy or snapshot reads them, with resolve rect sizes. |
 | `MELEE_XR_PS_GRAB_EVERY=<n>` | Pokémon Stadium's jumbotron grabs the flat frame one time in n in mixed reality (default 2; 1 every time). |

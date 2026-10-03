@@ -357,6 +357,78 @@ After a build that invalidates the pipeline cache (a new Dawn), the first
 runs compile thousands of pipelines for over a minute and are CPU bound;
 `quest_perf.py` flags them ("pipeline cache cold").
 
+### Dynamic resolution
+
+Dynamic resolution (multiview only; on by default on Android,
+`AURORA_XR_DYNRES=0|1` overrides) makes the stereo swapchain at the
+largest scale (`AURORA_XR_DYNRES_MAX`, 1.3) and renders each frame into its
+top-left corner at a scale of the runtime's recommended eye size, between
+`AURORA_XR_DYNRES_MIN` (0.8) and the maximum. The pass uses Dawn's
+`RenderPassRenderAreaRect`, so tiles outside the corner are neither cleared,
+resolved nor stored, and the projection layer's `imageRect` tells the
+compositor which corner to stretch over the field of view. The Dawn fork
+lets a partial render area survive attachments that are cleared and
+discarded (the transient MSAA color and depth), and the stereo image is
+begun as initialized, so Dawn doesn't fall back to the full area.
+
+The controller follows common dynamic resolution practice:
+
+- **Signal:** the whole frame's GPU time, from the first flat pass to the
+  last XR pass (timestamps, compositor preemptions included), so the
+  jumbotron's grab or anything else in the frame counts. Timing the 3D pass
+  alone read differently per stage.
+- **Model:** frame time = fixed + perPixel × scale², and the largest scale
+  predicted to fit `AURORA_XR_DYNRES_TARGET_MS` (12 ms per game frame; 13.5
+  filled the GPU enough for the XR thread to miss submits).
+- **Steps:** down at once, up 0.01 every three frames.
+- **Panic:** a missed swapchain image cuts 10%, unless the frame's GPU time
+  was under `AURORA_XR_DYNRES_LOAD_MS` (9 ms). Then the CPU missed, and
+  only three within a second count.
+- **Testing:** `AURORA_XR_DYNRES_RANDOM=1` picks a random scale every frame.
+
+Quest 3, mixed reality, 4x MSAA, game fps: Battlefield with two CPUs 60.0
+at 1.30 throughout; Fountain of Dreams with four 59.6 at 0.83-0.90;
+Pokémon Stadium rock with four 59.0 at 0.81-0.83 (55.5 at a fixed 1.0).
+Fixed scales on the reference stages (2 / 4 CPUs): two-player fights hold
+60 at 1.3 everywhere; with four, Battlefield holds 1.3, Fountain 1.15 and
+Stadium rock not even 1.0.
+
+`MELEE_DEBUG_VS=cpu2` is the two-CPU fixture, and
+`tools/quest_perf.py --players 2`.
+
+### Fixed-latency presentation
+
+Under lock-step pacing, each game frame starts on a tick, and its images
+were released as soon as they were ready. They finish right around a
+display-frame boundary, so about a third of them alternated between being
+shown three display frames and one instead of two and two. That's 17 to 21
+such pairs a second on Battlefield, invisible to every frame-rate
+statistic, since the average stayed at 60.
+
+Each frame packet now carries the display frame of the tick that started it
+(`FramePacket::xrTickFrame`, set from `aurora_xr_pace`), and the XR thread
+releases its 3D and HUD images `latency` display frames after the tick.
+`latency` is the smallest number of display frames by which 97% of recent
+3D images were ready, at most a game frame's display frames plus one. It's on with dynamic resolution, which keeps frames on
+time: without it, frames running late on an overloaded stage were held into
+slots the render worker then lacked (Pokémon Stadium rock with four CPUs,
+58.2 -> 55.5 game fps). `AURORA_XR_FIXED_LATENCY=0` turns it off, `=<n>`
+forces it on at n.
+On Battlefield it settles at 2 display frames, no later than before, and
+every image is shown exactly two display frames (600 of 600 per 10 s,
+against 188 to 480 without it). The XR log line reports the histogram and
+the latency.
+
+### CPU level
+
+Light scenes let the CPU drop to its lowest clock, and the XR thread then
+missed its 120 Hz submits: two-player Battlefield showed 6 to 7 stale frames
+a second at CPU level 2. A sustained-high CPU request
+(`XR_EXT_performance_settings`, still allowed with passthrough) holds level
+3 and brought that to 0.2. It's the default on Android
+(`AURORA_XR_PERF_CPU=off|low|high|boost`; `AURORA_XR_PERF_GPU` stays the
+runtime's own).
+
 ### Decoded positions
 
 Aurora's vertex shaders decode the game's GX vertex data themselves: an

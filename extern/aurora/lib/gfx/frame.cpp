@@ -689,6 +689,9 @@ bool begin_frame() {
   frame = {};
   frame.frameId = g_nextFrameId++;
   frame.frameIndex = g_frameIndex;
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+  frame.xrTickFrame = xr_game_frame_tick();
+#endif
   frame.stagingBuffer = *stagingSlot;
   size_t bufferOffset = 0;
   const auto& stagingBuf = g_stagingBuffers[*stagingSlot];
