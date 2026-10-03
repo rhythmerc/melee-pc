@@ -85,6 +85,12 @@ static const PartRule s_builtin_rules[] = {
     /* Great Bay: land, sky and mountains. The sea (part 4) stays: it hides
      * the turtle's and the stilts' underwater parts. */
     {0x06, 3, -1, -1, false},
+    /* Jungle Japes: the jungle, sky and moon (part 4) and the birds far
+     * behind (part 5) go; the river (part 6, on the far layer) comes back,
+     * bounded to the stage below. */
+    {0x05, 4, -1, -1, false},
+    {0x05, 5, -1, -1, false},
+    {0x05, 6, -1, -1, true},
     /* Venom: the canyon walls and floor around the Great Fox. */
     {0x0F, 7, -1, -1, false},
     /* Kongo Jungle 64: the jungle (part 3 joint 7) and the sky (joint 34). */
@@ -151,6 +157,11 @@ static const ClipRule s_clips[] = {
     CLIP_RIGHT(0x06, 4, 220.f, 10.f),
     CLIP_FRONT(0x06, 4, 220.f, 10.f),
     CLIP_BELOW(0x0B, 1, -40.f, 0.f), /* Yoshi's Island: the ground, halfway down */
+    /* Jungle Japes: the river bounded to a rectangle just past the piers. */
+    CLIP_LEFT(0x05, 6, -125.f, 8.f),
+    CLIP_RIGHT(0x05, 6, 125.f, 8.f),
+    CLIP_FRONT(0x05, 6, 45.f, 8.f),
+    CLIP_BEHIND(0x05, 6, -100.f, 8.f),
 };
 #define CLIP_COUNT ((int)(sizeof s_clips / sizeof s_clips[0]))
 

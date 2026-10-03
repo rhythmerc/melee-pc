@@ -88,7 +88,6 @@ and the investigation behind it are in docs/xr-3d-plan.md.
       stage blocks.
     - Mushroom Kingdom and Mushroom Kingdom II: the sky and hills are mixed
       into the stage meshes.
-    - Jungle Japes: the jungle part also holds the river hazard.
     - Brinstar: the acid hazard and the cave walls.
     - Onett and Fourside: which buildings count as stage.
     - Rainbow Cruise and Icicle Mountain: scrolling stages.
@@ -131,6 +130,13 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     - Stage particles can be hidden by bank, or bank and id (see Particles
       below). Kongo Jungle hides its stage bank (30), whose particles are all
       river splashes that floated in the air once the river was gone.
+  - **Jungle Japes (2026-10-02):**
+    - Hidden: the jungle, sky and moon (part 4), and the birds far behind
+      (part 5).
+    - The river (part 6, on the far layer) is shown again and bounded to a
+      rectangle just past the piers (x −125 to 125, z −100 to 45, 8-unit
+      fade), like Great Bay's sea.
+    - To check: the Klaptrap leaps from the river outside that rectangle.
   - **To revisit: Fountain of Dreams.** It runs badly on the Quest even
     without the reflection render. Profile it, then build a proper 3D
     reflection: mirror the world draws about the water plane per eye,
