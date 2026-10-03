@@ -85,6 +85,22 @@ static const PartRule s_builtin_rules[] = {
     /* Great Bay: land, sky and mountains. The sea (part 4) stays: it hides
      * the turtle's and the stilts' underwater parts. */
     {0x06, 3, -1, -1, false},
+    /* Peach's Castle: everything around the castle is in part 3 with it.
+     * Hidden: the red grounds (joint 8's own meshes), the bridge and stairs
+     * (13), the hills, path and fence (25), the warp medallion (26), and
+     * the trees and hedge (28's children), keeping the roof flags (65, 74,
+     * 83, 92). The castle body stays whole. */
+    {0x02, 3, 8, 0, false},
+    {0x02, 3, 8, 1, false},
+    {0x02, 3, 8, 2, false},
+    {0x02, 3, 13, -1, false},
+    {0x02, 3, 25, -1, false},
+    {0x02, 3, 26, -1, false},
+    {0x02, 3, 28, -1, false},
+    {0x02, 3, 65, -1, true},
+    {0x02, 3, 74, -1, true},
+    {0x02, 3, 83, -1, true},
+    {0x02, 3, 92, -1, true},
     /* Jungle Japes: the jungle, sky and moon (part 4) and the birds far
      * behind (part 5) go; the river (part 6, on the far layer) comes back,
      * bounded to the stage below. */

@@ -81,8 +81,6 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     - Already fine: Temple, Brinstar Depths, Green Greens, Poké Floats,
       Dream Land, Yoshi's Island 64, Battlefield, Final Destination.
   - **Open questions** (left as they are):
-    - Peach's Castle: the castle body and the red grounds share joints with
-      the roof you fight on.
     - Kongo Jungle: the waterfall shares a part with the plateau.
     - Yoshi's Island: the rock pillars and clouds share joints with the
       stage blocks.
@@ -137,6 +135,14 @@ and the investigation behind it are in docs/xr-3d-plan.md.
       rectangle just past the piers (x −125 to 125, z −100 to 45, 8-unit
       fade), like Great Bay's sea.
     - To check: the Klaptrap leaps from the river outside that rectangle.
+  - **Peach's Castle (2026-10-03):** everything is in part 3.
+    - Hidden: the red grounds (joint 8's own three meshes), the bridge and
+      stairs (13), the hills, path and fence (25), the warp medallion (26),
+      and the trees and hedge (children of 28).
+    - The roof flags (65, 74, 83, 92, also under 28) are shown again by
+      their own rules: a joint's rule overrides its parent's.
+    - The castle body (14) stays whole under the roof, like a model on the
+      table. A clip below the roof line would leave only the roof.
   - **To revisit: Fountain of Dreams.** It runs badly on the Quest even
     without the reflection render. Profile it, then build a proper 3D
     reflection: mirror the world draws about the water plane per eye,
