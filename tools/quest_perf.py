@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unattended performance runs on a Quest over adb.
 
-  quest_perf.py run [--stage N] [--phases mr:40,vr:40] [--env K=V ...]
+  quest_perf.py run [--stage N] [--players 2|4] [--phases mr:40,vr:40] [--env K=V ...]
                     [--warmup S] [--label NAME]
       Boots a four-CPU match on stage N (StKind, gr/forward.h; 31 is
       Battlefield), then holds each phase (mode:seconds) in turn in the same
@@ -133,7 +133,7 @@ def run(args):
         phases.append((mode, int(secs)))
     env = {
         "MELEE_BOOT_SCENE": "vs",
-        "MELEE_DEBUG_VS": "cpu4",
+        "MELEE_DEBUG_VS": f"cpu{args.players}",
         "MELEE_DEBUG_VS_STAGE": str(args.stage),
         "AURORA_XR_TIMING": "1",
         "MELEE_XR_MODE": phases[0][0],
@@ -152,7 +152,8 @@ def run(args):
     adb("shell", "am", "force-stop", PKG)
     adb("logcat", "-c")
     adb("shell", "am", "start", "-n", f"{PKG}/dev.melee.MeleeXrActivity", "--es", "disc", disc)
-    print(f"{args.label}: stage {args.stage}, {' '.join(args.env) or 'default env'}; warming up {args.warmup} s")
+    print(f"{args.label}: stage {args.stage}, {args.players} CPUs, {' '.join(args.env) or 'default env'}; "
+          f"warming up {args.warmup} s")
     time.sleep(args.warmup)
     os.makedirs(OUT_DIR, exist_ok=True)
     with open(os.path.join(OUT_DIR, f"{args.label}-warmup.log"), "w") as f:
@@ -177,6 +178,7 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run")
     r.add_argument("--stage", type=int, default=31)
+    r.add_argument("--players", type=int, choices=[2, 4], default=4, help="CPU fighters")
     r.add_argument("--phases", default="mr:40,vr:40")
     r.add_argument("--env", action="append", default=[], help="extra K=V for melee-env.txt")
     r.add_argument("--warmup", type=int, default=50, help="seconds from launch to the first phase")
