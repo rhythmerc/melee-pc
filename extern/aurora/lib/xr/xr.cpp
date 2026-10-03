@@ -2523,7 +2523,8 @@ bool ensure_renderer(const gfx::RenderTargetLayout& layout) {
     setup_timing();
   R.layoutKey = layout.key;
   R.sampleCount = layout.sampleCount;
-  Log.info("3D fight targets ready: eyes {}x{}, HUD {}x{}, {}x MSAA", eyeW, eyeH, g_streams[kHud].width,
+  Log.info("Flat-layout targets ready (HUD, per-eye fallback): eyes {}x{}, HUD {}x{}, {}x MSAA", eyeW, eyeH,
+           g_streams[kHud].width,
            g_streams[kHud].height, layout.sampleCount);
   return true;
 }
@@ -2927,8 +2928,14 @@ wgpu::Texture begin_frame(uint32_t width, uint32_t height) noexcept {
                   g_sceneSamples == 1 && env_flag("AURORA_XR_MULTIVIEW", true);
     // AURORA_XR_MSAA=<1|2|4>: samples for the 3D eyes alone (the flat frame
     // keeps its own), resolved into the shared image at the end of the pass.
+    // 4 by default on Android, where it's measured.
     {
-      const int n = static_cast<int>(env_float("AURORA_XR_MSAA", 1.f));
+#ifdef __ANDROID__
+      constexpr float kDefaultSamples = 4.f;
+#else
+      constexpr float kDefaultSamples = 1.f;
+#endif
+      const int n = static_cast<int>(env_float("AURORA_XR_MSAA", kDefaultSamples));
       g_xrSamples = g_multiview && (n == 2 || n == 4) ? static_cast<uint32_t>(n) : 1u;
     }
     Log.info("3D eyes: {}, {}x MSAA", g_multiview ? "multiview, both in one pass" : "side by side, one pass each",

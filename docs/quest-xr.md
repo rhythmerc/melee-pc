@@ -336,8 +336,8 @@ limited by vertex fetch, not by pixels.
 
 ### MSAA on the 3D eyes
 
-`AURORA_XR_MSAA=<1|2|4>` multisamples the 3D eyes alone; the flat frame
-keeps its own sample count. The eyes keep multiview and the direct path:
+`AURORA_XR_MSAA=<1|2|4>` multisamples the 3D eyes alone (4 by default on
+Android); the flat frame keeps its own sample count. The eyes keep multiview and the direct path:
 color, the extra attachments and depth are multisampled, transient where
 the device allows (`TransientAttachments`, so on a tiler they stay in tile
 memory), and the pass resolves into the shared image and discards the
