@@ -123,6 +123,7 @@ void log_kept_flat_pass(const RenderPass& passInfo) {
   if (!enabled)
     return;
   static uint32_t passes, draws, resolve, color, depth, normal;
+  static std::array<std::pair<uint64_t, uint32_t>, 4> rects{}; // resolve rect (w << 32 | h) -> passes
   static auto start = std::chrono::steady_clock::now();
   uint32_t kept = 0;
   for (const auto& cmd : passInfo.commands)
@@ -132,15 +133,30 @@ void log_kept_flat_pass(const RenderPass& passInfo) {
     ++passes;
     draws += kept;
     resolve += passInfo.resolveTarget ? 1 : 0;
+    if (passInfo.resolveTarget) {
+      const uint64_t key = static_cast<uint64_t>(passInfo.resolveRect.width) << 32 | passInfo.resolveRect.height;
+      for (auto& r : rects) {
+        if (r.second == 0 || r.first == key) {
+          r.first = key;
+          ++r.second;
+          break;
+        }
+      }
+    }
     color += passInfo.snapshotColorDst ? 1 : 0;
     depth += passInfo.snapshotDepthDst ? 1 : 0;
     normal += passInfo.snapshotNormalDst ? 1 : 0;
   }
   const auto now = std::chrono::steady_clock::now();
   if (now - start >= std::chrono::seconds(10)) {
-    Log.info("flat passes kept for a reader: {} ({} world/hidden draws); resolve {}, color {}, depth {}, normal {}",
-             passes, draws, resolve, color, depth, normal);
+    std::string sizes;
+    for (const auto& r : rects)
+      if (r.second != 0)
+        sizes += fmt::format(" {}x{}:{}", r.first >> 32, r.first & 0xFFFFFFFF, r.second);
+    Log.info("flat passes kept for a reader: {} ({} world/hidden draws); resolve {} (rects{}), color {}, depth {}, normal {}",
+             passes, draws, resolve, sizes, color, depth, normal);
     passes = draws = resolve = color = depth = normal = 0;
+    rects = {};
     start = now;
   }
 }

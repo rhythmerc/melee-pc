@@ -84,7 +84,8 @@ only; none of them fixes anything. User-facing knobs (`MELEE_BACKEND`,
 | `AURORA_LEGACY_TEX_LOD=1` | Restore the unconditional LOD-bias sample (positive control for the black-floor sweep). |
 | `MELEE_XR_CONTROL=<file>` | Switch mixed reality / full VR from the file's `mr` or `vr`, read once a second (unattended runs, `tools/quest_perf.py`). |
 | `AURORA_XR_HANDS=0` | Leave OpenXR hand tracking off. |
-| `AURORA_XR_FLAT_LOG=1` | Every 10 s, flat passes that kept world/hidden draws because an EFB copy or snapshot reads them. |
+| `AURORA_XR_FLAT_LOG=1` | Every 10 s, flat passes that kept world/hidden draws because an EFB copy or snapshot reads them, with resolve rect sizes. |
+| `MELEE_XR_PS_FEED_FULL=1` | Pokémon Stadium's jumbotron grabs the flat frame every frame in mixed reality, not every other one. |
 | `AURORA_NO_PIN=1`, `AURORA_PIN_THREADS=0` | Disable pinning aurora's worker threads to cores. |
 
 `grep -rho 'getenv("\(MELEE\|AURORA\)_[A-Z0-9_]*")' src extern/aurora/lib` is the

@@ -42,6 +42,8 @@
 #include "pc/file_cache.h"
 #include "pc/net.h"
 #include "pc/widescreen.h"
+#include "pc/xr_scene.h"
+#include <stdlib.h>
 /* The transformation archive the pending load is for; in .bss, so a
  * snapshot carries it with the load state it belongs to. */
 static const char* grStadium_pc_pending;
@@ -841,6 +843,23 @@ void grStadium_801D2278(Ground_GObj* gobj)
     grStadium_801D2528(gobj, 0, 0);
 }
 
+#ifdef TARGET_PC
+/* XR mixed reality: the jumbotron grabs the flat frame on alternate frames
+ * only. A grab keeps the whole flat world in the frame it reads (the
+ * stadium and its background, which the screen shows), and that was about
+ * a third of the GPU time in a fight; the screen holds its last image in
+ * between. xE0 counts down every frame, so its parity alternates.
+ * MELEE_XR_PS_FEED_FULL=1 grabs every frame. */
+static bool grStadium_FeedSkip(Ground* gp)
+{
+    static int full = -1;
+    if (full < 0) {
+        full = getenv("MELEE_XR_PS_FEED_FULL") != NULL;
+    }
+    return !full && pc_xr_mixed_reality() && (gp->u.display.xE0 & 1);
+}
+#endif
+
 void grStadium_801D2344(Ground_GObj* g)
 {
     Ground_GObj* gobj = g;
@@ -896,6 +915,11 @@ void grStadium_801D2344(Ground_GObj* g)
             break;
         }
         temp_r3_6 = GET_WRAPPER(gp->u.display.xD8);
+#ifdef TARGET_PC
+        if (grStadium_FeedSkip(gp)) {
+            break;
+        }
+#endif
         temp_r3_6->flag = false;
         break;
     case 8:
@@ -907,7 +931,10 @@ void grStadium_801D2344(Ground_GObj* g)
             break;
         }
         temp_r3_8 = GET_WRAPPER(gp->u.display.xDC);
-        temp_r3_8->flag = 0;
+#ifdef TARGET_PC
+        if (!grStadium_FeedSkip(gp))
+#endif
+            temp_r3_8->flag = 0;
         if (gp->u.display.xDC == NULL ||
             Player_GetEntity(gp->u.display.xEE) == NULL ||
             Player_8003219C(gp->u.display.xEE) || !grStadium_801D32D0(gobj))

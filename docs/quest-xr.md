@@ -280,7 +280,19 @@ frames per second (of 60):
 | Battlefield, Peach's Castle, Corneria | 59.1 to 59.6 | 59.1 to 59.7 |
 
 `AURORA_XR_FLAT_LOG=1` reports every 10 s the flat passes that kept world or
-hidden draws because something reads them, and what reads them.
+hidden draws because something reads them, what reads them, and the resolve
+rect sizes.
+
+Pokémon Stadium's jumbotron reads the flat frame itself: in its feed mode
+(display state 7, a 584x406 grab) and its player zoom (state 8, about
+113x80), each grab keeps that frame's whole flat world, background
+included. That was about 4 ms of GPU work per grab (1.7 ms binning, 2.4 ms
+render) against 7.6 ms for the eye pass. The screen's other modes grab
+nothing. In mixed reality the feed and zoom now grab on alternate frames
+only, and the screen holds the last image in between
+(`MELEE_XR_PS_FEED_FULL=1` grabs every frame). Three 60 s runs each: 40.4
+game fps at full rate, 45.7 at half (38.9 to 47.6, depending on what the
+screen showed).
 
 Also in the traces: the compositor preempts the app's GPU work about 175
 times a second, at about 1 ms each, under passthrough at 120 Hz.
