@@ -27,6 +27,7 @@ extern void browser_yield(void);
 #include "pc/pc.h"
 #include "pc/launcher.h"
 #include "pc/touch.h"
+#include "pc/xr_scene.h"
 #include "pc/widescreen.h"
 #include "pc/net.h"
 #include "pc/net_chat.h"
@@ -205,7 +206,13 @@ void pc_frame_boundary(void) {
             if (event->sdl.type == SDL_EVENT_KEY_DOWN &&
                 event->sdl.key.scancode == SDL_SCANCODE_F1 && !event->sdl.key.repeat)
                 pc_menu_toggle();
-            pc_menu_event(&event->sdl);
+            /* In XR, the gamepad's Select switches mixed reality and full
+             * VR instead of opening the port menu. */
+            const bool xr_select = event->sdl.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN &&
+                                   event->sdl.gbutton.button == SDL_GAMEPAD_BUTTON_BACK &&
+                                   pc_xr_toggle_mode();
+            if (!xr_select)
+                pc_menu_event(&event->sdl);
             pc_keyboard_event(&event->sdl);
             pc_touch_event(&event->sdl);
         }

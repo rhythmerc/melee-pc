@@ -41,6 +41,11 @@ bool aurora_xr_pace(void);
  * arena to move, turn and scale it instead of pressing Z. */
 void aurora_xr_set_paused(bool paused);
 
+/* Whether the room shows behind the game (passthrough): on for mixed
+ * reality, off for full VR, where passthrough is stopped, not just hidden.
+ * On by default. Any thread. */
+void aurora_xr_set_passthrough(bool on);
+
 /* The game point (world units) that sits at the arena position; 0,0,0 by
  * default. For stages whose action happens far from the world origin. Any
  * thread. */

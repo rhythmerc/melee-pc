@@ -397,13 +397,30 @@ static bool joint_log_due(int grkind, int map_id) {
 static int s_center_grkind = -1;
 static bool s_clip_active;
 
-bool pc_xr_mixed_reality(void) {
-    static int mode = -1; /* 1 mixed reality, 0 full VR */
-    if (mode < 0) {
+static int s_xr_mode = -1; /* 1 mixed reality, 0 full VR */
+
+static void xr_mode_init(void) {
+    if (s_xr_mode < 0) {
         const char* m = getenv("MELEE_XR_MODE");
-        mode = m == NULL || strcmp(m, "vr") != 0;
+        s_xr_mode = m == NULL || strcmp(m, "vr") != 0;
+        aurora_xr_set_passthrough(s_xr_mode == 1);
     }
-    return mode == 1 && aurora_xr_active();
+}
+
+bool pc_xr_mixed_reality(void) {
+    xr_mode_init();
+    return s_xr_mode == 1 && aurora_xr_active();
+}
+
+bool pc_xr_toggle_mode(void) {
+    if (!aurora_xr_active()) {
+        return false;
+    }
+    xr_mode_init();
+    s_xr_mode = !s_xr_mode;
+    aurora_xr_set_passthrough(s_xr_mode == 1);
+    pc_log_line("xr: %s", s_xr_mode ? "mixed reality" : "full VR");
+    return true;
 }
 
 bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {

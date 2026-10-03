@@ -32,6 +32,10 @@ void pc_xr_stage_part_end(bool hidden);
  * MELEE_XR_MODE is not "vr". A full-VR mode renders the stage whole; only
  * per-stage centering applies there. */
 bool pc_xr_mixed_reality(void);
+/* Switches between mixed reality and full VR (passthrough off, stage whole);
+ * the gamepad's Select does this in XR. False, doing nothing, when no XR
+ * session is presenting. */
+bool pc_xr_toggle_mode(void);
 /* Around one joint's geometry (HSD_JObjDisp): leaves joints a part rule
  * hides out of the 3D view, and places joints a rule moves. Returns what
  * it changed; hand that to pc_xr_jobj_end. Cheap when no stage part with
@@ -58,6 +62,7 @@ static inline bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, str
 }
 static inline void pc_xr_stage_part_end(bool hidden) { (void)hidden; }
 static inline bool pc_xr_mixed_reality(void) { return false; }
+static inline bool pc_xr_toggle_mode(void) { return false; }
 static inline int pc_xr_jobj_begin(struct HSD_JObj* jobj) {
     (void)jobj;
     return 0;

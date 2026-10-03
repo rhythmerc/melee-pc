@@ -199,6 +199,10 @@ float g_defaultArenaScale = 0.006f;
 // paused, so the controllers point and grab instead of playing.
 std::atomic<bool> g_fightPaused{false};
 
+// Set by the game (aurora_xr_set_passthrough): mixed reality shows the room,
+// full VR doesn't. The XR thread pauses or starts passthrough to match.
+std::atomic<bool> g_passthroughWanted{true};
+
 // Controller input, written by the XR thread, read by the game thread.
 std::mutex g_padMutex;
 PADStatus g_pad{};
@@ -246,6 +250,9 @@ struct Bridge {
   PFN_xrDestroyPassthroughFB destroyPassthrough = nullptr;
   PFN_xrCreatePassthroughLayerFB createPassthroughLayer = nullptr;
   PFN_xrDestroyPassthroughLayerFB destroyPassthroughLayer = nullptr;
+  PFN_xrPassthroughStartFB startPassthrough = nullptr;
+  PFN_xrPassthroughPauseFB pausePassthrough = nullptr;
+  bool passthroughRunning = false;
 
   std::string dumpDir; // AURORA_XR_DUMP
 
@@ -417,6 +424,8 @@ bool create_instance() {
     B.destroyPassthrough = xr_proc<PFN_xrDestroyPassthroughFB>("xrDestroyPassthroughFB");
     B.createPassthroughLayer = xr_proc<PFN_xrCreatePassthroughLayerFB>("xrCreatePassthroughLayerFB");
     B.destroyPassthroughLayer = xr_proc<PFN_xrDestroyPassthroughLayerFB>("xrDestroyPassthroughLayerFB");
+    B.startPassthrough = xr_proc<PFN_xrPassthroughStartFB>("xrPassthroughStartFB");
+    B.pausePassthrough = xr_proc<PFN_xrPassthroughPauseFB>("xrPassthroughPauseFB");
   }
   if (B.hasRefreshRateExt) {
     B.enumerateRefreshRates = xr_proc<PFN_xrEnumerateDisplayRefreshRatesFB>("xrEnumerateDisplayRefreshRatesFB");
@@ -638,6 +647,7 @@ bool create_session() {
       lci.purpose = XR_PASSTHROUGH_LAYER_PURPOSE_RECONSTRUCTION_FB;
       if (XR_FAILED(B.createPassthroughLayer(B.session, &lci, &B.passthroughLayer)))
         B.passthroughLayer = XR_NULL_HANDLE;
+      B.passthroughRunning = true;
     } else {
       B.passthrough = XR_NULL_HANDLE;
     }
@@ -1661,6 +1671,24 @@ void build_pointer_layers(PointerLayers& out) {
   }
 }
 
+// Full VR stops passthrough outright (the cameras stop, not just the layer),
+// mixed reality starts it again.
+void sync_passthrough() {
+  const bool want = g_passthroughWanted;
+  if (!B.passthrough || want == B.passthroughRunning)
+    return;
+  const auto fn = want ? B.startPassthrough : B.pausePassthrough;
+  if (!fn)
+    return;
+  const XrResult r = fn(B.passthrough);
+  if (XR_FAILED(r)) {
+    Log.warn("Passthrough {} failed: XrResult {}", want ? "start" : "pause", static_cast<int>(r));
+    return;
+  }
+  B.passthroughRunning = want;
+  Log.info("Passthrough {}", want ? "on" : "off");
+}
+
 bool render_xr_frame() {
   XrFrameState fs{XR_TYPE_FRAME_STATE};
   XR_TRY(xrWaitFrame(B.session, nullptr, &fs));
@@ -1696,7 +1724,8 @@ bool render_xr_frame() {
   std::array<const XrCompositionLayerBaseHeader*, 3 + kMaxPointerLayers> layers{};
   uint32_t layerCount = 0;
   XrCompositionLayerPassthroughFB ptLayer{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
-  if (B.passthroughLayer) {
+  sync_passthrough();
+  if (B.passthroughLayer && B.passthroughRunning && g_passthroughWanted) {
     ptLayer.flags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
     ptLayer.layerHandle = B.passthroughLayer;
     layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&ptLayer);
@@ -2968,6 +2997,8 @@ extern "C" bool aurora_xr_get_pad(PADStatus* out) {
 }
 
 extern "C" void aurora_xr_set_paused(bool paused) { aurora::xr::g_fightPaused = paused; }
+
+extern "C" void aurora_xr_set_passthrough(bool on) { aurora::xr::g_passthroughWanted = on; }
 
 extern "C" bool aurora_xr_active(void) { return aurora::xr::active(); }
 

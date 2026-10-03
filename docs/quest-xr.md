@@ -136,8 +136,14 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     reflection: mirror the world draws about the water plane per eye,
     clipped to above the water, under the translucent surface.
 - **Mixed reality vs full VR.** Every hide, clip and move applies only in
-  mixed reality (`pc_xr_mixed_reality`). `MELEE_XR_MODE=vr` renders stages
-  whole, for the planned full-VR mode. Per-stage centering applies in both.
+  mixed reality (`pc_xr_mixed_reality`). Full VR renders stages whole, and
+  passthrough is stopped (`xrPassthroughPauseFB`, not just a missing layer).
+  Per-stage centering applies in both. Full VR has had no work beyond every
+  stage part rendering.
+  - **Switching:** a gamepad's Select (SDL Back) switches between them at
+    any time while XR is presenting (`pc_xr_toggle_mode`), instead of
+    opening the port menu. That's handy for comparing a pruned stage with
+    the original. `MELEE_XR_MODE=vr` starts in full VR.
 - **Clip planes.** `aurora_xr_world_clips4` cuts the following world draws
   in the 3D view, keeping what's on the inside of up to four game-space
   planes. `xr_scene.c` sets them around a stage part (every `ClipRule` that
@@ -349,9 +355,9 @@ From the first headset playtest (2026-10-01):
 - **Full VR mode for fights (pinned).** An option for fights in full VR, not
   over passthrough, alongside the mixed-reality arena.
 
-- **Background sparkles.** They're effects drawn under the fight camera, so
-  some still show, for example Battlefield's twinkles and Final Destination's
-  stars. Particle rules may cover the ones that are particles.
+- **Background sparkles** (Battlefield's twinkles, Final Destination's
+  stars) still show in mixed reality. That's kept on purpose: they look good
+  over the room.
 - **Fog** still uses the eye's depth instead of the game camera's.
 - **Billboards and particles** face the game camera, not the eye.
 - **Frame rate.** The 3D view updates at the game's 60 Hz. Every second
@@ -452,6 +458,9 @@ AURORA_XR=1 build/linux-xr-fork/melee disc.rvz
 | Either grip | Z (grabs the arena while paused; with hands, pinch) |
 | Left menu button | Start |
 
+An external gamepad plays as usual. Its Select switches mixed reality and
+full VR instead of opening the port menu.
+
 ## Knobs
 
 On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`.
@@ -488,7 +497,7 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `MELEE_XR_PARTS` | unset | Overrides, e.g. `16:1,-16:1/12,-16:2/2.27` (`stage:part[/joint[.mesh]]`, `-` hides) |
 | `MELEE_XR_STAGE_LOG` | unset | Log each stage part's id and layer once |
 | `MELEE_XR_JUMBOTRON` | `0.55,0,-10,-75` | Pokémon Stadium big screen in 3D: `scale,x,y,z` (game units) for its base |
-| `MELEE_XR_MODE` | mixed reality | `vr`: no stage hides, clips or moves (full stage) |
+| `MELEE_XR_MODE` | mixed reality | `vr`: start in full VR (no stage hides, clips or moves, passthrough off); Select switches |
 | `MELEE_XR_CLIP` | unset | Try clips: `grkind:part:y[:fade],...` cuts that part below y, fading across `fade` units |
 | `MELEE_XR_MOVE` | unset | Try moves: `gk:part:joint:scale:px:py:pz:tx:ty:tz;...` |
 | `MELEE_XR_CENTER` | per stage | Arena center override, `x,y,z` game units |
