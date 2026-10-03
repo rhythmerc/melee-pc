@@ -288,11 +288,40 @@ Pokémon Stadium's jumbotron reads the flat frame itself: in its feed mode
 113x80), each grab keeps that frame's whole flat world, background
 included. That was about 4 ms of GPU work per grab (1.7 ms binning, 2.4 ms
 render) against 7.6 ms for the eye pass. The screen's other modes grab
-nothing. In mixed reality the feed and zoom now grab on alternate frames
-only, and the screen holds the last image in between
-(`MELEE_XR_PS_FEED_FULL=1` grabs every frame). Three 60 s runs each: 40.4
-game fps at full rate, 45.7 at half (38.9 to 47.6, depending on what the
-screen showed).
+nothing.
+
+- **Half-rate grabs.** In mixed reality the feed and zoom grab on every other
+  rendered frame that asks for one, and the screen holds the last image in
+  between (`MELEE_XR_PS_GRAB_EVERY=<n>`, 1 for every time). The count lives
+  in the draw callback, not on simulation ticks: under load several ticks
+  run per rendered frame, so tick parity still grabbed almost every rendered
+  frame. The simulation isn't touched, so netplay with non-XR builds is
+  unaffected.
+- **Clipped grabs.** A flat pass kept only for an EFB copy clips its world
+  and hidden draws to the copied rect (`AURORA_XR_FLAT_CLIP=0` draws them
+  whole). The zoom's 113x80 corner then costs little more than its
+  geometry.
+- **Repeatable runs.** `MELEE_PS_TEST_FORM=<5|3|4|6|9>` (default, fire,
+  grass, rock, water) pins a transformation, and `MELEE_PS_TEST_SCREEN=<n>`
+  pins the jumbotron state. Both change what the stage draws from the RNG,
+  so they're test fixtures only, never for netplay.
+
+Quest 3, mixed reality, four CPUs, 40 s per run, game fps (of 60), feed at
+half rate and zoom clipped:
+
+| Form | Feed | Zoom | Eye pass |
+|---|---|---|---|
+| Default | 50.2 | 56.6 | 10.2 ms |
+| Grass | 48.1 | 54.9 | 10.2 ms |
+| Water | 40.0 | 47.0 | 12.6 ms |
+| Fire | 40.4 | 41.5 | 12.6 ms |
+| Rock | 38.4 | 41.1 | 13.2 ms |
+
+Fire and rock are limited by their own scenery (360 to 380 world draws),
+not by the jumbotron. In fire form the zoom went from 30.1 to 35.1 fps with
+clipping, and the feed from 27.7 (every frame) to 41.3 (every other) and
+43.3 (every third). The eye pass depends on what the headset faces, so only
+compare runs taken from the same pose.
 
 Also in the traces: the compositor preempts the app's GPU work about 175
 times a second, at about 1 ms each, under passthrough at 120 Hz.

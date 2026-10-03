@@ -307,6 +307,20 @@ void fn_801D13C8(Ground_GObj* gobj)
     gp->u.stadium.xC4_b0 = false;
 }
 
+#ifdef TARGET_PC
+/* Test fixtures for repeatable measurements; they change what the stage
+ * draws from the RNG, so never in netplay. MELEE_PS_TEST_FORM=<3|4|6|9>
+ * (fire, grass, rock, water) transforms soon after the start and stays (5
+ * never transforms);
+ * MELEE_PS_TEST_SCREEN=<state> makes every jumbotron change pick that
+ * state (7 the feed, 8 the player zoom, 1 a picture). -1 when unset. */
+static int grStadium_TestPin(const char* name)
+{
+    const char* v = getenv(name);
+    return v != NULL && *v != '\0' ? atoi(v) : -1;
+}
+#endif
+
 void grStadium_801D13E0(Ground_GObj* gobj)
 {
     HSD_MObj* mobj;
@@ -340,6 +354,11 @@ void grStadium_801D13E0(Ground_GObj* gobj)
         var_r27 += randi(temp_r28 - var_r27);
     }
     gr->u.stadium.xD8 = var_r27;
+#ifdef TARGET_PC
+    if (grStadium_TestPin("MELEE_PS_TEST_FORM") > 0) {
+        gr->u.stadium.xD8 = 60;
+    }
+#endif
     gr->x11_flags.b012 = 1;
     mpLib_800575B0(0x55);
     mpLib_800575B0(0x6F);
@@ -843,23 +862,6 @@ void grStadium_801D2278(Ground_GObj* gobj)
     grStadium_801D2528(gobj, 0, 0);
 }
 
-#ifdef TARGET_PC
-/* XR mixed reality: the jumbotron grabs the flat frame on alternate frames
- * only. A grab keeps the whole flat world in the frame it reads (the
- * stadium and its background, which the screen shows), and that was about
- * a third of the GPU time in a fight; the screen holds its last image in
- * between. xE0 counts down every frame, so its parity alternates.
- * MELEE_XR_PS_FEED_FULL=1 grabs every frame. */
-static bool grStadium_FeedSkip(Ground* gp)
-{
-    static int full = -1;
-    if (full < 0) {
-        full = getenv("MELEE_XR_PS_FEED_FULL") != NULL;
-    }
-    return !full && pc_xr_mixed_reality() && (gp->u.display.xE0 & 1);
-}
-#endif
-
 void grStadium_801D2344(Ground_GObj* g)
 {
     Ground_GObj* gobj = g;
@@ -915,11 +917,6 @@ void grStadium_801D2344(Ground_GObj* g)
             break;
         }
         temp_r3_6 = GET_WRAPPER(gp->u.display.xD8);
-#ifdef TARGET_PC
-        if (grStadium_FeedSkip(gp)) {
-            break;
-        }
-#endif
         temp_r3_6->flag = false;
         break;
     case 8:
@@ -931,10 +928,7 @@ void grStadium_801D2344(Ground_GObj* g)
             break;
         }
         temp_r3_8 = GET_WRAPPER(gp->u.display.xDC);
-#ifdef TARGET_PC
-        if (!grStadium_FeedSkip(gp))
-#endif
-            temp_r3_8->flag = 0;
+        temp_r3_8->flag = 0;
         if (gp->u.display.xDC == NULL ||
             Player_GetEntity(gp->u.display.xEE) == NULL ||
             Player_8003219C(gp->u.display.xEE) || !grStadium_801D32D0(gobj))
@@ -1162,6 +1156,12 @@ void grStadium_801D2A60(Ground_GObj* gobj)
     float val;
     int var_r4;
 
+#ifdef TARGET_PC
+    if (grStadium_TestPin("MELEE_PS_TEST_SCREEN") >= 0) {
+        grStadium_801D2528(gobj, grStadium_TestPin("MELEE_PS_TEST_SCREEN"), 0);
+        return;
+    }
+#endif
     if (gp->u.display.xF2 >= yakumono_param->x50) {
         gp->u.display.xF2 = 0;
         var_r4 = 0xE;
@@ -1308,6 +1308,30 @@ void fn_801D2ED0(HSD_GObj* gobj, intptr_t unused)
     gp2->u.display.xF8_0 = true;
 }
 
+#ifdef TARGET_PC
+/* XR mixed reality: the jumbotron's feed and player zoom grab the flat
+ * frame on every other rendered frame that asks for one, and the screen
+ * holds its last image in between. A grab keeps that frame's whole flat
+ * world (the stadium and its background, which the screen shows), about
+ * 4 ms of GPU. Counted here, in the draw, rather than on simulation ticks:
+ * under load several ticks run per rendered frame, so tick parity grabbed
+ * almost every rendered frame, and the simulation stays untouched.
+ * MELEE_XR_PS_GRAB_EVERY=<n> grabs one time in n (1: every time). */
+static bool grStadium_SkipGrab(void)
+{
+    static int every = -1;
+    static int count;
+    if (every < 0) {
+        const char* v = getenv("MELEE_XR_PS_GRAB_EVERY");
+        every = v != NULL && atoi(v) > 0 ? atoi(v) : 2;
+    }
+    if (every == 1 || !pc_xr_mixed_reality()) {
+        return false;
+    }
+    return count++ % every != 0;
+}
+#endif
+
 void grStadium_801D2FD0(Ground_GObj* gobj, intptr_t unused)
 {
     HSD_GObj* vision_gobj;
@@ -1318,6 +1342,9 @@ void grStadium_801D2FD0(Ground_GObj* gobj, intptr_t unused)
     copy = wrapper;
     if (!wrapper->flag) {
 #ifdef TARGET_PC
+        if (grStadium_SkipGrab()) {
+            return;
+        }
         /* Jumbotron feed: a full-frame grab off the main camera, whose
          * widening is about the frame centre. */
         pc_widescreen_copy_efb(&copy->desc, 0, 36, 320.0f, 0);
@@ -1345,6 +1372,9 @@ void grStadium_801D3084(HSD_GObj* gobj, intptr_t unused)
     new_var = wrapper;
     if (!new_var->flag) {
 #ifdef TARGET_PC
+        if (grStadium_SkipGrab()) {
+            return;
+        }
         /* Same main-camera frame, but a corner sub-rect: contract it about
          * the frame centre, not about the rect's own centre. */
         pc_widescreen_copy_efb(&new_var->desc, new_var->x1A, new_var->x1C,
@@ -2166,12 +2196,29 @@ void grStadium_801D4548(Ground_GObj* gobj)
                         randi_between_2(yakumono_param->x0, yakumono_param->x4);
                     return;
                 }
+#ifdef TARGET_PC
+                if (grStadium_TestPin("MELEE_PS_TEST_FORM") == 5) {
+                    gp->u.stadium.xD8 = 600;
+                    return;
+                }
+#endif
                 int sp60[] = { 3, 4, 6, 9 };
                 int idx;
                 do {
                     kind = sp60[HSD_Randi(ARRAY_SIZE(sp60))];
                 } while (gp->u.stadium.xE2 == kind);
+#ifdef TARGET_PC
+                if (grStadium_TestPin("MELEE_PS_TEST_FORM") > 0) {
+                    kind = grStadium_TestPin("MELEE_PS_TEST_FORM");
+                }
+#endif
             } else {
+#ifdef TARGET_PC
+                if (gp->u.stadium.xDE == grStadium_TestPin("MELEE_PS_TEST_FORM")) {
+                    gp->u.stadium.xD8 = 600;
+                    return;
+                }
+#endif
                 kind = 5;
             }
             gp->u.stadium.xE2 = gp->u.stadium.xE0;

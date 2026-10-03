@@ -116,6 +116,13 @@ void execute_encoder_task(wgpu::CommandEncoder& cmd, FramePacket& frame, const E
 
 #if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
 namespace {
+bool env_flag_gfx(const char* name, bool def) {
+  const char* v = std::getenv(name);
+  if (!v || !*v)
+    return def;
+  return !(v[0] == '0' || v[0] == 'n' || v[0] == 'N' || v[0] == 'f' || v[0] == 'F');
+}
+
 // AURORA_XR_FLAT_LOG=1: every 10 s, the flat passes that kept their world
 // and hidden draws because something reads them, and what reads them.
 void log_kept_flat_pass(const RenderPass& passInfo) {
@@ -170,6 +177,13 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
   const bool dropWorld = g_xrDropFlatWorld && !passInfo.has_consumer();
   if (g_xrDropFlatWorld && !dropWorld)
     log_kept_flat_pass(passInfo);
+  // A flat pass kept only for an EFB copy needs its world and hidden draws
+  // only inside the copied rect (Pokemon Stadium's player zoom copies a
+  // 113x80 corner): clip them to it. AURORA_XR_FLAT_CLIP=0 draws them whole.
+  static const bool clipKept = env_flag_gfx("AURORA_XR_FLAT_CLIP", true);
+  const bool clipWorld = clipKept && g_xrDropFlatWorld && passInfo.resolveTarget && !passInfo.snapshotColorDst &&
+                         !passInfo.snapshotDepthDst && !passInfo.snapshotNormalDst;
+  bool worldClipped = false;
 #endif
 #ifdef AURORA_GFX_DEBUG_GROUPS
   std::vector<std::string> lastDebugGroupStack;
@@ -218,12 +232,30 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
       apply_scissor(pass, sc, passInfo.colorAttachments[SceneColorAttachmentIndex].size);
       currentScissor = sc;
       hasScissor = true;
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+      worldClipped = false; // the next world draw clips the new scissor again
+#endif
     } break;
     case CommandType::Draw: {
       auto& draw = cmd.data.draw;
 #if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
-      if (dropWorld && (cmd.xrCategory == XrCategory::World || cmd.xrCategory == XrCategory::Hidden)) {
+      const bool world = cmd.xrCategory == XrCategory::World || cmd.xrCategory == XrCategory::Hidden;
+      if (dropWorld && world) {
         break;
+      }
+      if (clipWorld && world != worldClipped) {
+        const auto& size = passInfo.colorAttachments[SceneColorAttachmentIndex].size;
+        const ClipRect full{0, 0, static_cast<int32_t>(size.width), static_cast<int32_t>(size.height)};
+        const ClipRect sc = hasScissor ? currentScissor : full;
+        if (world) {
+          const ClipRect& r = passInfo.resolveRect;
+          const int32_t x0 = std::max(sc.x, r.x), y0 = std::max(sc.y, r.y);
+          const int32_t x1 = std::min(sc.x + sc.width, r.x + r.width), y1 = std::min(sc.y + sc.height, r.y + r.height);
+          apply_scissor(pass, {x0, y0, std::max(0, x1 - x0), std::max(0, y1 - y0)}, size);
+        } else {
+          apply_scissor(pass, sc, size);
+        }
+        worldClipped = world;
       }
 #endif
       if (draw.encoder != nullptr) {
