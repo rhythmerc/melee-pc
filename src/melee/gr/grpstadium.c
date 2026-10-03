@@ -679,6 +679,79 @@ typedef struct ImageDescWrapper {
 
 #define GET_WRAPPER(x) ((ImageDescWrapper*) HSD_GObjGetUserData(x))
 
+#ifdef TARGET_PC
+/* XR mixed reality: the jumbotron's full-arena feed shows a player zoom
+ * instead. A feed grab keeps the whole flat world at full size; a zoom grab
+ * is clipped to its 124x80 corner (AURORA_XR_FLAT_CLIP), and that was 6 to
+ * 7 game fps on most forms. Only the drawing changes: the screen's states
+ * and their RNG draws are the game's own, so netplay with non-XR builds is
+ * unaffected. MELEE_XR_PS_ZOOM_ONLY=0 keeps the feed. */
+static bool grStadium_XrZoomOnly(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char* v = getenv("MELEE_XR_PS_ZOOM_ONLY");
+        on = v == NULL || *v != '0';
+    }
+    return on && pc_xr_mixed_reality();
+}
+
+/* The zoom's corner for one fighter, as grStadium_801D32D0 places it: a
+ * 124x80 rect around the camera subject bone, kept inside the viewport. */
+static bool grStadium_XrZoomOrigin(int slot, u16* x, u16* y)
+{
+    HSD_GObj* cam = Camera_80030A50();
+    HSD_GObj* player_gobj = Player_GetEntity(slot);
+    HSD_CObj* cobj;
+    Vec3 pos, scr;
+    if (cam == NULL || (cobj = GET_COBJ(cam)) == NULL || player_gobj == NULL ||
+        Player_8003219C(slot))
+    {
+        return false;
+    }
+    ftLib_GetCameraSubjectBonePos(player_gobj, &pos);
+    lbVector_WorldToScreen(cobj, &pos, &scr, 0);
+    scr.x -= 62.0f;
+    scr.x = scr.x < cobj->viewport.xmin ? cobj->viewport.xmin
+            : scr.x + 124.0f > cobj->viewport.xmax ? cobj->viewport.xmax - 124.0f
+                                                    : scr.x;
+    scr.y -= 40.0f;
+    scr.y = scr.y < cobj->viewport.ymin ? cobj->viewport.ymin
+            : scr.y + 80.0f > cobj->viewport.ymax ? cobj->viewport.ymax - 80.0f
+                                                   : scr.y;
+    *x = ((int) scr.x >> 1) * 2;
+    *y = ((int) scr.y >> 1) * 2;
+    return true;
+}
+
+/* In place of a feed grab: zoom on one of the fighters, taking turns every
+ * three seconds of the feed (xE0 counts the feed down). False when no
+ * fighter can be shown, and the feed grabs as usual. */
+static bool grStadium_XrZoomGrab(Ground* gp)
+{
+    int slots[6], count = 0, i;
+    ImageDescWrapper* zoom;
+    if (gp->u.display.xDC == NULL) {
+        return false;
+    }
+    for (i = 0; i < 6; i++) {
+        if (Player_GetEntity(i) != NULL && !Player_8003219C(i)) {
+            slots[count++] = i;
+        }
+    }
+    if (count == 0) {
+        return false;
+    }
+    zoom = GET_WRAPPER(gp->u.display.xDC);
+    i = slots[(gp->u.display.xE0 < 0 ? 0 : gp->u.display.xE0 / 180) % count];
+    if (!grStadium_XrZoomOrigin(i, &zoom->x1A, &zoom->x1C)) {
+        return false;
+    }
+    pc_widescreen_copy_efb(&zoom->desc, zoom->x1A, zoom->x1C, 320.0f, 0);
+    return true;
+}
+#endif
+
 void grStadium_801D1EF8(Ground_GObj* gobj)
 {
     HSD_JObj* jobj;
@@ -794,6 +867,14 @@ void grStadium_801D1EF8(Ground_GObj* gobj)
             break;
         case 7:
             tobj = gp->u.display.xC8;
+#ifdef TARGET_PC
+            /* XR zoom-only: the feed's grab went into the zoom image. */
+            if (tobj != NULL && grStadium_XrZoomOnly() && gp->u.display.xDC != NULL) {
+                tobj->imagedesc = &GET_WRAPPER(gp->u.display.xDC)->desc;
+                grStadium_801D21E4(gobj, 1);
+                break;
+            }
+#endif
             if (tobj != NULL) {
                 if (gp->u.display.xD8 != NULL) {
                     wrapper = GET_WRAPPER(gp->u.display.xD8);
@@ -1344,6 +1425,15 @@ void grStadium_801D2FD0(Ground_GObj* gobj, intptr_t unused)
 #ifdef TARGET_PC
         if (grStadium_SkipGrab()) {
             return;
+        }
+        if (grStadium_XrZoomOnly()) {
+            vision_gobj = Ground_GetMapGObj(PsType_Display);
+            gp2 = vision_gobj != NULL ? GET_GROUND(vision_gobj) : NULL;
+            if (gp2 != NULL && grStadium_XrZoomGrab(gp2)) {
+                wrapper->flag = true;
+                gp2->u.display.xF8_0 = true;
+                return;
+            }
         }
         /* Jumbotron feed: a full-frame grab off the main camera, whose
          * widening is about the frame centre. */

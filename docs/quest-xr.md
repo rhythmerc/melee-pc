@@ -317,6 +317,22 @@ half rate and zoom clipped:
 | Fire | 40.4 | 41.5 | 12.6 ms |
 | Rock | 38.4 | 41.1 | 13.2 ms |
 
+In mixed reality the feed shows a player zoom instead
+(`MELEE_XR_PS_ZOOM_ONLY=0` keeps the feed). The screen's states and their RNG
+draws are the game's own, and only the grab and the screen's image change,
+in the draw callbacks. The zoom takes turns between the fighters every three
+seconds of the feed. Feed-state runs went from 50.2 / 48.1 / 40.0 / 40.4 /
+38.4 to 54.4 / 50.0 / 43.6 / 47.4 / 46.6 (default, grass, water, fire, rock).
+
+Particles cost 1 to 1.5 ms of the eye pass in the heavy forms
+(`MELEE_XR_PTCL_TEST_HIDE=1` hides them all): fire 47.8 -> 52.6 fps with
+none, rock 41.4 -> 44.4, water 42.6 -> 44.9. Halving the eye pixels
+(`AURORA_XR_EYE_SCALE=0.7`) changed nothing measurable. GPU counters in rock
+form show 38% vertex fetch stall with the shaders busy only 39% of the time.
+Aurora's shaders pull vertices from storage buffers
+(`vbuf`/`abuf: array<u32>`, decoded in the shader), so the eye pass looks
+limited by vertex fetch, not by pixels.
+
 Fire and rock are limited by their own scenery (360 to 380 world draws),
 not by the jumbotron. In fire form the zoom went from 30.1 to 35.1 fps with
 clipping, and the feed from 27.7 (every frame) to 41.3 (every other) and

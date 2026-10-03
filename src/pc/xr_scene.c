@@ -619,20 +619,38 @@ static const ParticleRule s_particles[] = {
 };
 #define PARTICLE_COUNT ((int)(sizeof s_particles / sizeof s_particles[0]))
 
+/* MELEE_XR_PTCL, parsed once: this runs for every particle drawn. */
+#define PARTICLE_ENV_MAX 32
+static ParticleRule s_env_particles[PARTICLE_ENV_MAX];
+static int s_env_particle_count = -1;
+
+static void load_particle_rules(void) {
+    s_env_particle_count = 0;
+    for (const char* q = getenv("MELEE_XR_PTCL"); q != NULL && *q != '\0';) {
+        int g, b, n;
+        if (sscanf(q, "%d:%d:%d", &g, &b, &n) == 3 && s_env_particle_count < PARTICLE_ENV_MAX) {
+            s_env_particles[s_env_particle_count++] = (ParticleRule){g, b, n};
+        }
+        q = strchr(q, ',');
+        q = q != NULL ? q + 1 : NULL;
+    }
+}
+
 static bool particle_rule(int grkind, int bank, int id) {
+    if (s_env_particle_count < 0) {
+        load_particle_rules();
+    }
     for (int i = 0; i < PARTICLE_COUNT; i++) {
         const ParticleRule* r = &s_particles[i];
         if (r->grkind == grkind && r->bank == bank && (r->id < 0 || r->id == id)) {
             return true;
         }
     }
-    for (const char* q = getenv("MELEE_XR_PTCL"); q != NULL && *q != '\0';) {
-        int g, b, n;
-        if (sscanf(q, "%d:%d:%d", &g, &b, &n) == 3 && g == grkind && b == bank && (n < 0 || n == id)) {
+    for (int i = 0; i < s_env_particle_count; i++) {
+        const ParticleRule* r = &s_env_particles[i];
+        if (r->grkind == grkind && r->bank == bank && (r->id < 0 || r->id == id)) {
             return true;
         }
-        q = strchr(q, ',');
-        q = q != NULL ? q + 1 : NULL;
     }
     return false;
 }
@@ -641,7 +659,18 @@ bool pc_xr_particle_begin(int bank, int id, const float pos[3]) {
     if (s_category != AURORA_XR_WORLD || s_center_grkind <= 0) {
         return false;
     }
-    if (getenv("MELEE_XR_PTCL_LOG") != NULL) {
+    static int log = -1, hide_all = -1;
+    if (log < 0) {
+        log = getenv("MELEE_XR_PTCL_LOG") != NULL;
+        /* MELEE_XR_PTCL_TEST_HIDE=1: every particle out of 3D and the flat
+         * frame, to measure what particles cost (a test knob). */
+        hide_all = getenv("MELEE_XR_PTCL_TEST_HIDE") != NULL;
+    }
+    if (hide_all) {
+        aurora_xr_camera(AURORA_XR_HIDDEN, NULL);
+        return true;
+    }
+    if (log) {
         static unsigned char seen[256][64];
         unsigned char* f = &seen[bank & 255][(id & 511) >> 3];
         if (!(*f & (1u << (id & 7)))) {
