@@ -2269,6 +2269,7 @@ struct Renderer3D {
   // A fight frame that found no free 3D image: the headset keeps the last
   // one, and the flat frame is still nobody's to see.
   bool missedStereo = false;
+  uint32_t directSamples = 0; // g_xrSamples the direct attachments were made for
   bool failed = false;
   GpuTiming timing;
   // Direct path: both eyes straight into the shared 3D image, one pass.
@@ -2377,6 +2378,7 @@ void map_timing() {
 // The 3D frame hook drew this frame (render worker), so the flat present can
 // be skipped: nothing shows the virtual screen during a fight.
 bool g_skipPresent = false;
+uint32_t g_xrSamples = 1; // AURORA_XR_MSAA: the 3D eyes' sample count
 
 ReplayTarget make_replay_target(const gfx::RenderTargetLayout& layout, uint32_t width, uint32_t height,
                                 const char* label) {
@@ -2542,7 +2544,7 @@ constexpr char kCoverageShader[] = R"(
 )";
 
 bool ensure_direct(const gfx::RenderTargetLayout& layout) {
-  if (R.coverClear && R.directKey == layout.key)
+  if (R.coverClear && R.directKey == layout.key && R.directSamples == g_xrSamples)
     return true;
   auto& device = webgpu::g_device;
   const auto& stereo = g_streams[kStereo];
@@ -2550,20 +2552,31 @@ bool ensure_direct(const gfx::RenderTargetLayout& layout) {
   const wgpu::TextureViewDescriptor layered{.dimension = wgpu::TextureViewDimension::e2DArray,
                                             .arrayLayerCount = stereo.layers};
   const wgpu::TextureViewDescriptor* viewDesc = stereo.layers > 1 ? &layered : nullptr;
+  // MSAA: every attachment multisampled and, where the device allows,
+  // transient: on a tiler they then live only in tile memory, and only the
+  // resolve into the shared image reaches memory.
+  const bool msaa = g_xrSamples > 1;
+  const auto usage = wgpu::TextureUsage::RenderAttachment |
+                     (msaa && device.HasFeature(wgpu::FeatureName::TransientAttachments)
+                          ? wgpu::TextureUsage::TransientAttachment
+                          : wgpu::TextureUsage::None);
   const wgpu::TextureDescriptor dd{.label = "XR 3D depth",
-                                   .usage = wgpu::TextureUsage::RenderAttachment,
+                                   .usage = usage,
                                    .size = size,
-                                   .format = layout.depthStencilFormat};
+                                   .format = layout.depthStencilFormat,
+                                   .sampleCount = g_xrSamples};
   R.directDepth = device.CreateTexture(&dd);
   R.directExtras.clear();
   R.directExtraViews = {};
   for (uint32_t i = 0; i < layout.colorAttachmentCount; ++i) {
-    if (i == gfx::SceneColorAttachmentIndex)
-      continue;
-    const wgpu::TextureDescriptor td{.label = "XR 3D extra attachment",
-                                     .usage = wgpu::TextureUsage::RenderAttachment,
+    if (i == gfx::SceneColorAttachmentIndex && !msaa)
+      continue; // the shared image itself
+    const wgpu::TextureDescriptor td{.label = i == gfx::SceneColorAttachmentIndex ? "XR 3D color (MSAA)"
+                                                                                   : "XR 3D extra attachment",
+                                     .usage = usage,
                                      .size = size,
-                                     .format = layout.colorAttachments[i].format};
+                                     .format = layout.colorAttachments[i].format,
+                                     .sampleCount = g_xrSamples};
     auto tex = device.CreateTexture(&td);
     R.directExtraViews[i] = tex.CreateView(viewDesc);
     R.directExtras.push_back(tex);
@@ -2596,6 +2609,7 @@ bool ensure_direct(const gfx::RenderTargetLayout& layout) {
         .layout = pipelineLayout,
         .vertex = {.module = module, .entryPoint = "vs"},
         .depthStencil = &depth,
+        .multisample = {.count = g_xrSamples},
         .fragment = &fragment,
     };
     return device.CreateRenderPipeline(&rpd);
@@ -2604,6 +2618,7 @@ bool ensure_direct(const gfx::RenderTargetLayout& layout) {
   R.coverClear = make("fs_clear", gx::UseReversedZ ? wgpu::CompareFunction::Equal : wgpu::CompareFunction::Equal);
   R.coverSet = make("fs_set", gx::UseReversedZ ? wgpu::CompareFunction::Less : wgpu::CompareFunction::Greater);
   R.directKey = layout.key;
+  R.directSamples = g_xrSamples;
   return true;
 }
 
@@ -2753,7 +2768,14 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
       const auto* viewDesc = g_multiview ? &layered : nullptr;
       const auto dstView = dst.CreateView(viewDesc);
       t.colorViews = R.directExtraViews;
-      t.colorViews[gfx::SceneColorAttachmentIndex] = dstView;
+      if (g_xrSamples > 1) {
+        // Draw into the MSAA image, resolve into the shared one, and keep
+        // none of the samples.
+        t.resolveViews[gfx::SceneColorAttachmentIndex] = dstView;
+        t.colorStore = wgpu::StoreOp::Discard;
+      } else {
+        t.colorViews[gfx::SceneColorAttachmentIndex] = dstView;
+      }
       t.depthView = R.directDepth.CreateView(viewDesc);
       t.clearColor = {0, 0, 0, 0};
       t.clearDepth = gx::UseReversedZ ? 0.f : 1.f;
@@ -2844,6 +2866,10 @@ void add_required_features(const wgpu::Adapter& adapter, std::vector<wgpu::Featu
   if (adapter.HasFeature(wgpu::FeatureName::ChromiumExperimentalMultiview) &&
       std::find(features.begin(), features.end(), wgpu::FeatureName::ChromiumExperimentalMultiview) == features.end())
     features.push_back(wgpu::FeatureName::ChromiumExperimentalMultiview);
+  // MSAA eye attachments that never leave tile memory (AURORA_XR_MSAA).
+  if (adapter.HasFeature(wgpu::FeatureName::TransientAttachments) &&
+      std::find(features.begin(), features.end(), wgpu::FeatureName::TransientAttachments) == features.end())
+    features.push_back(wgpu::FeatureName::TransientAttachments);
   // XR GPU timing (AURORA_XR_TIMING).
   if (env_flag("AURORA_XR_TIMING", true) && adapter.HasFeature(wgpu::FeatureName::TimestampQuery) &&
       std::find(features.begin(), features.end(), wgpu::FeatureName::TimestampQuery) == features.end())
@@ -2899,7 +2925,14 @@ wgpu::Texture begin_frame(uint32_t width, uint32_t height) noexcept {
     // Multiview needs the direct path (single-sample framebuffer).
     g_multiview = webgpu::g_device.HasFeature(wgpu::FeatureName::ChromiumExperimentalMultiview) &&
                   g_sceneSamples == 1 && env_flag("AURORA_XR_MULTIVIEW", true);
-    Log.info("3D eyes: {}", g_multiview ? "multiview, both in one pass" : "side by side, one pass each");
+    // AURORA_XR_MSAA=<1|2|4>: samples for the 3D eyes alone (the flat frame
+    // keeps its own), resolved into the shared image at the end of the pass.
+    {
+      const int n = static_cast<int>(env_float("AURORA_XR_MSAA", 1.f));
+      g_xrSamples = g_multiview && (n == 2 || n == 4) ? static_cast<uint32_t>(n) : 1u;
+    }
+    Log.info("3D eyes: {}, {}x MSAA", g_multiview ? "multiview, both in one pass" : "side by side, one pass each",
+             g_xrSamples);
     g_phase = Phase::Starting;
     g_thread = std::thread(thread_main);
     return {};
@@ -2920,6 +2953,7 @@ wgpu::Texture begin_frame(uint32_t width, uint32_t height) noexcept {
     // World draws recorded from now on resolve their multiview twins.
     auto mvLayout = gfx::scene_render_target_layout();
     mvLayout.viewCount = 2;
+    mvLayout.sampleCount = g_xrSamples;
     gfx::detail::finalize_render_target_layout(mvLayout);
     gfx::set_xr_multiview_layout(mvLayout);
   }

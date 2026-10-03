@@ -334,6 +334,29 @@ Aurora's shaders pull vertices from storage buffers
 (`vbuf`/`abuf: array<u32>`, decoded in the shader), so the eye pass looks
 limited by vertex fetch, not by pixels.
 
+### MSAA on the 3D eyes
+
+`AURORA_XR_MSAA=<1|2|4>` multisamples the 3D eyes alone; the flat frame
+keeps its own sample count. The eyes keep multiview and the direct path:
+color, the extra attachments and depth are multisampled, transient where
+the device allows (`TransientAttachments`, so on a tiler they stay in tile
+memory), and the pass resolves into the shared image and discards the
+samples. The coverage draws that write passthrough alpha run multisampled
+too, so the resolved alpha softens silhouettes against the room.
+
+This needs the Dawn fork's multiview resolve: a resolve target with a
+layer per view, like its attachment (`CommandEncoder.cpp` validation and
+the lazy clear in `CommandBuffer.cpp`).
+
+Quest 3, mixed reality, four CPUs, warm pipeline cache, game fps (app GPU
+per display frame), off -> 4x: Battlefield 59.9 -> 59.9 (3.35 -> 4.01 ms),
+Fountain of Dreams 58.9 -> 59.8 (4.04 -> 4.22 ms), Pokémon Stadium rock
+59.3 -> 58.4 (4.20 -> 4.52 ms; stale frames 1.5 -> 4.5 per second).
+
+After a build that invalidates the pipeline cache (a new Dawn), the first
+runs compile thousands of pipelines for over a minute and are CPU bound;
+`quest_perf.py` flags them ("pipeline cache cold").
+
 ### Decoded positions
 
 Aurora's vertex shaders decode the game's GX vertex data themselves: an

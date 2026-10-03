@@ -71,6 +71,7 @@ VRAPI = re.compile(
     r"App=([\d.]+)ms.*?GPU%=([\d.]+),CPU%=([\d.]+)"
 )
 XR_FPS = re.compile(r"([\d.]+) display fps \((\d+)% 3D\); frames/s released: screen ([\d.]+), 3D ([\d.]+), HUD ([\d.]+)")
+PIPELINES = re.compile(r"pipelines: (\d+) created .*?Dawn cache: (\d+) hits.*?(\d+) misses")
 XR_GPU = re.compile(r"GPU 3D passes per frame \(us\): 3D eyes (\d+).*?\(total (\d+)\); (\d+) world draws")
 
 
@@ -110,6 +111,11 @@ def summarize(text):
     if fps:
         out.append(f"  game: 3D released {mean([float(f[3]) for f in fps]):.1f}/s, "
                    f"HUD {mean([float(f[4]) for f in fps]):.1f}/s ({len(fps)} samples)")
+    # Pipelines still compiling (a new build or Dawn invalidates the cache)
+    # load the CPU and make the run meaningless.
+    pipes = [m.groups() for m in map(PIPELINES.search, lines) if m]
+    if pipes and int(pipes[-1][2]) > 500:  # cumulative; a warm cache still misses ~100 at boot
+        out.insert(0, f"  WARNING: pipeline cache cold ({pipes[-1][2]} misses so far); rerun")
     gpu = [m.groups() for m in map(XR_GPU.search, lines) if m]
     if gpu:
         out.append(f"  passes: 3D eyes {mean([int(g[0]) for g in gpu]):.0f} us, "

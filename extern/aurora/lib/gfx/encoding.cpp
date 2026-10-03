@@ -591,7 +591,7 @@ void encode_xr_replay(const wgpu::CommandEncoder& cmd, FramePacket& frame, XrCat
         .view = target.colorViews[i],
         .resolveTarget = target.resolveViews[i],
         .loadOp = wgpu::LoadOp::Clear,
-        .storeOp = wgpu::StoreOp::Store,
+        .storeOp = target.colorStore,
         .clearValue = i == SceneColorAttachmentIndex ? target.clearColor : wgpu::Color{0, 0, 0, 0},
     };
   }

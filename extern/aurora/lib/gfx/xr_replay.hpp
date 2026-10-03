@@ -29,6 +29,7 @@ struct XrReplayTarget {
   wgpu::Color clearColor{0, 0, 0, 0};
   float clearDepth = 0.f;
   wgpu::StoreOp depthStore = wgpu::StoreOp::Store; // Discard when nothing reads it after
+  wgpu::StoreOp colorStore = wgpu::StoreOp::Store; // Discard for MSAA attachments resolved in the pass
   // World: each view's rectangle, game viewports ignored.
   // HUD: the game's viewports and scissors, scaled to the target.
   bool fullViewport = true;
