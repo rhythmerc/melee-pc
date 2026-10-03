@@ -14,6 +14,9 @@
     <uses-feature android:name="android.hardware.vr.headtracking" android:required="true" android:version="1" />
     <!-- Meta only exposes XR_FB_passthrough to apps that declare this. -->
     <uses-feature android:name="com.oculus.feature.PASSTHROUGH" android:required="false" />
+    <!-- Hand tracking (XR_EXT_hand_tracking): pinches place the arena. -->
+    <uses-feature android:name="oculus.software.handtracking" android:required="false" />
+    <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
 
     <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
     <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />

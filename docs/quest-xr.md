@@ -241,27 +241,37 @@ off by default (`AURORA_XR_PERF_GPU` / `AURORA_XR_PERF_CPU` = `low`, `high`,
 
 ### Placing the arena
 
-Pause the fight to move the arena. Each controller shows a laser, and the
-grips grab instead of pressing Z. In some modes Z on the pause screen retries
-the match, so the grips don't pass it through while paused. Triggers, A and
-Start work as usual, so L+R+A+Start still quits.
+Pause the fight to move the arena. Put a controller down and that hand is
+tracked instead (`XR_EXT_hand_tracking`), and a pinch does what the grip
+does. Hands and controllers work the same way and can be mixed. While paused
+the grips grab instead of pressing Z. In some modes Z on the pause screen
+retries the match, so the grips don't pass it through while paused.
+Triggers, A and Start work as usual, so L+R+A+Start still quits.
 
-- **One hand.** Point at the arena and squeeze a grip. The arena hangs off
-  the laser at the point you grabbed, and its front turns to face you. Let
-  go and it stays there, facing the way it was.
-- **Two hands.** While holding with one hand, squeeze the other grip
-  anywhere. Spreading or closing your hands scales the arena, and turning
-  them turns it about the vertical axis, around the point between your
-  hands. Letting go of either hand ends the grab, so the turn is kept.
+Each hand points a laser at the arena. A controller's laser comes out of
+its tip. A tracked hand's runs from an estimated shoulder through the index
+knuckle, so it holds still while you pinch. Once the touch point (the
+controller's tip, or the pinch) is inside the arena's grab box, a bit larger
+than the stage, the laser gives way to a dot there.
+
+- **One hand.** Squeeze or pinch with the laser on the arena, or inside the
+  box. The arena hangs off the laser at the point you grabbed, or off the
+  touch point, and keeps its heading. Let go and it stays there.
+- **Two hands.** While holding with one hand, squeeze or pinch with the
+  other, anywhere. Spreading or closing your hands scales the arena, and
+  turning them turns it about the vertical axis, around the point between
+  the touch points. Moving both hands carries the arena along with that
+  point. Letting go of one hand carries on with the other alone.
 
 The HUD moves, turns and scales with the arena. The placement lasts for the
 session and is logged when you let go (`Arena placed at x,y,z, yaw, scale`),
 which is handy for `AURORA_XR_ARENA_POS` and `AURORA_XR_ARENA_SCALE`.
 
-The lasers are quad layers with static textures, drawn at display rate from
-the latest controller poses. Coloring them needs
-`XR_KHR_composition_layer_color_scale_bias`. A laser is cyan on the arena,
-amber while grabbing, and faint white otherwise. The arena moves at the
+The lasers and dots are quad layers with static textures, drawn at display
+rate from the latest controller and hand poses. Coloring them needs
+`XR_KHR_composition_layer_color_scale_bias`. A laser or dot is cyan on the
+arena, amber while grabbing, and faint white otherwise. A pinch closes when
+the thumb and index tips come within 2 cm and opens past 3.5 cm. The arena moves at the
 game's frame rate.
 
 ### Performance
@@ -439,7 +449,7 @@ AURORA_XR=1 build/linux-xr-fork/melee disc.rvz
 | A / B | A / B |
 | X / Y | X / Y |
 | Triggers | Analog L / R, digital past 90% |
-| Either grip | Z (grabs the arena while paused) |
+| Either grip | Z (grabs the arena while paused; with hands, pinch) |
 | Left menu button | Start |
 
 ## Knobs

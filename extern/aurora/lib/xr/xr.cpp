@@ -259,7 +259,14 @@ struct Bridge {
   std::array<XrAction, 2> aim{}, grab{};
   std::array<XrSpace, 2> aimSpace{};
   bool pointerMode = false; // last frame: paused fight, the grips grab instead of pressing Z
+  // Hand tracking (XR_EXT_hand_tracking): pinches grab the arena too.
+  bool hasHandTrackingExt = false;
+  PFN_xrCreateHandTrackerEXT createHandTracker = nullptr;
+  PFN_xrDestroyHandTrackerEXT destroyHandTracker = nullptr;
+  PFN_xrLocateHandJointsEXT locateHandJoints = nullptr;
+  std::array<XrHandTrackerEXT, 2> handTrackers{};
   XrVector3f head{};        // between the eyes, from the latest views
+  XrQuaternionf headOrientation{0.f, 0.f, 0.f, 1.f};
   bool focused = false;
 
   // Laser layers: static textures, drawn as quads at display rate.
@@ -364,6 +371,7 @@ bool create_instance() {
     B.hasRefreshRateExt |= !std::strcmp(p.extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
     B.hasColorScaleBias |= !std::strcmp(p.extensionName, XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME);
     B.hasPerfSettingsExt |= !std::strcmp(p.extensionName, XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
+    B.hasHandTrackingExt |= !std::strcmp(p.extensionName, XR_EXT_HAND_TRACKING_EXTENSION_NAME);
   }
   if (!hasVk2) {
     Log.error("OpenXR runtime lacks XR_KHR_vulkan_enable2");
@@ -378,6 +386,8 @@ bool create_instance() {
     exts.push_back(XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME);
   if (B.hasPerfSettingsExt)
     exts.push_back(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
+  if (B.hasHandTrackingExt)
+    exts.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
   XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
 #ifdef __ANDROID__
   exts.push_back(XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME);
@@ -415,6 +425,11 @@ bool create_instance() {
   }
   if (B.hasPerfSettingsExt)
     B.setPerformanceLevel = xr_proc<PFN_xrPerfSettingsSetPerformanceLevelEXT>("xrPerfSettingsSetPerformanceLevelEXT");
+  if (B.hasHandTrackingExt) {
+    B.createHandTracker = xr_proc<PFN_xrCreateHandTrackerEXT>("xrCreateHandTrackerEXT");
+    B.destroyHandTracker = xr_proc<PFN_xrDestroyHandTrackerEXT>("xrDestroyHandTrackerEXT");
+    B.locateHandJoints = xr_proc<PFN_xrLocateHandJointsEXT>("xrLocateHandJointsEXT");
+  }
   return true;
 }
 
@@ -774,6 +789,26 @@ bool create_input() {
   return true;
 }
 
+// One tracker per hand, when the runtime and headset support it.
+bool create_hand_trackers() {
+  if (!B.hasHandTrackingExt || !B.createHandTracker || !B.locateHandJoints)
+    return false;
+  XrSystemHandTrackingPropertiesEXT ht{XR_TYPE_SYSTEM_HAND_TRACKING_PROPERTIES_EXT};
+  XrSystemProperties sp{XR_TYPE_SYSTEM_PROPERTIES};
+  sp.next = &ht;
+  XR_TRY(xrGetSystemProperties(B.instance, B.systemId, &sp));
+  if (!ht.supportsHandTracking)
+    return false;
+  for (int h = 0; h < 2; ++h) {
+    XrHandTrackerCreateInfoEXT ci{XR_TYPE_HAND_TRACKER_CREATE_INFO_EXT};
+    ci.hand = h == 0 ? XR_HAND_LEFT_EXT : XR_HAND_RIGHT_EXT;
+    ci.handJointSet = XR_HAND_JOINT_SET_DEFAULT_EXT;
+    XR_TRY(B.createHandTracker(B.session, &ci, &B.handTrackers[h]));
+  }
+  Log.info("Hand tracking ready");
+  return true;
+}
+
 bool action_bool(XrAction a) {
   XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
   gi.action = a;
@@ -1100,19 +1135,25 @@ void publish_views(XrTime displayTime) {
     g_viewsValid = true;
     const XrVector3f &l = views[0].pose.position, &r = views[1].pose.position;
     B.head = {(l.x + r.x) * 0.5f, (l.y + r.y) * 0.5f, (l.z + r.z) * 0.5f};
+    B.headOrientation = views[0].pose.orientation;
   }
 }
 
 // ---------------------------------------------------------------- XR thread: arena placement
 //
-// While a fight is paused each controller shows a laser. Squeezing a grip
-// while its laser is on the arena grabs it:
-//   one hand   the arena hangs off the laser at the grabbed point and turns
-//              its front (the game camera's side) to the player; letting go
-//              leaves it there
-//   two hands  squeezing the other grip too scales the arena and turns it
-//              about the vertical axis, around the point between the hands;
-//              letting go of either hand ends the grab
+// While a fight is paused each hand, holding a controller or tracked (the
+// controller put down), points a laser at the arena, or shows a dot once its
+// touch point (the controller's tip, or the pinch) is inside the arena's grab
+// box. Squeezing the grip or pinching with the laser on the arena, or inside
+// the box, grabs it:
+//   one hand   the arena hangs off the laser at the grabbed point, or off
+//              the touch point, keeping its heading; letting go leaves it
+//   two hands  squeezing or pinching with the other hand too (anywhere)
+//              scales the arena and turns it about the vertical axis around
+//              the point between the touch points, and the arena follows
+//              that point as it moves; letting go of one hand carries on
+//              with the other alone
+// Controllers and hands work the same way and mix freely.
 // Starting position and scale: AURORA_XR_ARENA_POS, AURORA_XR_ARENA_SCALE.
 
 XrVector3f operator+(XrVector3f a, XrVector3f b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
@@ -1158,14 +1199,6 @@ XrQuaternionf quat_from_axes(XrVector3f x, XrVector3f y, XrVector3f z) {
   }
   return q;
 }
-float wrap_angle(float a) {
-  constexpr float kPi = 3.14159265f;
-  while (a > kPi)
-    a -= 2.f * kPi;
-  while (a < -kPi)
-    a += 2.f * kPi;
-  return a;
-}
 
 ArenaPose arena_pose() {
   std::lock_guard lock{g_arenaMutex};
@@ -1191,13 +1224,22 @@ constexpr XrVector3f kGrabBoxMax{120.f, 100.f, 60.f};
 // Meters per game unit: Final Destination from about 25 cm to 8.5 m wide.
 constexpr float kMinArenaScale = 0.0015f, kMaxArenaScale = 0.05f;
 
+// A room point (meters) in game units.
+XrVector3f to_game(const ArenaPose& a, XrVector3f p) {
+  const XrVector3f g = rot_y(p - a.pos, -a.yaw) * (1.f / a.scale);
+  std::lock_guard lock{g_arenaMutex};
+  return g + XrVector3f{g_arenaCenter[0], g_arenaCenter[1], g_arenaCenter[2]};
+}
+
+bool in_grab_box(const ArenaPose& a, XrVector3f p) {
+  const XrVector3f g = to_game(a, p);
+  return g.x >= kGrabBoxMin.x && g.x <= kGrabBoxMax.x && g.y >= kGrabBoxMin.y && g.y <= kGrabBoxMax.y &&
+         g.z >= kGrabBoxMin.z && g.z <= kGrabBoxMax.z;
+}
+
 // Distance along the ray (meters) to the arena's grab box, or -1 for a miss.
 float hit_arena(const ArenaPose& a, XrVector3f origin, XrVector3f dir) {
-  XrVector3f o = rot_y(origin - a.pos, -a.yaw) * (1.f / a.scale);
-  {
-    std::lock_guard lock{g_arenaMutex};
-    o = o + XrVector3f{g_arenaCenter[0], g_arenaCenter[1], g_arenaCenter[2]};
-  }
+  const XrVector3f o = to_game(a, origin);
   const XrVector3f d = rot_y(dir, -a.yaw) * (1.f / a.scale);
   const float os[3] = {o.x, o.y, o.z}, ds[3] = {d.x, d.y, d.z};
   const float lo[3] = {kGrabBoxMin.x, kGrabBoxMin.y, kGrabBoxMin.z};
@@ -1222,10 +1264,15 @@ float hit_arena(const ArenaPose& a, XrVector3f origin, XrVector3f dir) {
 
 struct Hand {
   bool valid = false;
-  XrVector3f origin{};
+  bool tracked = false;               // an articulated hand (pinches) rather than a controller (grip)
+  XrVector3f origin{};                // the laser: from the controller, or from the hand's index knuckle
   XrVector3f dir{0.f, 0.f, -1.f};
-  bool held = false, wasHeld = false; // grip past its threshold, with hysteresis
-  float hit = -1.f;                   // meters along the laser to the arena, -1 = none
+  XrVector3f touch{};                 // what reaches into the arena: the pinch, or the controller's tip
+  bool held = false, wasHeld = false; // grip or pinch closed, with hysteresis
+  bool inside = false;                // `touch` is in the arena's grab box: a dot instead of a laser
+  bool engaged = false;               // holding the arena
+  bool direct = false;                // engaged from inside the box: drags by `touch`, not along the laser
+  float hit = -1.f;                   // outside the box: meters along the laser to the arena, -1 = none
 };
 
 struct Grab {
@@ -1233,32 +1280,83 @@ struct Grab {
   int oneHand = -1; // the hand dragging the arena alone
   bool twoHands = false;
   ArenaPose start;
-  float dist = 0.f;  // one hand: the grabbed point's distance along the laser
-  XrVector3f offset; // one hand: arena center minus grabbed point, unrotated by the arena's yaw
+  float dist = 0.f;  // one controller: the grabbed point's distance along its laser
+  XrVector3f offset; // one hand: arena position minus the grabbed point
   XrVector3f mid0;   // two hands: midpoint, span and heading at the start
   float span0 = 1.f, heading0 = 0.f;
-  std::chrono::steady_clock::time_point last;
 };
 Grab G;
+
+// Thumb and index tips closer than kPinchClose (meters) close a pinch;
+// farther than kPinchOpen open it.
+constexpr float kPinchClose = 0.02f, kPinchOpen = 0.035f;
+
+// An articulated hand's pinch and laser, while hand tracking sees the hand
+// (on Quest, whenever that controller is put down). False: use the
+// controller. The laser runs from an estimated shoulder through the index
+// knuckle, which stays put while the fingers pinch.
+bool locate_pinch(int h, XrTime time, Hand& hand) {
+  if (!B.handTrackers[h])
+    return false;
+  std::array<XrHandJointLocationEXT, XR_HAND_JOINT_COUNT_EXT> joints{};
+  XrHandJointLocationsEXT locs{XR_TYPE_HAND_JOINT_LOCATIONS_EXT};
+  locs.jointCount = static_cast<uint32_t>(joints.size());
+  locs.jointLocations = joints.data();
+  XrHandJointsLocateInfoEXT li{XR_TYPE_HAND_JOINTS_LOCATE_INFO_EXT};
+  li.baseSpace = B.space;
+  li.time = time;
+  if (XR_FAILED(B.locateHandJoints(B.handTrackers[h], &li, &locs)) || !locs.isActive)
+    return false;
+  hand.tracked = true;
+  const auto& thumb = joints[XR_HAND_JOINT_THUMB_TIP_EXT];
+  const auto& index = joints[XR_HAND_JOINT_INDEX_TIP_EXT];
+  const auto& knuckle = joints[XR_HAND_JOINT_INDEX_PROXIMAL_EXT];
+  if (!(thumb.locationFlags & index.locationFlags & knuckle.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT))
+    return true; // seen but lost this frame: not valid, so any grab lets go
+  hand.valid = true;
+  hand.touch = (thumb.pose.position + index.pose.position) * 0.5f;
+  const XrVector3f fwd = qrot(B.headOrientation, {0.f, 0.f, -1.f});
+  const XrVector3f right = vnorm({-fwd.z, 0.f, fwd.x});
+  const XrVector3f shoulder = B.head + XrVector3f{0.f, -0.15f, 0.f} + right * (h == 0 ? -0.18f : 0.18f);
+  hand.origin = knuckle.pose.position;
+  hand.dir = vnorm(hand.origin - shoulder);
+  const float d = vlen(index.pose.position - thumb.pose.position);
+  hand.held = hand.held ? d < kPinchOpen : d < kPinchClose;
+  return true;
+}
 
 void locate_hands(XrTime time) {
   for (int h = 0; h < 2; ++h) {
     Hand& hand = G.hands[h];
+    const bool wasTracked = hand.tracked;
     hand.wasHeld = hand.held;
     hand.valid = false;
-    if (!B.aimSpace[h] || !B.focused) {
+    if (!B.focused) {
       hand.held = false;
       continue;
     }
-    XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
-    constexpr XrSpaceLocationFlags kValid = XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
-    if (XR_SUCCEEDED(xrLocateSpace(B.aimSpace[h], B.space, time, &loc)) && (loc.locationFlags & kValid) == kValid) {
-      hand.valid = true;
-      hand.origin = loc.pose.position;
-      hand.dir = vnorm(qrot(loc.pose.orientation, {0.f, 0.f, -1.f}));
+    if (!locate_pinch(h, time, hand)) {
+      hand.tracked = false;
+      if (wasTracked)
+        hand.held = false; // picked up the controller: its grip starts open
+      if (!B.aimSpace[h]) {
+        hand.held = false;
+        continue;
+      }
+      XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+      constexpr XrSpaceLocationFlags kValid =
+          XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+      if (XR_SUCCEEDED(xrLocateSpace(B.aimSpace[h], B.space, time, &loc)) && (loc.locationFlags & kValid) == kValid) {
+        hand.valid = true;
+        hand.origin = loc.pose.position;
+        hand.dir = vnorm(qrot(loc.pose.orientation, {0.f, 0.f, -1.f}));
+        hand.touch = hand.origin;
+      }
+      const float grip = action_float(B.grab[h]);
+      hand.held = hand.held ? grip > 0.35f : grip > 0.65f;
+    } else if (!wasTracked) {
+      hand.held = false; // put the controller down: the pinch starts open
     }
-    const float grip = action_float(B.grab[h]);
-    hand.held = hand.held ? grip > 0.35f : grip > 0.65f;
   }
 }
 
@@ -1272,17 +1370,24 @@ void end_grab() {
            a.yaw * 57.2958f, a.scale);
 }
 
+// What a hand drags alone: its pinch or controller tip, or the grabbed
+// point on its laser.
+XrVector3f drag_point(const Hand& hand) { return hand.direct ? hand.touch : hand.origin + hand.dir * G.dist; }
+
 void begin_one_hand(int h, const ArenaPose& a) {
   const Hand& hand = G.hands[h];
   G.oneHand = h;
   G.twoHands = false;
   G.start = a;
-  G.dist = hand.hit;
-  G.offset = rot_y(a.pos - (hand.origin + hand.dir * hand.hit), -a.yaw);
+  // The laser's hit, or (back from two hands with the laser off the arena)
+  // the point on the laser nearest the arena.
+  if (!hand.direct)
+    G.dist = hand.hit >= 0.f ? hand.hit : std::max(vdot(a.pos - hand.origin, hand.dir), 0.1f);
+  G.offset = a.pos - drag_point(hand);
 }
 
 void begin_two_hands(const ArenaPose& a) {
-  const XrVector3f l = G.hands[0].origin, r = G.hands[1].origin;
+  const XrVector3f l = G.hands[0].touch, r = G.hands[1].touch;
   const XrVector3f span = r - l;
   G.oneHand = -1;
   G.twoHands = true;
@@ -1294,53 +1399,60 @@ void begin_two_hands(const ArenaPose& a) {
 
 // Per display frame. `active`: a fight is paused and on the headset.
 void update_grab(bool active) {
-  const auto now = std::chrono::steady_clock::now();
-  const float dt = std::clamp(std::chrono::duration<float>(now - G.last).count(), 0.f, 0.1f);
-  G.last = now;
   ArenaPose a = arena_pose();
-  for (Hand& hand : G.hands)
-    hand.hit = hand.valid ? hit_arena(a, hand.origin, hand.dir) : -1.f;
+  for (Hand& hand : G.hands) {
+    hand.inside = hand.valid && in_grab_box(a, hand.touch);
+    hand.hit = hand.valid && !hand.inside ? hit_arena(a, hand.origin, hand.dir) : -1.f;
+  }
   if (!active) {
+    for (Hand& hand : G.hands)
+      hand.engaged = false;
     end_grab();
     return;
   }
   const auto pressed = [](const Hand& h) { return h.valid && h.held && !h.wasHeld; };
-  const auto released = [](const Hand& h) { return !h.valid || !h.held; };
+  for (Hand& hand : G.hands)
+    hand.engaged &= hand.valid && hand.held;
+  // A press inside the box or with the laser on the arena takes hold of it;
+  // with one hand already holding, a press of the other joins it anywhere
+  // (also when both press together). Inside the box the hand drags by its
+  // touch point, outside along its laser, until it lets go.
+  const auto engage = [](Hand& hand) {
+    hand.engaged = true;
+    hand.direct = hand.inside;
+  };
+  for (Hand& hand : G.hands)
+    if (pressed(hand) && (hand.inside || hand.hit >= 0.f))
+      engage(hand);
+  for (int h = 0; h < 2; ++h)
+    if (pressed(G.hands[h]) && !G.hands[h].engaged && G.hands[1 - h].engaged)
+      engage(G.hands[h]);
 
-  if (G.twoHands) {
-    if (released(G.hands[0]) || released(G.hands[1]))
-      end_grab();
-  } else if (G.oneHand >= 0) {
-    if (released(G.hands[G.oneHand]))
-      end_grab();
-    else if (pressed(G.hands[1 - G.oneHand]))
+  const bool l = G.hands[0].engaged, r = G.hands[1].engaged;
+  if (l && r) {
+    if (!G.twoHands)
       begin_two_hands(a);
+  } else if (l || r) {
+    // Letting go of one of two hands carries on with the other alone.
+    if (G.oneHand != (l ? 0 : 1))
+      begin_one_hand(l ? 0 : 1, a);
   } else {
-    for (int h = 0; h < 2; ++h) {
-      if (pressed(G.hands[h]) && G.hands[h].hit >= 0.f) {
-        begin_one_hand(h, a);
-        break;
-      }
-    }
+    end_grab();
+    return;
   }
 
   if (G.oneHand >= 0) {
-    const Hand& hand = G.hands[G.oneHand];
-    const XrVector3f point = hand.origin + hand.dir * G.dist;
-    // Ease the front of the stage (+Z) round to face the player.
-    const float facing = std::atan2(B.head.x - a.pos.x, B.head.z - a.pos.z);
-    a.yaw += wrap_angle(facing - a.yaw) * (1.f - std::exp(-dt * 12.f));
-    a.pos = point + rot_y(G.offset, a.yaw);
-    set_arena_pose(a);
-  } else if (G.twoHands) {
-    const XrVector3f span = G.hands[1].origin - G.hands[0].origin;
+    a.pos = drag_point(G.hands[G.oneHand]) + G.offset;
+  } else {
+    const XrVector3f lp = G.hands[0].touch, rp = G.hands[1].touch;
+    const XrVector3f span = rp - lp;
     a.scale = std::clamp(G.start.scale * vlen(span) / G.span0, kMinArenaScale, kMaxArenaScale);
     const float ratio = a.scale / G.start.scale;
     const float turn = std::atan2(-span.z, span.x) - G.heading0;
     a.yaw = G.start.yaw + turn;
-    a.pos = G.mid0 + rot_y((G.start.pos - G.mid0) * ratio, turn);
-    set_arena_pose(a);
+    a.pos = (lp + rp) * 0.5f + rot_y((G.start.pos - G.mid0) * ratio, turn);
   }
+  set_arena_pose(a);
 }
 
 // ---------------------------------------------------------------- XR thread: lasers
@@ -1516,11 +1628,20 @@ void build_pointer_layers(PointerLayers& out) {
     const Hand& hand = G.hands[h];
     if (!hand.valid)
       continue;
-    const bool grabbing = G.oneHand == h || G.twoHands;
-    const float length = G.oneHand == h ? G.dist : hand.hit >= 0.f ? hand.hit : 1.f;
-    const XrColor4f color = grabbing         ? XrColor4f{1.f, 0.8f, 0.3f, 1.f}
-                            : hand.hit >= 0.f ? XrColor4f{0.45f, 0.85f, 1.f, 1.f}
-                                              : XrColor4f{0.85f, 0.9f, 1.f, 0.5f};
+    const XrColor4f color = hand.engaged                     ? XrColor4f{1.f, 0.8f, 0.3f, 1.f}
+                            : hand.inside || hand.hit >= 0.f ? XrColor4f{0.45f, 0.85f, 1.f, 1.f}
+                                                             : XrColor4f{0.85f, 0.9f, 1.f, 0.5f};
+    if (hand.engaged ? hand.direct : hand.inside) {
+      // In the box: a dot at the touch point, facing the head.
+      const XrVector3f dz = vnorm(B.head - hand.touch);
+      const XrVector3f dx = vnorm(vcross({0.f, 1.f, 0.f}, dz));
+      if (vlen(dx) > 0.5f)
+        add_pointer_quad(out, B.dotSwapchain, kDotSize, kDotSize, hand.touch, quat_from_axes(dx, vcross(dz, dx), dz),
+                         {0.012f, 0.012f}, color);
+      continue;
+    }
+    const bool dragging = G.oneHand == h;
+    const float length = dragging ? G.dist : hand.hit >= 0.f ? hand.hit : 1.f;
     // The beam: a thin quad along the laser, turned about it to face the head.
     const XrVector3f end = hand.origin + hand.dir * length;
     const XrVector3f center = hand.origin + hand.dir * (length * 0.5f);
@@ -1529,7 +1650,7 @@ void build_pointer_layers(PointerLayers& out) {
     if (vlen(z) > 0.5f)
       add_pointer_quad(out, B.beamSwapchain, kBeamW, kBeamH, center,
                        quat_from_axes(vcross(hand.dir, z), hand.dir, z), {0.004f, length}, color);
-    if (hand.hit < 0.f && G.oneHand != h)
+    if (hand.hit < 0.f && !dragging)
       continue;
     // The dot where the laser meets the arena, facing the head.
     const XrVector3f dz = vnorm(B.head - end);
@@ -1714,6 +1835,8 @@ bool setup() {
     Log.warn("Controller input unavailable");
   if (!create_pointer_textures())
     Log.warn("Laser pointers unavailable");
+  if (!create_hand_trackers())
+    Log.info("Hand tracking unavailable");
   if (const char* dir = std::getenv("AURORA_XR_DUMP"); dir != nullptr && *dir != '\0')
     B.dumpDir = dir;
   // Not every exit path calls aurora::shutdown, so stop the XR thread from an
@@ -1741,6 +1864,11 @@ void teardown() {
     if (sp)
       xrDestroySpace(sp);
     sp = XR_NULL_HANDLE;
+  }
+  for (auto& ht : B.handTrackers) {
+    if (ht && B.destroyHandTracker)
+      B.destroyHandTracker(ht);
+    ht = XR_NULL_HANDLE;
   }
   for (XrSwapchain* sc : {&B.beamSwapchain, &B.dotSwapchain}) {
     if (*sc)
