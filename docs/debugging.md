@@ -82,6 +82,8 @@ only; none of them fixes anything. User-facing knobs (`MELEE_BACKEND`,
 | `AURORA_SKIP_UNTEX_VTX=n`, `AURORA_ONLY_UNTEX_VTX=n` | Drop, or keep only, untextured draws with exactly n vertices. |
 | `AURORA_LOG_TEV=1`, `AURORA_LOG_UNTEX_REGS=1`, `AURORA_LOG_QUADPOS=1` | Report what an untextured draw's TEV stages / registers / quad positions asked for. |
 | `AURORA_LEGACY_TEX_LOD=1` | Restore the unconditional LOD-bias sample (positive control for the black-floor sweep). |
+| `MELEE_XR_CONTROL=<file>` | Switch mixed reality / full VR from the file's `mr` or `vr`, read once a second (unattended runs, `tools/quest_perf.py`). |
+| `AURORA_XR_HANDS=0` | Leave OpenXR hand tracking off. |
 | `AURORA_NO_PIN=1`, `AURORA_PIN_THREADS=0` | Disable pinning aurora's worker threads to cores. |
 
 `grep -rho 'getenv("\(MELEE\|AURORA\)_[A-Z0-9_]*")' src extern/aurora/lib` is the

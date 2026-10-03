@@ -450,6 +450,39 @@ bool pc_xr_toggle_mode(void) {
     return true;
 }
 
+void pc_xr_poll_control(void) {
+    static const char* path;
+    static int frames;
+    static char last[16];
+    if (frames++ % 60 != 0) {
+        return;
+    }
+    if (path == NULL) {
+        path = getenv("MELEE_XR_CONTROL");
+        if (path == NULL) {
+            path = "";
+        }
+    }
+    FILE* f = *path != '\0' ? fopen(path, "r") : NULL;
+    if (f == NULL) {
+        return;
+    }
+    char cmd[16] = {0};
+    if (fgets(cmd, sizeof cmd, f) != NULL) {
+        cmd[strcspn(cmd, "\r\n ")] = '\0';
+    }
+    fclose(f);
+    if (strcmp(cmd, last) == 0) {
+        return;
+    }
+    strcpy(last, cmd);
+    const int want = strcmp(cmd, "mr") == 0 ? 1 : strcmp(cmd, "vr") == 0 ? 0 : -1;
+    xr_mode_init();
+    if (want >= 0 && want != s_xr_mode) {
+        pc_xr_toggle_mode();
+    }
+}
+
 bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {
     if (s_category != AURORA_XR_WORLD) {
         return false;

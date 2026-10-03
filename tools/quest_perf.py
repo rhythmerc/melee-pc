@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+"""Unattended performance runs on a Quest over adb.
+
+  quest_perf.py run [--stage N] [--phases mr:40,vr:40] [--env K=V ...]
+                    [--warmup S] [--label NAME]
+      Boots a four-CPU match on stage N (StKind, gr/forward.h; 31 is
+      Battlefield), then holds each phase (mode:seconds) in turn in the same
+      session and prints the runtime's frame stats for each one. Logs go to
+      build/quest-perf/<label>-<phase>.log.
+  quest_perf.py mode mr|vr      switch the running game (MELEE_XR_CONTROL)
+  quest_perf.py summarize LOG   summarize a saved logcat
+
+The game reads its knobs from melee-env.txt (src/pc/main.c,
+pc_env_file_bootstrap), which this rewrites on every run. The disc comes from
+the launcher's own launcher.cfg (debug builds only: run-as), or MELEE_DISC.
+With more than one adb device and no ANDROID_SERIAL, the first device listed
+by address is used: a wireless headset shows up under both its address and
+its mDNS name.
+"""
+import argparse
+import os
+import re
+import statistics
+import subprocess
+import sys
+import time
+
+PKG = "dev.melee.game"
+FILES = f"/sdcard/Android/data/{PKG}/files"
+ENV_FILE = f"{FILES}/melee-env.txt"
+CTL_FILE = f"{FILES}/melee-ctl.txt"
+OUT_DIR = os.path.join(os.path.dirname(__file__), "..", "build", "quest-perf")
+
+
+def adb(*args, check=True, capture=True):
+    r = subprocess.run(["adb", *args], text=True, capture_output=capture)
+    if check and r.returncode != 0:
+        sys.exit(f"adb {' '.join(args)} failed: {r.stderr.strip()}")
+    return r.stdout if capture else ""
+
+
+def pick_device():
+    if os.environ.get("ANDROID_SERIAL"):
+        return
+    devs = [l.split()[0] for l in adb("devices").splitlines()[1:] if l.endswith("\tdevice")]
+    if not devs:
+        sys.exit("no adb device")
+    by_addr = [d for d in devs if re.match(r"^\d+\.\d+\.\d+\.\d+:\d+$", d)]
+    os.environ["ANDROID_SERIAL"] = (by_addr or devs)[0]
+
+
+def shell_write(path, text):
+    # chmod: the shell's umask leaves the file unreadable to the app.
+    subprocess.run(["adb", "shell", f"cat > {path} && chmod 644 {path}"], input=text, text=True, check=True)
+
+
+def disc_uri():
+    if os.environ.get("MELEE_DISC"):
+        return os.environ["MELEE_DISC"]
+    cfg = adb("shell", "run-as", PKG, "cat", "files/launcher.cfg", check=False)
+    m = re.search(r'^disc "(.*)"$', cfg, re.M)
+    if not m:
+        sys.exit("no disc in launcher.cfg; set MELEE_DISC")
+    return m.group(1)
+
+
+# VrApi's once-a-second line, e.g.
+# FPS=121/120,...,Stale=4,...,CPU4/GPU=6/2,2361/545MHz,...,App=5.71ms,...,GPU%=0.84,CPU%=0.55(W0.91)
+VRAPI = re.compile(
+    r"FPS=(\d+)/(\d+).*?Stale=(\d+).*?CPU4/GPU=(\d+)/(\d+),(\d+)/(\d+)MHz.*?"
+    r"App=([\d.]+)ms.*?GPU%=([\d.]+),CPU%=([\d.]+)"
+)
+XR_FPS = re.compile(r"([\d.]+) display fps \((\d+)% 3D\); frames/s released: screen ([\d.]+), 3D ([\d.]+), HUD ([\d.]+)")
+XR_GPU = re.compile(r"GPU 3D passes per frame \(us\): 3D eyes (\d+).*?\(total (\d+)\); (\d+) world draws")
+
+
+def summarize(text):
+    rows = [m.groups() for m in map(VRAPI.search, text.splitlines()) if m]
+    if not rows:
+        return "  no VrApi stats (is the game in front and the headset awake?)"
+
+    def col(i, f=float):
+        return [f(r[i]) for r in rows]
+
+    def mean(v):
+        return statistics.fmean(v)
+
+    def levels(i):
+        vals = col(i, int)
+        return "/".join(f"{k}:{vals.count(k)}" for k in sorted(set(vals)))
+
+    out = [
+        f"  {len(rows)} s  fps {mean(col(0)):.1f}/{rows[0][1]}  stale/s {mean(col(2)):.1f} (max {max(col(2, int))})",
+        f"  CPU level {levels(3)} @ {mean(col(5)):.0f} MHz   GPU level {levels(4)} @ {mean(col(6)):.0f} MHz",
+        f"  GPU% {mean(col(8)):.2f}  CPU% {mean(col(9)):.2f}  App GPU {mean(col(7)):.2f} ms",
+    ]
+    fps = [m.groups() for m in map(XR_FPS.search, text.splitlines()) if m]
+    if fps:
+        out.append(f"  game: 3D released {mean([float(f[3]) for f in fps]):.1f}/s, "
+                   f"HUD {mean([float(f[4]) for f in fps]):.1f}/s ({len(fps)} samples)")
+    gpu = [m.groups() for m in map(XR_GPU.search, text.splitlines()) if m]
+    if gpu:
+        out.append(f"  passes: 3D eyes {mean([int(g[0]) for g in gpu]):.0f} us, "
+                   f"total {mean([int(g[1]) for g in gpu]):.0f} us, "
+                   f"{mean([int(g[2]) for g in gpu]):.0f} world draws")
+    return "\n".join(out)
+
+
+def run(args):
+    phases = []
+    for p in args.phases.split(","):
+        mode, secs = p.split(":")
+        if mode not in ("mr", "vr"):
+            sys.exit(f"phase mode must be mr or vr: {p}")
+        phases.append((mode, int(secs)))
+    env = {
+        "MELEE_BOOT_SCENE": "vs",
+        "MELEE_DEBUG_VS": "cpu4",
+        "MELEE_DEBUG_VS_STAGE": str(args.stage),
+        "AURORA_XR_TIMING": "1",
+        "MELEE_XR_MODE": phases[0][0],
+        "MELEE_XR_CONTROL": CTL_FILE,
+    }
+    for kv in args.env:
+        k, _, v = kv.partition("=")
+        env[k] = v
+    disc = disc_uri()
+    shell_write(ENV_FILE, "".join(f"{k}={v}\n" for k, v in env.items()))
+    shell_write(CTL_FILE, phases[0][0] + "\n")
+    # Keep the display running with nobody wearing the headset.
+    adb("shell", "am", "broadcast", "-a", "com.oculus.vrpowermanager.prox_close")
+    adb("shell", "am", "force-stop", PKG)
+    adb("logcat", "-c")
+    adb("shell", "am", "start", "-n", f"{PKG}/dev.melee.MeleeXrActivity", "--es", "disc", disc)
+    print(f"{args.label}: stage {args.stage}, {' '.join(args.env) or 'default env'}; warming up {args.warmup} s")
+    time.sleep(args.warmup)
+    os.makedirs(OUT_DIR, exist_ok=True)
+    with open(os.path.join(OUT_DIR, f"{args.label}-warmup.log"), "w") as f:
+        f.write(adb("logcat", "-d", "-v", "time"))
+    for i, (mode, secs) in enumerate(phases):
+        if i > 0:
+            shell_write(CTL_FILE, mode + "\n")
+            time.sleep(args.settle)
+        adb("logcat", "-c")
+        time.sleep(secs)
+        text = adb("logcat", "-d", "-v", "time")
+        path = os.path.join(OUT_DIR, f"{args.label}-{i}-{mode}.log")
+        with open(path, "w") as f:
+            f.write(text)
+        print(f"[{mode}] {path}\n{summarize(text)}")
+    if not args.keep:
+        adb("shell", "am", "force-stop", PKG)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("run")
+    r.add_argument("--stage", type=int, default=31)
+    r.add_argument("--phases", default="mr:40,vr:40")
+    r.add_argument("--env", action="append", default=[], help="extra K=V for melee-env.txt")
+    r.add_argument("--warmup", type=int, default=50, help="seconds from launch to the first phase")
+    r.add_argument("--settle", type=int, default=12, help="seconds after a mode switch before measuring")
+    r.add_argument("--label", default="run")
+    r.add_argument("--keep", action="store_true", help="leave the game running afterwards")
+    m = sub.add_parser("mode")
+    m.add_argument("mode", choices=["mr", "vr"])
+    s = sub.add_parser("summarize")
+    s.add_argument("log")
+    args = ap.parse_args()
+    if args.cmd == "summarize":
+        with open(args.log) as f:
+            print(summarize(f.read()))
+        return
+    pick_device()
+    if args.cmd == "mode":
+        shell_write(CTL_FILE, args.mode + "\n")
+    else:
+        run(args)
+
+
+if __name__ == "__main__":
+    main()

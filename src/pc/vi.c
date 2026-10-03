@@ -218,6 +218,7 @@ void pc_frame_boundary(void) {
         }
         ++event;
     }
+    pc_xr_poll_control();
     pc_menu_update();
     /* Nothing draws while the overlay pauses the game, so hold the last
      * frame instead of clearing the EFB to black underneath the menu. */

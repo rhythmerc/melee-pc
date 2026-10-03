@@ -393,6 +393,8 @@ bool create_instance() {
     exts.push_back(XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME);
   if (B.hasPerfSettingsExt)
     exts.push_back(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
+  // AURORA_XR_HANDS=0 leaves hand tracking off, for measuring what it costs.
+  B.hasHandTrackingExt &= env_flag("AURORA_XR_HANDS", true);
   if (B.hasHandTrackingExt)
     exts.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
   XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};

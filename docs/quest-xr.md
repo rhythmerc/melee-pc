@@ -257,6 +257,40 @@ but left the GPU at level 2 (640 MHz) with no measurable change, so it's
 off by default (`AURORA_XR_PERF_GPU` / `AURORA_XR_PERF_CPU` = `low`, `high`,
 `boost` to try).
 
+That's Horizon OS's passthrough cap: on a Quest 3, GPU levels 3 and 4 and
+CPU level 4 are only offered while the app isn't using passthrough
+([CPU and GPU levels](https://developers.meta.com/horizon/documentation/unity/os-cpu-gpu-levels/)).
+Mixed reality runs at GPU level 2 whatever we ask for. Full VR pauses
+passthrough, and the runtime then raises the GPU to level 4 under the same
+load (Battlefield, four CPUs, 2026-10-03). That accounts for full VR being
+smoother.
+
+### Profiling on the headset
+
+`tools/quest_perf.py run --stage 31 --phases mr:40,vr:40` boots a four-CPU
+match on a stage with no one wearing the headset (`prox_close`), holds each
+phase in the same session, and summarizes the runtime's `VrApi` line for
+each one: fps, stale frames, CPU and GPU levels and clocks, GPU and CPU
+utilization, and app GPU time. It also includes our own `display fps` and
+`AURORA_XR_TIMING` lines. `--env K=V` adds knobs, and logs go to
+`build/quest-perf/`. The script writes the game's knobs to `melee-env.txt`
+and takes the disc from the launcher's `launcher.cfg`.
+
+- `MELEE_XR_CONTROL=<file>`: once a second, the game reads `mr` or `vr`
+  from the file and switches when it changes (`quest_perf.py mode vr`).
+- `AURORA_XR_HANDS=0`: leaves `XR_EXT_hand_tracking` off.
+- On the headset already: OVR Metrics Tool
+  (`com.oculus.ovrmonitormetricsservice`; overlay and CSV toggled by
+  `am broadcast`), `perfetto`, and `ovrgpuprofiler` (live GPU counters,
+  render-stage traces).
+- **Per-surface GPU cost:** `adb shell ovrgpuprofiler -e` before launching
+  the game, then `ovrgpuprofiler -t 0.5`. It splits each render target into
+  binning (vertices), render (pixels) and preemption. Perfetto's surface
+  slices include preemption in their duration.
+- **System timeline:** `adb shell perfetto -c - --txt -o
+  /data/misc/perfetto-traces/t.pftrace < tools/perfetto/quest.cfg`, then
+  pull it and open it in ui.perfetto.dev, or query it with trace_processor.
+
 ### Placing the arena
 
 Pause the fight to move the arena. Put a controller down and that hand is

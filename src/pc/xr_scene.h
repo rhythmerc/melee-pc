@@ -36,6 +36,10 @@ bool pc_xr_mixed_reality(void);
  * the gamepad's Select does this in XR. False, doing nothing, when no XR
  * session is presenting. */
 bool pc_xr_toggle_mode(void);
+/* MELEE_XR_CONTROL=<file>: once a second, the file's first line ("mr" or
+ * "vr") picks the mode when it changes, so an unattended run can switch
+ * without a gamepad. */
+void pc_xr_poll_control(void);
 /* Around one joint's geometry (HSD_JObjDisp): leaves joints a part rule
  * hides out of the 3D view, and places joints a rule moves. Returns what
  * it changed; hand that to pc_xr_jobj_end. Cheap when no stage part with
@@ -63,6 +67,7 @@ static inline bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, str
 static inline void pc_xr_stage_part_end(bool hidden) { (void)hidden; }
 static inline bool pc_xr_mixed_reality(void) { return false; }
 static inline bool pc_xr_toggle_mode(void) { return false; }
+static inline void pc_xr_poll_control(void) {}
 static inline int pc_xr_jobj_begin(struct HSD_JObj* jobj) {
     (void)jobj;
     return 0;
