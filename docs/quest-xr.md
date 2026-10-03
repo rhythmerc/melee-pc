@@ -119,6 +119,18 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     - Fountain of Dreams: the reflection image is cleared to a water colour
       instead of left stale (`MELEE_XR_IZUMI_WATER`; the desktop build's
       BGRA framebuffer swaps red and blue in that copy).
+  - **Fourth pass (2026-10-02):**
+    - Parts take up to four planes, in any direction (`CLIP_LEFT`,
+      `CLIP_RIGHT`, `CLIP_FRONT` join `CLIP_BELOW` / `CLIP_BEHIND`;
+      `MELEE_XR_CLIPP` tries an arbitrary plane).
+    - Kongo Jungle: only the front waterfall is left. The flat river behind
+      it (part 4, joints 7 and 9) and the surface layers over it (joints 5,
+      10, 26 and 35) are hidden, and the back cut moved to z −90.
+    - Great Bay: the sea is bounded to the stage's footprint, x −320 to 220
+      and in front at z 220.
+    - Stage particles can be hidden by bank, or bank and id (see Particles
+      below). Kongo Jungle hides its stage bank (30), whose particles are all
+      river splashes that floated in the air once the river was gone.
   - **To revisit: Fountain of Dreams.** It runs badly on the Quest even
     without the reflection render. Profile it, then build a proper 3D
     reflection: mirror the world draws about the water plane per eye,
@@ -126,17 +138,23 @@ and the investigation behind it are in docs/xr-3d-plan.md.
 - **Mixed reality vs full VR.** Every hide, clip and move applies only in
   mixed reality (`pc_xr_mixed_reality`). `MELEE_XR_MODE=vr` renders stages
   whole, for the planned full-VR mode. Per-stage centering applies in both.
-- **Clip planes.** `aurora_xr_world_clip` cuts the following world draws
-  below a game-space plane in the 3D view, using clip distances in the
-  multiview eye shaders. `xr_scene.c` sets one around a stage part
-  (`ClipRule`), so fighters and items are never clipped.
-- **Soft clips.** `aurora_xr_world_clip_soft` (a `ClipRule` with a fade)
-  dissolves geometry across a band above the plane with a 4x4 ordered dither
-  instead of cutting it. Passthrough shows through gradually and depth stays
-  exact. Only draws under a soft clip use the dithering pipeline variant
-  (`RenderTargetLayout::xrSoftClip`), because discard costs early depth. Kongo
-  Jungle's waterfall now hangs below the plateau and fades out by the
-  floating rock (y −35 to −70).
+- **Clip planes.** `aurora_xr_world_clips4` cuts the following world draws
+  in the 3D view, keeping what's on the inside of up to four game-space
+  planes. `xr_scene.c` sets them around a stage part (every `ClipRule` that
+  names it), so fighters and items are never clipped. The cut is a fragment
+  discard, not clip distances, because Adreno 740 fails to create multiview
+  pipelines that write clip distances. Only clipped draws use the discarding
+  pipeline variant (`RenderTargetLayout::xrSoftClip`), because discard costs
+  early depth.
+- **Soft clips.** A plane with a fade (`aurora_xr_world_clip_soft`, or a
+  `ClipRule` fade above 0) dissolves geometry across a band inside the plane
+  with a 4x4 ordered dither instead of cutting it. Passthrough shows through
+  gradually and depth stays exact. Kongo Jungle's waterfall hangs below the
+  plateau and fades out by the floating rock (y −35 to −70).
+- **Particles.** `psDispParticles` asks `pc_xr_particle_begin` whether each
+  particle stays in the 3D view. A `ParticleRule` names a stage and a
+  particle bank, and optionally one id (ids number instances, so most rules
+  take the whole bank). Hidden particles still draw into the flat frame.
 - **Arena center.** `aurora_xr_set_arena_center` puts a game point at the
   arena position (`CenterRule`).
 - **Moving pieces.** A rule can also move a joint in the 3D view only.
@@ -151,8 +169,10 @@ To survey a stage on desktop:
 - **Boot into it:** `MELEE_BOOT_SCENE=vs MELEE_DEBUG_VS_STAGE=<StKind>`.
 - **List its contents:** `MELEE_XR_STAGE_LOG` logs every part with its
   layer, and `MELEE_XR_JOINT_LOG` adds each part's joints with their mesh
-  counts and positions.
-- **Try rules:** with `MELEE_XR_PARTS`.
+  counts and positions. `MELEE_XR_PTCL_LOG` lists each stage particle drawn,
+  by bank and id.
+- **Try rules:** with `MELEE_XR_PARTS`, `MELEE_XR_CLIP` / `MELEE_XR_CLIPZ` /
+  `MELEE_XR_CLIPP`, `MELEE_XR_MOVE` and `MELEE_XR_PTCL`.
 - **Capture the result:** `AURORA_XR_DUMP` writes the eye images,
   `AURORA_XR_DUMP_AFTER` picks the frame, and `AURORA_XR_ARENA_POS` and
   `AURORA_XR_ARENA_YAW` frame the view.
@@ -313,14 +333,15 @@ From the first headset playtest (2026-10-01):
 
 - **Crash on KO.** The game flashes the 2D viewport and then crashes when a
   character dies. It's reproducible and not yet investigated.
-- **Stage parts.** They need a per-stage pass. Final Destination, Pokémon
-  Stadium, Dream Land and Green Greens have been checked.
+- **Stage parts.** The static stages have had four passes (see Stage
+  backgrounds). The open questions listed there are still open, and the
+  moving stages haven't been looked at.
 - **Full VR mode for fights (pinned).** An option for fights in full VR, not
   over passthrough, alongside the mixed-reality arena.
 
 - **Background sparkles.** They're effects drawn under the fight camera, so
   some still show, for example Battlefield's twinkles and Final Destination's
-  stars.
+  stars. Particle rules may cover the ones that are particles.
 - **Fog** still uses the eye's depth instead of the game camera's.
 - **Billboards and particles** face the game camera, not the eye.
 - **Frame rate.** The 3D view updates at the game's 60 Hz. Every second
@@ -465,6 +486,10 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `MELEE_XR_IZUMI_WATER` | `60,100,160` | Fountain water colour in mixed reality (looks red/blue swapped in the desktop build) |
 | `MELEE_XR_CLIPZ` | unset | Try back cuts: `grkind:part:z[:fade],...` cuts that part behind z |
 | `MELEE_XR_JOINT_LOG` | unset | Log each part's joints (index, depth, meshes, position) once |
+| `MELEE_XR_CLIPP` | unset | Try any plane: `grkind:part:a:b:c:d[:fade];...` keeps where ax+by+cz+d ≥ 0. Any env plane replaces that part's built-in ones (up to 4) |
+| `MELEE_XR_CLIP_LOG` | unset | Log the first 40 stage part begins (stage, part, layer) |
+| `MELEE_XR_PTCL` | unset | Hide more stage particles: `grkind:bank:id,...` (id -1 is the whole bank) |
+| `MELEE_XR_PTCL_LOG` | unset | Log each stage particle drawn once (bank, id, position) |
 | `AURORA_XR_DUMP_AFTER` | 300 | Stream frames to wait before `AURORA_XR_DUMP` writes |
 
 ## Measured: virtual screen only (Quest 3, 72 Hz, before 120 Hz lock-step)
