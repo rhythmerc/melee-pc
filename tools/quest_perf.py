@@ -139,7 +139,9 @@ def run(args):
     disc = disc_uri()
     shell_write(ENV_FILE, "".join(f"{k}={v}\n" for k, v in env.items()))
     shell_write(CTL_FILE, phases[0][0] + "\n")
-    # Keep the display running with nobody wearing the headset.
+    # Wake the headset if it went to sleep, and keep the display running with
+    # nobody wearing it.
+    adb("shell", "input", "keyevent", "KEYCODE_WAKEUP")
     adb("shell", "am", "broadcast", "-a", "com.oculus.vrpowermanager.prox_close")
     adb("shell", "am", "force-stop", PKG)
     adb("logcat", "-c")

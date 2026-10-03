@@ -20,6 +20,24 @@ wgpu::RenderPipeline create_pipeline(const PipelineConfig& config, const gfx::Re
   const auto shader = build_shader(config.shaderConfig, layout);
   const auto label = fmt::format("GX Pipeline {:x}",
                                  xxh3_hash(layout.key, xxh3_hash(config, static_cast<HashType>(gfx::ShaderType::GX))));
+  DecodedLayout decoded;
+  if (config.shaderConfig.decodedAll && decoded_layout(config.shaderConfig, decoded)) {
+    std::array<wgpu::VertexAttribute, 16> attrs{};
+    for (u8 i = 0; i < decoded.count; ++i) {
+      const auto& d = decoded.attrs[i];
+      attrs[i] = {.format = d.format == DecodedFormat::U32     ? wgpu::VertexFormat::Uint32
+                            : d.format == DecodedFormat::F32x2 ? wgpu::VertexFormat::Float32x2
+                            : d.format == DecodedFormat::F32x3 ? wgpu::VertexFormat::Float32x3
+                                                               : wgpu::VertexFormat::Float32x4,
+                  .offset = d.offset,
+                  .shaderLocation = i};
+    }
+    const std::array buffers{wgpu::VertexBufferLayout{.stepMode = wgpu::VertexStepMode::Vertex,
+                                                      .arrayStride = decoded.stride,
+                                                      .attributeCount = decoded.count,
+                                                      .attributes = attrs.data()}};
+    return build_pipeline(config, layout, buffers, shader, label.c_str());
+  }
   if (config.shaderConfig.decodedPos) {
     static constexpr wgpu::VertexAttribute posAttr{
         .format = wgpu::VertexFormat::Float32x3, .offset = 0, .shaderLocation = 0};

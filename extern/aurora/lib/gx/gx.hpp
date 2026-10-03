@@ -517,7 +517,10 @@ struct ShaderConfig {
    * instead of being pulled from vbuf/abuf (AURORA_POS_DECODE). Takes a
    * spare pad bit, so sizeof is unchanged. */
   u8 decodedPos : 1 = 0;
-  u8 pad2 : 7 = 0;
+  /* Every attribute arrives decoded in one interleaved vertex buffer, laid
+   * out by decoded_layout (AURORA_VTX_DECODE). Implies decodedPos's job. */
+  u8 decodedAll : 1 = 0;
+  u8 pad2 : 6 = 0;
   std::array<AttrConfig, MaxVtxAttr> attrs;
   std::array<TevSwap, MaxTevSwap> tevSwapTable;
   std::array<TevStage, MaxTevStages> tevStages;
@@ -535,6 +538,25 @@ static_assert(std::has_unique_object_representations_v<ShaderConfig>);
 
 struct PipelineConfig;
 bool pos_decode_enabled() noexcept;
+bool vtx_decode_enabled() noexcept;
+
+// The interleaved vertex a decodedAll draw reads, one entry per shader input
+// (location = index). Shared by the shader generator, the pipeline's vertex
+// layout and the CPU decoder (command_processor.cpp), so they can't disagree.
+enum class DecodedFormat : u8 { U32, F32x2, F32x3, F32x4 };
+struct DecodedAttr {
+  u8 attr;  // GXAttr
+  u8 slice; // NBT: 0 normal, 1 binormal, 2 tangent
+  DecodedFormat format;
+  u8 offset;
+};
+struct DecodedLayout {
+  std::array<DecodedAttr, 16> attrs{};
+  u8 count = 0;
+  u8 stride = 0;
+};
+// False when the attributes don't fit 16 vertex inputs.
+bool decoded_layout(const ShaderConfig& config, DecodedLayout& out) noexcept;
 
 struct GXBindGroups {
   gfx::BindGroupRef textureBindGroup;

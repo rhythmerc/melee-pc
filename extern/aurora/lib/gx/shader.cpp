@@ -1002,6 +1002,9 @@ std::string build_shader_source(const ShaderConfig& config, uint32_t normalAttac
       continue;
     }
     // in_pnmtxidx and in_pos written above for line mode
+    if (config.decodedAll) {
+      continue; // all of them below, from the decoded vertex
+    }
     if (attr == GX_VA_POS && config.decodedPos) {
       vtxInAttrs += ",\n    @location(0) dpos: vec3f";
       vtxXfrAttrsPre += fmt::format("\n    let {} = dpos;", vtx_attr(config, attr));
@@ -1009,6 +1012,29 @@ std::string build_shader_source(const ShaderConfig& config, uint32_t normalAttac
     }
     if ((attr != GX_VA_PNMTXIDX && attr != GX_VA_POS) || config.lineMode == 0) {
       vtxXfrAttrsPre += fmt::format("\n    let {} = {};", vtx_attr(config, attr), attr_load(config, attr, vidxAttr));
+    }
+  }
+  // decodedAll: every attribute is a vertex input, laid out by decoded_layout.
+  DecodedLayout decoded;
+  std::array<int, 3> nbtLocation{-1, -1, -1};
+  if (config.decodedAll && decoded_layout(config, decoded)) {
+    for (u8 loc = 0; loc < decoded.count; ++loc) {
+      const auto& d = decoded.attrs[loc];
+      const auto type = d.format == DecodedFormat::U32     ? "u32"sv
+                        : d.format == DecodedFormat::F32x2 ? "vec2f"sv
+                        : d.format == DecodedFormat::F32x3 ? "vec3f"sv
+                                                           : "vec4f"sv;
+      vtxInAttrs += fmt::format(",\n    @location({}) dv{}: {}", loc, loc, type);
+      const auto attr = static_cast<GXAttr>(d.attr);
+      if (attr == GX_VA_NRM && d.slice != 0) {
+        nbtLocation[d.slice] = loc;
+        continue;
+      }
+      if (attr == GX_VA_PNMTXIDX) {
+        vtxXfrAttrsPre += fmt::format("\n    let {} = min(dv{} / 3u, {}u);", vtx_attr(config, attr), loc, MaxPnMtx - 1);
+      } else {
+        vtxXfrAttrsPre += fmt::format("\n    let {} = dv{};", vtx_attr(config, attr), loc);
+      }
     }
   }
   bool needsBinrm = false;
@@ -1023,11 +1049,13 @@ std::string build_shader_source(const ShaderConfig& config, uint32_t normalAttac
   }
   if (needsBinrm) {
     vtxXfrAttrsPre += fmt::format("\n    let {} = {};", nbt_slice_local(NbtSlice::B),
-                                  attr_load_nbt_slice(config, NbtSlice::B, vidxAttr));
+                                  nbtLocation[1] >= 0 ? fmt::format("dv{}", nbtLocation[1])
+                                                      : attr_load_nbt_slice(config, NbtSlice::B, vidxAttr));
   }
   if (needsTangent) {
     vtxXfrAttrsPre += fmt::format("\n    let {} = {};", nbt_slice_local(NbtSlice::T),
-                                  attr_load_nbt_slice(config, NbtSlice::T, vidxAttr));
+                                  nbtLocation[2] >= 0 ? fmt::format("dv{}", nbtLocation[2])
+                                                      : attr_load_nbt_slice(config, NbtSlice::T, vidxAttr));
   }
 
   if (config.lineMode == 0) {

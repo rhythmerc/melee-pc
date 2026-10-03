@@ -361,6 +361,64 @@ bool pos_decode_enabled() noexcept {
   return on;
 }
 
+// AURORA_VTX_DECODE: every vertex attribute decoded on the CPU into one
+// interleaved vertex buffer (decoded_layout), not just positions. A draw
+// whose attributes don't fit 16 vertex inputs falls back to positions only.
+// On by default on Android, where it's measured; 0 or 1 overrides.
+bool vtx_decode_enabled() noexcept {
+  static const bool on = [] {
+    const char* v = std::getenv("AURORA_VTX_DECODE");
+    if (v != nullptr && *v != '\0') {
+      return *v != '0';
+    }
+#ifdef __ANDROID__
+    return true;
+#else
+    return false;
+#endif
+  }();
+  return on;
+}
+
+bool decoded_layout(const ShaderConfig& config, DecodedLayout& out) noexcept {
+  out = {};
+  const auto add = [&](u8 attr, u8 slice, DecodedFormat format) {
+    if (out.count == out.attrs.size()) {
+      return false;
+    }
+    out.attrs[out.count++] = {attr, slice, format, out.stride};
+    out.stride += format == DecodedFormat::U32 ? 4 : format == DecodedFormat::F32x2 ? 8
+                  : format == DecodedFormat::F32x3                                 ? 12
+                                                                                   : 16;
+    return true;
+  };
+  for (int i = GX_VA_PNMTXIDX; i <= GX_VA_TEX7; ++i) {
+    const auto& m = config.attrs[i];
+    if (m.attrType == GX_NONE) {
+      continue;
+    }
+    bool ok = true;
+    if (i <= GX_VA_TEX7MTXIDX) {
+      ok = add(i, 0, DecodedFormat::U32);
+    } else if (i == GX_VA_POS) {
+      ok = add(i, 0, DecodedFormat::F32x3);
+    } else if (i == GX_VA_NRM) {
+      ok = add(i, 0, DecodedFormat::F32x3);
+      if (ok && m.cnt == 9) {
+        ok = add(i, 1, DecodedFormat::F32x3) && add(i, 2, DecodedFormat::F32x3);
+      }
+    } else if (i == GX_VA_CLR0 || i == GX_VA_CLR1) {
+      ok = add(i, 0, DecodedFormat::F32x4);
+    } else {
+      ok = add(i, 0, DecodedFormat::F32x2);
+    }
+    if (!ok) {
+      return false;
+    }
+  }
+  return true;
+}
+
 wgpu::RenderPipeline build_pipeline(const PipelineConfig& config, const gfx::RenderTargetLayout& layout,
                                     ArrayRef<wgpu::VertexBufferLayout> vtxBuffers, wgpu::ShaderModule shader,
                                     const char* label) noexcept {
@@ -510,8 +568,16 @@ void populate_pipeline_config(PipelineConfig& config, GXPrimitive primitive, GXV
   } else {
     config.shaderConfig.lineMode = 0;
   }
-  config.shaderConfig.decodedPos = pos_decode_enabled() && config.shaderConfig.lineMode == 0 &&
-                                   config.shaderConfig.attrs[GX_VA_POS].attrType != GX_NONE;
+  config.shaderConfig.decodedPos = false;
+  config.shaderConfig.decodedAll = false;
+  if (config.shaderConfig.lineMode == 0 && config.shaderConfig.attrs[GX_VA_POS].attrType != GX_NONE) {
+    DecodedLayout layout;
+    if (vtx_decode_enabled() && decoded_layout(config.shaderConfig, layout)) {
+      config.shaderConfig.decodedAll = true;
+    } else {
+      config.shaderConfig.decodedPos = pos_decode_enabled() || vtx_decode_enabled();
+    }
+  }
   config.shaderConfig.tevSwapTable = g_gxState.tevSwapTable;
   for (u8 i = 0; i < g_gxState.numTevStages; ++i) {
     config.shaderConfig.tevStages[i] = g_gxState.tevStages[i];

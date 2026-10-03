@@ -350,8 +350,13 @@ storage pool. The pipeline takes them as vertex attribute 0
 (`ShaderConfig::decodedPos`, a spare bit, so the persisted pipeline cache
 stays valid), and the GPU fetches them in hardware. A merged draw merges
 only while its decoded range can grow in place. Normals, colors and texture
-coordinates still come through the shader. On by default on Android; `0` or
-`1` overrides.
+coordinates still come through the shader. `AURORA_VTX_DECODE` decodes every
+attribute into one interleaved vertex (`decoded_layout`: matrix indices as
+u32, positions, normals, binormals and tangents as float3, colors as float4
+so 565/4444/6666 stay exact, texture coordinates as float2), and a draw that
+needs more than 16 vertex inputs falls back to positions only. Both are on
+by default on Android (`AURORA_VTX_DECODE=0` leaves positions only,
+`AURORA_POS_DECODE=0` with it neither).
 
 Quest 3, mixed reality, four CPUs, game fps, decode off -> on:
 
@@ -363,9 +368,12 @@ Quest 3, mixed reality, four CPUs, game fps, decode off -> on:
 | Battlefield | 59.5 | 59.7 |
 | Pokémon Stadium, rock (zoom only) | 41.5 | 58.6 |
 
-Pokémon Stadium's full feed with the decode: default 59.9, grass 59.5,
-water 57.6, fire 57.2, rock 58.3. The eye pass on rock went from 13.2 to
-8.7 ms.
+Pokémon Stadium's full feed with positions decoded: default 59.9, grass
+59.5, water 57.6, fire 57.2, rock 58.3. With every attribute decoded, water
+58.8, fire 59.6, rock 59.7, about 2 stale frames per second, the app's GPU
+time 4.2 ms per display frame in each, and CPU use 0.34 -> 0.41. The eye
+pass on rock went from 13.2 ms (no decode) to 8.7 (positions) to 7.3
+(everything).
 
 Fire and rock are limited by their own scenery (360 to 380 world draws),
 not by the jumbotron. In fire form the zoom went from 30.1 to 35.1 fps with

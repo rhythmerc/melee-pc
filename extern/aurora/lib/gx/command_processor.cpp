@@ -417,32 +417,107 @@ static float decode_component(const u8* p, u8 compType, u8 frac, bool le) noexce
   }
 }
 
-static gfx::Range push_decoded_positions(const ShaderConfig& config, const u8* raw, u16 vtxCount,
-                                         size_t alignment) noexcept {
-  static std::vector<float> out;
-  const auto& m = config.attrs[GX_VA_POS];
-  const auto& array = g_gxState.arrays[GX_VA_POS];
-  const u32 compSize = m.compType == GX_F32 ? 4 : m.compType == GX_U16 || m.compType == GX_S16 ? 2 : 1;
-  out.resize(static_cast<size_t>(vtxCount) * 3);
+// Where one attribute of one vertex lives (NBT slice `slice`), and its byte
+// order: the same address attr_address/attr_load_nbt_slice build in the
+// shader. Null when an index runs past its array.
+static const u8* decoded_source(const AttrConfig& m, GXAttr attr, u32 slice, const u8* vtx, bool& le) noexcept {
+  const u32 compSize = comp_type_size(attr, static_cast<GXCompType>(m.compType));
+  const u32 within = attr == GX_VA_NRM ? slice * 3 * compSize : 0;
+  if (m.attrType == GX_DIRECT) {
+    le = false;
+    return vtx + m.offset + within;
+  }
+  const u32 dlExtra = m.nbt3 ? (m.attrType == GX_INDEX8 ? slice : slice * 2) : 0;
+  const u8* ip = vtx + m.offset + dlExtra;
+  const u32 idx = m.attrType == GX_INDEX8 ? ip[0] : (u32(ip[0]) << 8) | ip[1];
+  const auto& array = g_gxState.arrays[attr];
+  const u32 elemSize = attr == GX_VA_CLR0 || attr == GX_VA_CLR1 ? compSize : compSize * std::min<u32>(m.cnt, 3);
+  const size_t at = static_cast<size_t>(idx) * m.stride + within;
+  if (array.data == nullptr || at + elemSize > array.size) {
+    return nullptr;
+  }
+  le = m.le;
+  return static_cast<const u8*>(array.data) + at;
+}
+
+// fetch_rgb565 .. fetch_rgba8 (shader.cpp).
+static void decode_color(const u8* p, u8 compType, bool le, float* out) noexcept {
+  const auto u16v = [&] { return le ? u32(p[0] | (p[1] << 8)) : u32((p[0] << 8) | p[1]); };
+  switch (compType) {
+  case GX_RGB565: {
+    const u32 v = u16v();
+    out[0] = float((v >> 11) & 0x1F) / 31.f, out[1] = float((v >> 5) & 0x3F) / 63.f,
+    out[2] = float(v & 0x1F) / 31.f, out[3] = 1.f;
+    break;
+  }
+  case GX_RGB8:
+  case GX_RGBX8:
+    out[0] = p[0] / 255.f, out[1] = p[1] / 255.f, out[2] = p[2] / 255.f, out[3] = 1.f;
+    break;
+  case GX_RGBA4: {
+    const u32 v = u16v();
+    out[0] = float((v >> 12) & 0xF) / 15.f, out[1] = float((v >> 8) & 0xF) / 15.f,
+    out[2] = float((v >> 4) & 0xF) / 15.f, out[3] = float(v & 0xF) / 15.f;
+    break;
+  }
+  case GX_RGBA6: {
+    const u32 v = le ? u32(p[0] | (p[1] << 8) | (p[2] << 16)) : u32((p[0] << 16) | (p[1] << 8) | p[2]);
+    out[0] = float((v >> 18) & 0x3F) / 63.f, out[1] = float((v >> 12) & 0x3F) / 63.f,
+    out[2] = float((v >> 6) & 0x3F) / 63.f, out[3] = float(v & 0x3F) / 63.f;
+    break;
+  }
+  default: // GX_RGBA8
+    out[0] = p[0] / 255.f, out[1] = p[1] / 255.f, out[2] = p[2] / 255.f, out[3] = p[3] / 255.f;
+    break;
+  }
+}
+
+// One draw's vertices for the GPU's own vertex fetch: positions only
+// (decodedPos, float3), or every attribute interleaved (decodedAll,
+// decoded_layout). `raw` is the draw's GX vertex stream.
+static gfx::Range push_decoded_vertices(const ShaderConfig& config, const u8* raw, u16 vtxCount,
+                                        size_t alignment) noexcept {
+  static std::vector<u8> out;
+  DecodedLayout layout;
+  if (!config.decodedAll || !decoded_layout(config, layout)) {
+    layout = {};
+    layout.attrs[0] = {GX_VA_POS, 0, DecodedFormat::F32x3, 0};
+    layout.count = 1;
+    layout.stride = 12;
+  }
+  out.assign(static_cast<size_t>(vtxCount) * layout.stride, 0);
   for (u32 v = 0; v < vtxCount; ++v) {
-    const u8* vtx = raw + v * config.vtxStride + m.offset;
-    const u8* src = vtx;
-    bool le = false;
-    if (m.attrType == GX_INDEX8 || m.attrType == GX_INDEX16) {
-      const u32 idx = m.attrType == GX_INDEX8 ? vtx[0] : (u32(vtx[0]) << 8) | vtx[1];
-      const size_t at = static_cast<size_t>(idx) * m.stride;
-      if (array.data == nullptr || at + compSize * m.cnt > array.size) {
-        out[v * 3] = out[v * 3 + 1] = out[v * 3 + 2] = 0.f;
+    const u8* vtx = raw + v * config.vtxStride;
+    u8* dst = out.data() + static_cast<size_t>(v) * layout.stride;
+    for (u8 i = 0; i < layout.count; ++i) {
+      const auto& d = layout.attrs[i];
+      const auto attr = static_cast<GXAttr>(d.attr);
+      const auto& m = config.attrs[attr];
+      bool le = false;
+      const u8* src = decoded_source(m, attr, d.slice, vtx, le);
+      if (src == nullptr) {
+        continue; // zeros, as the shader's bounds-checked loads return
+      }
+      if (d.format == DecodedFormat::U32) {
+        const u32 value = src[0];
+        std::memcpy(dst + d.offset, &value, 4);
         continue;
       }
-      src = static_cast<const u8*>(array.data) + at;
-      le = m.le;
+      float f[4] = {0.f, 0.f, 0.f, 0.f};
+      if (attr == GX_VA_CLR0 || attr == GX_VA_CLR1) {
+        decode_color(src, m.compType, le, f);
+      } else {
+        const u32 compSize = comp_type_size(attr, static_cast<GXCompType>(m.compType));
+        const u32 n = std::min<u32>(m.cnt, 3);
+        for (u32 c = 0; c < n; ++c) {
+          f[c] = decode_component(src + c * compSize, m.compType, m.frac, le);
+        }
+      }
+      const u32 comps = d.format == DecodedFormat::F32x2 ? 2 : d.format == DecodedFormat::F32x3 ? 3 : 4;
+      std::memcpy(dst + d.offset, f, comps * sizeof(float));
     }
-    out[v * 3] = decode_component(src, m.compType, m.frac, le);
-    out[v * 3 + 1] = decode_component(src + compSize, m.compType, m.frac, le);
-    out[v * 3 + 2] = m.cnt >= 3 ? decode_component(src + 2 * compSize, m.compType, m.frac, le) : 0.f;
   }
-  return gfx::push_storage_aligned(reinterpret_cast<const u8*>(out.data()), out.size() * sizeof(float), alignment);
+  return gfx::push_storage_aligned(out.data(), out.size(), alignment);
 }
 
 static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
@@ -606,8 +681,9 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   }
 
   cache.lastDrawFmt = fmt;
+  const auto& sc = cache.config.shaderConfig;
   const gfx::Range posRange =
-      cache.config.shaderConfig.decodedPos ? push_decoded_positions(cache.config.shaderConfig, raw, vtxCount, 4) : gfx::Range{};
+      sc.decodedPos || sc.decodedAll ? push_decoded_vertices(sc, raw, vtxCount, 4) : gfx::Range{};
   gfx::PipelineRef xrPipeline = 0;
 #if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
   if (gfx::xr_recording_world()) {
@@ -757,7 +833,7 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& 
     lastDraw->vertRange.size += vertRange.size;
     if (lastDraw->posRange.size != 0) {
       lastDraw->posRange.size +=
-          push_decoded_positions(sDrawCache.config.shaderConfig, vertexData.data(), vtxCount, 0).size;
+          push_decoded_vertices(sDrawCache.config.shaderConfig, vertexData.data(), vtxCount, 0).size;
     }
     if (lastDraw->idxRange.size == 0) {
       lastDraw->idxRange = idxRange;
