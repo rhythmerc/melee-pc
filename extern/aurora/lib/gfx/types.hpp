@@ -24,6 +24,7 @@ enum class XrCategory : uint8_t {
   Mono = 0,  // only part of the normal frame
   World = 1, // 3D fight geometry: also replayed per eye
   Hud = 2,   // HUD: also replayed onto the HUD plane
+  Hidden = 3, // fight geometry left out of 3D: flat frame only, dropped with World
 };
 // World draws can carry an extra placement in the 3D view
 // (aurora_xr_world_transform): index 0 is none, 1.. index the frame's list.

@@ -252,6 +252,39 @@ default arena size with multiview:
 The eye pass's own time doesn't change. Dropping the world from the flat
 frame frees the GPU time it took on top of the eyes.
 
+Two gaps let world geometry back into the flat frame (fixed 2026-10-03):
+
+- **Parts hidden from 3D.** Mixed reality's hidden parts, joints and
+  particles were tagged `AURORA_XR_MONO`, which is never dropped, so every
+  pruned part was still drawn flat on every frame. They're now
+  `AURORA_XR_HIDDEN`. That tag is never replayed in 3D, and it's dropped
+  from the flat frame along with the world unless something reads the pass.
+  Pokémon Stadium's screen feed still shows the fight and its background
+  (checked with `AURORA_XR_DUMP`).
+- **Missed 3D images.** When the 3D swapchain had no free image, the next
+  flat frame drew the whole world again. That made the next frame heavier
+  and the next miss likelier, so slow stages kept sliding. A missed fight
+  frame now drops the flat world too.
+
+ovrgpuprofiler showed the cost on Fountain of Dreams: a flat 584x480 pass
+(the widescreen EFB) with 7 to 9 ms of binning on nearly every frame, more
+vertex work than the eye pass. Quest 3, mixed reality, four CPUs, game
+frames per second (of 60):
+
+| Stage | Before | After |
+|---|---|---|
+| Fountain of Dreams | 22.6 | 51.3 |
+| Jungle Japes | 50.9 | 57.9 |
+| Pokémon Stadium | 44.9 | 47.8 |
+| Brinstar | 44.2 | 46.7 |
+| Battlefield, Peach's Castle, Corneria | 59.1 to 59.6 | 59.1 to 59.7 |
+
+`AURORA_XR_FLAT_LOG=1` reports every 10 s the flat passes that kept world or
+hidden draws because something reads them, and what reads them.
+
+Also in the traces: the compositor preempts the app's GPU work about 175
+times a second, at about 1 ms each, under passthrough at 120 Hz.
+
 Requesting sustained-high clocks (`XR_EXT_performance_settings`) succeeded
 but left the GPU at level 2 (640 MHz) with no measurable change, so it's
 off by default (`AURORA_XR_PERF_GPU` / `AURORA_XR_PERF_CPU` = `low`, `high`,

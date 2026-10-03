@@ -585,9 +585,9 @@ bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {
     if (visible) {
         return false;
     }
-    /* Still drawn into the flat frame (the stadium screen's feed copies it),
-     * just not re-drawn in 3D. */
-    aurora_xr_camera(AURORA_XR_MONO, NULL);
+    /* Not re-drawn in 3D. The flat frame still draws it where a pass is
+     * read (the stadium screen's feed copies it), and drops it elsewhere. */
+    aurora_xr_camera(AURORA_XR_HIDDEN, NULL);
     return true;
 }
 
@@ -653,7 +653,7 @@ bool pc_xr_particle_begin(int bank, int id, const float pos[3]) {
     if (!pc_xr_mixed_reality() || !particle_rule(s_center_grkind, bank, id)) {
         return false;
     }
-    aurora_xr_camera(AURORA_XR_MONO, NULL);
+    aurora_xr_camera(AURORA_XR_HIDDEN, NULL);
     return true;
 }
 
@@ -669,7 +669,7 @@ int pc_xr_jobj_begin(HSD_JObj* jobj) {
         return 0;
     }
     if (h->dobjs == ALL_DOBJS) {
-        aurora_xr_camera(AURORA_XR_MONO, NULL);
+        aurora_xr_camera(AURORA_XR_HIDDEN, NULL);
         return CHANGED_MONO;
     }
     if (h->move < 0) {
@@ -692,7 +692,7 @@ int pc_xr_dobj_begin(HSD_JObj* jobj, int dobj_index) {
     if (h == NULL || h->dobjs == ALL_DOBJS || dobj_index > 31 || !(h->dobjs & (1u << dobj_index))) {
         return 0;
     }
-    aurora_xr_camera(AURORA_XR_MONO, NULL);
+    aurora_xr_camera(AURORA_XR_HIDDEN, NULL);
     return CHANGED_MONO;
 }
 

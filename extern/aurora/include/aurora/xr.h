@@ -25,9 +25,13 @@ bool aurora_xr_get_pad(PADStatus* out);
  *                    camera's view matrix (world -> camera, GX Mtx layout);
  *                    NULL keeps the frame's current one.
  *   AURORA_XR_HUD    HUD, re-drawn onto its own flat plane
+ *   AURORA_XR_HIDDEN fight geometry left out of 3D. Only in the flat frame,
+ *                    and dropped from it with the world while nothing reads
+ *                    the pass (an EFB copy, such as a stage's screen feed).
+ *                    6: 3 to 5 are the transform and clip markers below.
  * Call from the thread that issues GX commands. No-op unless an XR session
  * is presenting. */
-enum { AURORA_XR_MONO = 0, AURORA_XR_WORLD = 1, AURORA_XR_HUD = 2 };
+enum { AURORA_XR_MONO = 0, AURORA_XR_WORLD = 1, AURORA_XR_HUD = 2, AURORA_XR_HIDDEN = 6 };
 
 /* Lock-step pacing: when the headset runs at a multiple of 60 Hz, blocks
  * until it is time for the next game frame (every display frame at 60 Hz,

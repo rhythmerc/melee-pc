@@ -2266,6 +2266,9 @@ struct Renderer3D {
   std::array<wgpu::BindGroup, 3> composeGroups;
   std::array<XrView, 2> renderedViews{};
   bool renderedStereo = false;
+  // A fight frame that found no free 3D image: the headset keeps the last
+  // one, and the flat frame is still nobody's to see.
+  bool missedStereo = false;
   bool failed = false;
   GpuTiming timing;
   // Direct path: both eyes straight into the shared 3D image, one pass.
@@ -2642,10 +2645,14 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
 
 // Frame hook: the 3D views, then whether the next frame's flat world draws
 // are needed (not while fights go to the headset with no flat present).
+// A missed 3D image counts too: drawing the flat world then made the next
+// frame heavier and the next miss likelier, so slow stages kept sliding.
 void render_3d(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame) {
   R.renderedStereo = false;
+  R.missedStereo = false;
   render_3d_frame(cmd, frame);
-  gfx::set_xr_drop_flat_world(R.renderedStereo && g_skipPresent && !env_flag("AURORA_XR_FLAT_WORLD", false));
+  gfx::set_xr_drop_flat_world((R.renderedStereo || R.missedStereo) && g_skipPresent &&
+                              !env_flag("AURORA_XR_FLAT_WORLD", false));
 }
 
 void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame) {
@@ -2776,6 +2783,7 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
     } else {
       // No 3D image this frame: still a fight, so don't present the flat
       // frame nobody sees (the headset keeps showing the last 3D image).
+      R.missedStereo = true;
       g_skipPresent = !env_flag("AURORA_XR_FIGHT_SCREEN", false);
     }
   } else {
@@ -2787,6 +2795,9 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
       compose(cmd, dst, {0, 1}, kZoneCompose3D);
       R.renderedViews = views;
       R.renderedStereo = true;
+      g_skipPresent = !env_flag("AURORA_XR_FIGHT_SCREEN", false);
+    } else {
+      R.missedStereo = true;
       g_skipPresent = !env_flag("AURORA_XR_FIGHT_SCREEN", false);
     }
   }

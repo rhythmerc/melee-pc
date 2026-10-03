@@ -867,7 +867,10 @@ void handle_aurora(ByteReader& reader) noexcept {
     } else if (category == 5) { // planes 3-4
       gfx::xr_set_world_clip_more(view.data());
     } else {
-      gfx::xr_set_category(static_cast<gfx::XrCategory>(category <= 2 ? category : 0), hasView ? view.data() : nullptr);
+      const auto cat = category <= 2 ? static_cast<gfx::XrCategory>(category)
+                       : category == 6 ? gfx::XrCategory::Hidden // AURORA_XR_HIDDEN
+                                       : gfx::XrCategory::Mono;
+      gfx::xr_set_category(cat, hasView ? view.data() : nullptr);
     }
   } else if (subCmd == GX_AURORA_BEGIN_OFFSCREEN) {
     const u32 width = reader.read<u32>();

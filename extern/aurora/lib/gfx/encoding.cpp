@@ -20,6 +20,8 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -112,11 +114,46 @@ void execute_encoder_task(wgpu::CommandEncoder& cmd, FramePacket& frame, const E
   }
 }
 
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+namespace {
+// AURORA_XR_FLAT_LOG=1: every 10 s, the flat passes that kept their world
+// and hidden draws because something reads them, and what reads them.
+void log_kept_flat_pass(const RenderPass& passInfo) {
+  static const bool enabled = std::getenv("AURORA_XR_FLAT_LOG") != nullptr;
+  if (!enabled)
+    return;
+  static uint32_t passes, draws, resolve, color, depth, normal;
+  static auto start = std::chrono::steady_clock::now();
+  uint32_t kept = 0;
+  for (const auto& cmd : passInfo.commands)
+    kept += cmd.type == CommandType::Draw &&
+            (cmd.xrCategory == XrCategory::World || cmd.xrCategory == XrCategory::Hidden);
+  if (kept != 0) {
+    ++passes;
+    draws += kept;
+    resolve += passInfo.resolveTarget ? 1 : 0;
+    color += passInfo.snapshotColorDst ? 1 : 0;
+    depth += passInfo.snapshotDepthDst ? 1 : 0;
+    normal += passInfo.snapshotNormalDst ? 1 : 0;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  if (now - start >= std::chrono::seconds(10)) {
+    Log.info("flat passes kept for a reader: {} ({} world/hidden draws); resolve {}, color {}, depth {}, normal {}",
+             passes, draws, resolve, color, depth, normal);
+    passes = draws = resolve = color = depth = normal = 0;
+    start = now;
+  }
+}
+} // namespace
+#endif
+
 void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, RenderPass& passInfo) {
   ZoneScoped;
   g_currentPipeline = UINTPTR_MAX;
 #if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
   const bool dropWorld = g_xrDropFlatWorld && !passInfo.has_consumer();
+  if (g_xrDropFlatWorld && !dropWorld)
+    log_kept_flat_pass(passInfo);
 #endif
 #ifdef AURORA_GFX_DEBUG_GROUPS
   std::vector<std::string> lastDebugGroupStack;
@@ -169,7 +206,7 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
     case CommandType::Draw: {
       auto& draw = cmd.data.draw;
 #if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
-      if (dropWorld && cmd.xrCategory == XrCategory::World) {
+      if (dropWorld && (cmd.xrCategory == XrCategory::World || cmd.xrCategory == XrCategory::Hidden)) {
         break;
       }
 #endif
