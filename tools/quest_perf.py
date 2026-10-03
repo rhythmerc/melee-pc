@@ -74,8 +74,20 @@ XR_FPS = re.compile(r"([\d.]+) display fps \((\d+)% 3D\); frames/s released: scr
 XR_GPU = re.compile(r"GPU 3D passes per frame \(us\): 3D eyes (\d+).*?\(total (\d+)\); (\d+) world draws")
 
 
+PID = re.compile(r"^\S+ \S+ [VDIWE]/(\S+)\s*\(\s*(\d+)\)")
+
+
+def game_lines(text):
+    """The game's own lines: other apps (the Home shell) log VrApi stats too.
+    The game is the process writing Aurora lines."""
+    lines = text.splitlines()
+    pids = {m.group(2) for m in map(PID.match, lines) if m and m.group(1) == "Aurora"}
+    return [l for l in lines if (m := PID.match(l)) and m.group(2) in pids] if pids else lines
+
+
 def summarize(text):
-    rows = [m.groups() for m in map(VRAPI.search, text.splitlines()) if m]
+    lines = game_lines(text)
+    rows = [m.groups() for m in map(VRAPI.search, lines) if m]
     if not rows:
         return "  no VrApi stats (is the game in front and the headset awake?)"
 
@@ -94,11 +106,11 @@ def summarize(text):
         f"  CPU level {levels(3)} @ {mean(col(5)):.0f} MHz   GPU level {levels(4)} @ {mean(col(6)):.0f} MHz",
         f"  GPU% {mean(col(8)):.2f}  CPU% {mean(col(9)):.2f}  App GPU {mean(col(7)):.2f} ms",
     ]
-    fps = [m.groups() for m in map(XR_FPS.search, text.splitlines()) if m]
+    fps = [m.groups() for m in map(XR_FPS.search, lines) if m]
     if fps:
         out.append(f"  game: 3D released {mean([float(f[3]) for f in fps]):.1f}/s, "
                    f"HUD {mean([float(f[4]) for f in fps]):.1f}/s ({len(fps)} samples)")
-    gpu = [m.groups() for m in map(XR_GPU.search, text.splitlines()) if m]
+    gpu = [m.groups() for m in map(XR_GPU.search, lines) if m]
     if gpu:
         out.append(f"  passes: 3D eyes {mean([int(g[0]) for g in gpu]):.0f} us, "
                    f"total {mean([int(g[1]) for g in gpu]):.0f} us, "
