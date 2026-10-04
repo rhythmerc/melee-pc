@@ -140,11 +140,8 @@ static const PartRule s_builtin_rules[] = {
     {0x0B, 1, 29, -1, false},
     /* Brinstar: the cave, its walls, stalactites, pillars and chains. */
     {0x08, 1, -1, -1, false},
-    /* Onett: everything is in part 5. Hidden: the ground and road in front
-     * (joint 2), the town around the three buildings you fight on (8), the
-     * ground behind them (14) and the hills (23). */
-    {0x14, 5, 2, -1, false},
-    {0x14, 5, 8, -1, false},
+    /* Onett: everything is in part 5. Hidden: the town behind (joint 14) and
+     * the hills (23); the rest is boxed in by clip planes (s_clips). */
     {0x14, 5, 14, -1, false},
     {0x14, 5, 23, -1, false},
 };
@@ -211,6 +208,13 @@ static const ClipRule s_clips[] = {
     CLIP_RIGHT(0x05, 6, 125.f, 8.f),
     CLIP_FRONT(0x05, 6, 45.f, 8.f),
     CLIP_BEHIND(0x05, 6, -100.f, 8.f),
+    /* Onett: the block you fight on, with its lot, the clothesline between
+     * the poles over the right house (it has collision) and the road in
+     * front, cut out of the town. */
+    CLIP_LEFT(0x14, 5, -140.f, 6.f),
+    CLIP_RIGHT(0x14, 5, 150.f, 6.f),
+    CLIP_BEHIND(0x14, 5, -45.f, 6.f),
+    CLIP_FRONT(0x14, 5, 70.f, 6.f),
     /* Brinstar: only the stretch of the acid's river around the stage (it
      * runs the length of the cave). LevelRule hides it while it is low. */
     CLIP_LEFT(0x08, 8, -210.f, 15.f),
@@ -298,17 +302,41 @@ static bool s_log_joints;
 static int s_category = AURORA_XR_MONO;
 
 /* The stage part being drawn, when it has joint rules: the joints with
- * anything hidden or moved, sorted by pointer for bsearch, with a mask of
- * their hidden meshes (all bits: the whole joint) and their move (-1:
- * none). */
+ * anything hidden or moved, sorted by pointer for bsearch, with whether
+ * the whole joint is hidden, a mask of their hidden meshes, and their move
+ * (-1: none). */
 #define MAX_HIDDEN_JOINTS 1024
-#define ALL_DOBJS UINT64_MAX
-#define MAX_DOBJS 64
+#define MAX_DOBJS 256 /* Onett's town joint alone has 100 meshes */
+typedef struct {
+    uint64_t w[MAX_DOBJS / 64];
+} MeshMask;
 typedef struct {
     HSD_JObj* jobj;
-    uint64_t dobjs;
+    bool all; /* the whole joint */
+    MeshMask dobjs;
     int move;
 } HiddenJoint;
+
+static bool mask_test(const MeshMask* m, int i) {
+    return i >= 0 && i < MAX_DOBJS && (m->w[i / 64] >> (i % 64) & 1);
+}
+
+static void mask_set(MeshMask* m, int i, bool on) {
+    if (i < 0 || i >= MAX_DOBJS) {
+        return;
+    }
+    const uint64_t bit = (uint64_t) 1 << (i % 64);
+    m->w[i / 64] = on ? m->w[i / 64] | bit : m->w[i / 64] & ~bit;
+}
+
+static bool mask_any(const MeshMask* m) {
+    for (int k = 0; k < MAX_DOBJS / 64; k++) {
+        if (m->w[k] != 0) {
+            return true;
+        }
+    }
+    return false;
+}
 enum { CHANGED_MONO = 1, CHANGED_MOVE = 2 };
 static bool s_joint_mode;
 static HiddenJoint s_hidden_joints[MAX_HIDDEN_JOINTS];
@@ -456,7 +484,7 @@ static void walk_joints(HSD_JObj* jobj, int grkind, int map_id, int depth, bool 
                 mv = i;
             }
         }
-        uint64_t dobjs = 0; /* meshes hidden while the joint is shown */
+        MeshMask dobjs = {{0}}; /* meshes hidden while the joint is shown */
         for (int i = 0; i < s_rule_count; i++) {
             const PartRule* r = &s_rules[i];
             if (r->grkind != grkind || r->map_id != map_id || r->jobj != idx) {
@@ -464,18 +492,14 @@ static void walk_joints(HSD_JObj* jobj, int grkind, int map_id, int depth, bool 
             }
             if (r->dobj < 0) {
                 vis = r->show;
-                dobjs = 0;
-            } else if (r->dobj >= MAX_DOBJS) {
-                continue;
-            } else if (r->show) {
-                dobjs &= ~((uint64_t) 1 << r->dobj);
+                dobjs = (MeshMask){{0}};
             } else {
-                dobjs |= (uint64_t) 1 << r->dobj;
+                mask_set(&dobjs, r->dobj, !r->show);
             }
         }
-        const uint64_t hidden = vis ? dobjs : ALL_DOBJS;
-        if ((hidden != 0 || mv >= 0) && s_hidden_joint_count < MAX_HIDDEN_JOINTS) {
-            s_hidden_joints[s_hidden_joint_count++] = (HiddenJoint){jobj, hidden, mv};
+        const bool some = mask_any(&dobjs);
+        if ((!vis || some || mv >= 0) && s_hidden_joint_count < MAX_HIDDEN_JOINTS) {
+            s_hidden_joints[s_hidden_joint_count++] = (HiddenJoint){jobj, !vis, dobjs, mv};
         }
         if (log) {
             int meshes = 0;
@@ -486,7 +510,7 @@ static void walk_joints(HSD_JObj* jobj, int grkind, int map_id, int depth, bool 
             }
             pc_log_line("xr: stage %d part %d joint %d depth %d %d meshes%s at %.0f,%.0f,%.0f -> %s", grkind,
                 map_id, idx, depth, meshes, (jobj->flags & JOBJ_HIDDEN) ? " (hidden)" : "", jobj->mtx[0][3],
-                jobj->mtx[1][3], jobj->mtx[2][3], vis ? (dobjs ? "3D, some meshes hidden" : "3D") : "hidden");
+                jobj->mtx[1][3], jobj->mtx[2][3], vis ? (some ? "3D, some meshes hidden" : "3D") : "hidden");
         }
         walk_joints(jobj->child, grkind, map_id, depth + 1, vis, mv, index, log);
     }
@@ -818,7 +842,7 @@ int pc_xr_jobj_begin(HSD_JObj* jobj) {
     if (h == NULL) {
         return 0;
     }
-    if (h->dobjs == ALL_DOBJS) {
+    if (h->all) {
         aurora_xr_camera(AURORA_XR_HIDDEN, NULL);
         return CHANGED_MONO;
     }
@@ -839,8 +863,7 @@ int pc_xr_jobj_begin(HSD_JObj* jobj) {
 int pc_xr_dobj_begin(HSD_JObj* jobj, int dobj_index) {
     const HiddenJoint* h = find_joint(jobj);
     /* A wholly hidden joint is already out of the 3D view. */
-    if (h == NULL || h->dobjs == ALL_DOBJS || dobj_index >= MAX_DOBJS ||
-        !(h->dobjs & ((uint64_t) 1 << dobj_index))) {
+    if (h == NULL || h->all || !mask_test(&h->dobjs, dobj_index)) {
         return 0;
     }
     aurora_xr_camera(AURORA_XR_HIDDEN, NULL);

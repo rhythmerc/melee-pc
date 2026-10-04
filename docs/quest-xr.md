@@ -160,10 +160,13 @@ and the investigation behind it are in docs/xr-3d-plan.md.
       river around the stage (x −210 to 240, z −90 to 70).
     - `MELEE_XR_LEVEL_LOG` logs a level rule's joint height while
       surveying.
-  - **Onett (2026-10-04):** everything is in part 5. Hidden: the ground
-    and road in front (joint 2), the town around the three buildings you
-    fight on (8), the ground behind them (14) and the hills (23). The cars
-    still drive past in front, over nothing.
+  - **Onett (2026-10-04):** everything is in part 5. The town behind
+    (joint 14) and the hills (23) are hidden, and the rest is boxed in by
+    clip planes (x −140 to 150, z −45 to 70). That leaves the block you
+    fight on: its lot, the road in front, and the clothesline between the
+    poles over the right house, which has collision. The clothesline isn't
+    one of the town joint's (8) meshes, so a box was simpler than mesh rules.
+    Mesh rules now reach up to 256 meshes per joint (joint 8 has 100).
   - **Yoshi's Island (2026-10-04):** the clouds behind the stage (part 1,
     joints 2-7) and the scenery far behind it (20-23, 25-27, 29) are hidden.
     - Still open: the tall slanted rock at the right. Its body is mesh 30 of
