@@ -294,6 +294,12 @@ struct Bridge {
   PFN_xrPassthroughStartFB startPassthrough = nullptr;
   PFN_xrPassthroughPauseFB pausePassthrough = nullptr;
   bool passthroughRunning = false;
+#ifdef XR_META_boundary_visibility
+  // The Guardian boundary, hidden while passthrough shows the room.
+  bool hasBoundaryVisibilityExt = false;
+  PFN_xrRequestBoundaryVisibilityMETA requestBoundaryVisibility = nullptr;
+  bool boundarySuppressed = false; // last request
+#endif
 
   std::string dumpDir; // AURORA_XR_DUMP
 
@@ -423,6 +429,9 @@ bool create_instance() {
     B.hasColorScaleBias |= !std::strcmp(p.extensionName, XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME);
     B.hasPerfSettingsExt |= !std::strcmp(p.extensionName, XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
     B.hasHandTrackingExt |= !std::strcmp(p.extensionName, XR_EXT_HAND_TRACKING_EXTENSION_NAME);
+#ifdef XR_META_boundary_visibility
+    B.hasBoundaryVisibilityExt |= !std::strcmp(p.extensionName, XR_META_BOUNDARY_VISIBILITY_EXTENSION_NAME);
+#endif
   }
   if (!hasVk2) {
     Log.error("OpenXR runtime lacks XR_KHR_vulkan_enable2");
@@ -441,6 +450,12 @@ bool create_instance() {
   B.hasHandTrackingExt &= env_flag("AURORA_XR_HANDS", true);
   if (B.hasHandTrackingExt)
     exts.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
+#ifdef XR_META_boundary_visibility
+  // AURORA_XR_BOUNDARY=1 keeps the Guardian boundary in mixed reality.
+  B.hasBoundaryVisibilityExt &= !env_flag("AURORA_XR_BOUNDARY", false);
+  if (B.hasBoundaryVisibilityExt)
+    exts.push_back(XR_META_BOUNDARY_VISIBILITY_EXTENSION_NAME);
+#endif
   XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
 #ifdef __ANDROID__
   exts.push_back(XR_KHR_ANDROID_CREATE_INSTANCE_EXTENSION_NAME);
@@ -485,6 +500,10 @@ bool create_instance() {
     B.destroyHandTracker = xr_proc<PFN_xrDestroyHandTrackerEXT>("xrDestroyHandTrackerEXT");
     B.locateHandJoints = xr_proc<PFN_xrLocateHandJointsEXT>("xrLocateHandJointsEXT");
   }
+#ifdef XR_META_boundary_visibility
+  if (B.hasBoundaryVisibilityExt)
+    B.requestBoundaryVisibility = xr_proc<PFN_xrRequestBoundaryVisibilityMETA>("xrRequestBoundaryVisibilityMETA");
+#endif
   return true;
 }
 
@@ -1975,6 +1994,31 @@ void sync_passthrough() {
   Log.info("Passthrough {}", want ? "on" : "off");
 }
 
+// The Guardian boundary is hidden while passthrough shows the room (the
+// runtime allows nothing else) and comes back in full VR.
+// XR_META_boundary_visibility; AURORA_XR_BOUNDARY=1 keeps it.
+void sync_boundary() {
+#ifdef XR_META_boundary_visibility
+  if (!B.requestBoundaryVisibility || !B.running)
+    return;
+  const bool want = B.passthroughRunning && g_passthroughWanted;
+  // Refused (no passthrough layer shown yet): try again about once a second.
+  static uint64_t retryAt = 0;
+  if (want == B.boundarySuppressed || B.framesShown < retryAt)
+    return;
+  B.boundarySuppressed = want;
+  const XrResult r = B.requestBoundaryVisibility(
+      B.session, want ? XR_BOUNDARY_VISIBILITY_SUPPRESSED_META : XR_BOUNDARY_VISIBILITY_NOT_SUPPRESSED_META);
+  if (r == XR_BOUNDARY_VISIBILITY_SUPPRESSION_NOT_ALLOWED_META || XR_FAILED(r)) {
+    static int warnings = 0;
+    if (warnings++ < 3)
+      Log.warn("Boundary {} refused: XrResult {}", want ? "suppression" : "restore", static_cast<int>(r));
+    B.boundarySuppressed = !want;
+    retryAt = B.framesShown + 72;
+  }
+#endif
+}
+
 bool render_xr_frame() {
   XrFrameState fs{XR_TYPE_FRAME_STATE};
   XR_TRY(xrWaitFrame(B.session, nullptr, &fs));
@@ -2034,6 +2078,7 @@ bool render_xr_frame() {
   uint32_t layerCount = 0;
   XrCompositionLayerPassthroughFB ptLayer{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
   sync_passthrough();
+  sync_boundary();
   if (B.passthroughLayer && B.passthroughRunning && g_passthroughWanted) {
     ptLayer.flags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
     ptLayer.layerHandle = B.passthroughLayer;
@@ -2168,6 +2213,11 @@ bool poll_events() {
       update_pacing();
     } else if (ev.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) {
       return false;
+#ifdef XR_META_boundary_visibility
+    } else if (ev.type == XR_TYPE_EVENT_DATA_BOUNDARY_VISIBILITY_CHANGED_META) {
+      const auto vis = reinterpret_cast<const XrEventDataBoundaryVisibilityChangedMETA&>(ev).boundaryVisibility;
+      Log.info("Boundary {}", vis == XR_BOUNDARY_VISIBILITY_SUPPRESSED_META ? "hidden" : "shown");
+#endif
     }
     ev = {XR_TYPE_EVENT_DATA_BUFFER};
   }

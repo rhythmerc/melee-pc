@@ -156,6 +156,11 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     without the reflection render. Profile it, then build a proper 3D
     reflection: mirror the world draws about the water plane per eye,
     clipped to above the water, under the translucent surface.
+- **Guardian boundary.** In mixed reality the boundary is hidden
+  (`XR_META_boundary_visibility`), since passthrough already shows the room.
+  The runtime only allows that while a passthrough layer is shown, so full
+  VR gets the boundary back. `AURORA_XR_BOUNDARY=1` keeps it in mixed
+  reality too.
 - **Mixed reality vs full VR.** Every hide, clip and move applies only in
   mixed reality (`pc_xr_mixed_reality`). Full VR renders stages whole, and
   passthrough is stopped (`xrPassthroughPauseFB`, not just a missing layer).
@@ -769,6 +774,7 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 |---|---|---|
 | `AURORA_XR` | set by `MeleeXrActivity`; off otherwise | Present to the headset |
 | `AURORA_XR_PASSTHROUGH` | 1 | Passthrough behind the screen |
+| `AURORA_XR_BOUNDARY` | 0 | 1 keeps the Guardian boundary in mixed reality (by default it's hidden while passthrough shows the room) |
 | `AURORA_XR_SCREEN_WIDTH` | 1.6 | Starting screen width in meters (grab with two hands to change) |
 | `AURORA_XR_SCREEN_DISTANCE` | 1.5 | Meters in front of the starting head position |
 | `AURORA_XR_SCREEN_Y` | 0 | Height offset in meters |
