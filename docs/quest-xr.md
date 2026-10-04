@@ -546,6 +546,24 @@ The HUD moves, turns and scales with the arena. The placement lasts for the
 session and is logged when you let go (`Arena placed at x,y,z, yaw, scale`),
 which is handy for `AURORA_XR_ARENA_POS` and `AURORA_XR_ARENA_SCALE`.
 
+### Placing the screen
+
+The virtual screen (menus, character and stage select, results) is grabbed
+the same way, at any time it shows. Its lasers only appear while they point
+at it, and the grips press Z as usual unless a laser is on the screen.
+
+- **One hand.** Squeeze or pinch with the laser on the screen, or touching
+  it. The screen hangs off the laser or the touch point. While a controller
+  drags it along its laser, that controller's stick pushes it away or pulls
+  it in, instead of steering the menu.
+- **Two hands.** Spreading or closing the hands resizes it about its center,
+  and moving them carries it along.
+
+The screen always turns to face the head. Its pose is separate from the
+arena's: moving or resizing one leaves the other alone. It lasts for the
+session and is logged when you let go (`Screen placed at x,y,z, width w m`),
+for `AURORA_XR_SCREEN_*`.
+
 The lasers and dots are quad layers with static textures, drawn at display
 rate from the latest controller and hand poses. Coloring them needs
 `XR_KHR_composition_layer_color_scale_bias`. A laser or dot is cyan on the
@@ -728,7 +746,7 @@ AURORA_XR=1 build/linux-xr-fork/melee disc.rvz
 | A / B | A / B |
 | X / Y | X / Y |
 | Triggers | Analog L / R, digital past 90% |
-| Either grip | Z (grabs the arena while paused; with hands, pinch) |
+| Either grip | Z (grabs the arena while paused, or the screen with a laser on it; with hands, pinch) |
 | Left menu button | Start |
 
 An external gamepad plays as usual. Its Select switches mixed reality and
@@ -742,7 +760,7 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 |---|---|---|
 | `AURORA_XR` | set by `MeleeXrActivity`; off otherwise | Present to the headset |
 | `AURORA_XR_PASSTHROUGH` | 1 | Passthrough behind the screen |
-| `AURORA_XR_SCREEN_WIDTH` | 1.6 | Screen width in meters |
+| `AURORA_XR_SCREEN_WIDTH` | 1.6 | Starting screen width in meters (grab with two hands to change) |
 | `AURORA_XR_SCREEN_DISTANCE` | 1.5 | Meters in front of the starting head position |
 | `AURORA_XR_SCREEN_Y` | 0 | Height offset in meters |
 | `AURORA_XR_SCREEN_HEIGHT` | 1080 | Screen texture height in pixels |

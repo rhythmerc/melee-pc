@@ -306,7 +306,9 @@ struct Bridge {
   // Pointing and grabbing the arena while a fight is paused.
   std::array<XrAction, 2> aim{}, grab{};
   std::array<XrSpace, 2> aimSpace{};
-  bool pointerMode = false; // last frame: paused fight, the grips grab instead of pressing Z
+  bool pointerMode = false; // last frame: the grips grab (paused fight, or a laser on the screen) instead of pressing Z
+  int reelHand = -1;        // last frame: the controller dragging the screen; its stick pushes and pulls it
+  std::array<float, 2> stickY{}; // each controller's raw thumbstick Y (left: control stick, right: C-stick)
   // Hand tracking (XR_EXT_hand_tracking): pinches grab the arena too.
   bool hasHandTrackingExt = false;
   PFN_xrCreateHandTrackerEXT createHandTracker = nullptr;
@@ -925,10 +927,17 @@ void update_input() {
   PADStatus pad{};
   const XrVector2f main = action_vec2(B.stickMain);
   const XrVector2f c = action_vec2(B.stickC);
-  pad.stickX = to_axis(main.x);
-  pad.stickY = to_axis(main.y);
-  pad.substickX = to_axis(c.x);
-  pad.substickY = to_axis(c.y);
+  B.stickY = {main.y, c.y};
+  // A controller dragging the screen reels it in and out with its stick
+  // instead of steering the menu.
+  if (B.reelHand != 0) {
+    pad.stickX = to_axis(main.x);
+    pad.stickY = to_axis(main.y);
+  }
+  if (B.reelHand != 1) {
+    pad.substickX = to_axis(c.x);
+    pad.substickY = to_axis(c.y);
+  }
   const float l = action_float(B.trigL);
   const float r = action_float(B.trigR);
   pad.triggerLeft = static_cast<u8>(std::lround(std::clamp(l, 0.f, 1.f) * 255.f));
@@ -1298,7 +1307,7 @@ void publish_views(XrTime displayTime) {
   }
 }
 
-// ---------------------------------------------------------------- XR thread: arena placement
+// ---------------------------------------------------------------- XR thread: arena and screen placement
 //
 // While a fight is paused each hand, holding a controller or tracked (the
 // controller put down), points a laser at the arena, or shows a dot once its
@@ -1314,6 +1323,13 @@ void publish_views(XrTime displayTime) {
 //              with the other alone
 // Controllers and hands work the same way and mix freely.
 // Starting position and scale: AURORA_XR_ARENA_POS, AURORA_XR_ARENA_SCALE.
+//
+// The virtual screen (menus) is grabbed the same way, any time it shows. Its
+// lasers appear only while they point at it, and the grips press Z unless a
+// laser is on it. It always turns to face the head; one controller dragging it
+// also pushes and pulls it with its stick, and two hands resize it about its
+// center. The arena and the screen keep separate poses: moving one never
+// moves the other.
 
 XrVector3f operator+(XrVector3f a, XrVector3f b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
 XrVector3f operator-(XrVector3f a, XrVector3f b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
@@ -1421,6 +1437,72 @@ float hit_arena(const ArenaPose& a, XrVector3f origin, XrVector3f dir) {
   return std::max(t0, 0.f);
 }
 
+// The virtual screen, in the starting head space: a quad facing +Z in its
+// own frame. XR thread only. Kept for the whole session.
+struct ScreenPose {
+  XrVector3f pos{0.f, 0.f, -1.5f};
+  XrQuaternionf orientation{0.f, 0.f, 0.f, 1.f};
+  float width = 1.6f; // meters
+};
+ScreenPose g_screen;
+bool g_screenInit = false;
+constexpr float kMinScreenWidth = 0.4f, kMaxScreenWidth = 8.f;
+// One controller's reach along its laser while dragging the screen.
+constexpr float kMinScreenDist = 0.3f, kMaxScreenDist = 10.f;
+
+ScreenPose& screen_pose() {
+  if (!g_screenInit) {
+    g_screenInit = true;
+    g_screen.pos = {0.f, env_float("AURORA_XR_SCREEN_Y", 0.f), -env_float("AURORA_XR_SCREEN_DISTANCE", 1.5f)};
+    g_screen.width = env_float("AURORA_XR_SCREEN_WIDTH", 1.6f);
+  }
+  return g_screen;
+}
+
+// Screen height over width, from its swapchain.
+float screen_aspect() {
+  const auto& st = g_streams[kScreen];
+  return st.width > 0 ? static_cast<float>(st.height) / static_cast<float>(st.width) : 9.f / 16.f;
+}
+
+XrQuaternionf qconj(const XrQuaternionf& q) { return {-q.x, -q.y, -q.z, q.w}; }
+
+// The screen turned to face `eye`, upright.
+XrQuaternionf facing(XrVector3f pos, XrVector3f eye) {
+  const XrVector3f z = vnorm(eye - pos);
+  XrVector3f x = vcross({0.f, 1.f, 0.f}, z);
+  if (vlen(x) < 1e-3f)
+    return {0.f, 0.f, 0.f, 1.f}; // straight above or below: keep it level
+  x = vnorm(x);
+  return quat_from_axes(x, vcross(z, x), z);
+}
+
+// Touching the screen: within its rectangle (with a margin) and a few
+// centimeters of its surface.
+bool in_screen_box(const ScreenPose& s, XrVector3f p) {
+  const XrVector3f l = qrot(qconj(s.orientation), p - s.pos);
+  const float hw = s.width * 0.55f, hh = s.width * screen_aspect() * 0.55f;
+  return std::abs(l.x) <= hw && std::abs(l.y) <= hh && std::abs(l.z) <= 0.06f;
+}
+
+// Distance along the ray (meters) to the screen, from either side, or -1.
+float hit_screen(const ScreenPose& s, XrVector3f origin, XrVector3f dir) {
+  const XrQuaternionf inv = qconj(s.orientation);
+  const XrVector3f o = qrot(inv, origin - s.pos), d = qrot(inv, dir);
+  if (std::abs(d.z) < 1e-6f)
+    return -1.f;
+  const float t = -o.z / d.z;
+  if (t < 0.f)
+    return -1.f;
+  const XrVector3f q = o + d * t;
+  const float hw = s.width * 0.52f, hh = s.width * screen_aspect() * 0.52f;
+  return std::abs(q.x) <= hw && std::abs(q.y) <= hh ? t : -1.f;
+}
+
+// What the hands place: the arena while a fight is paused, the screen
+// otherwise.
+enum class Target { Arena, Screen };
+
 struct Hand {
   bool valid = false;
   bool tracked = false;               // an articulated hand (pinches) rather than a controller (grip)
@@ -1436,11 +1518,13 @@ struct Hand {
 
 struct Grab {
   std::array<Hand, 2> hands;
-  int oneHand = -1; // the hand dragging the arena alone
+  Target target = Target::Arena;
+  int oneHand = -1; // the hand dragging the target alone
   bool twoHands = false;
   ArenaPose start;
+  ScreenPose screenStart;
   float dist = 0.f;  // one controller: the grabbed point's distance along its laser
-  XrVector3f offset; // one hand: arena position minus the grabbed point
+  XrVector3f offset; // one hand: target position minus the grabbed point
   XrVector3f mid0;   // two hands: midpoint, span and heading at the start
   float span0 = 1.f, heading0 = 0.f;
 };
@@ -1524,6 +1608,11 @@ void end_grab() {
     return;
   G.oneHand = -1;
   G.twoHands = false;
+  if (G.target == Target::Screen) {
+    const ScreenPose& s = screen_pose();
+    Log.info("Screen placed at {:.2f},{:.2f},{:.2f}, width {:.2f} m", s.pos.x, s.pos.y, s.pos.z, s.width);
+    return;
+  }
   const ArenaPose a = arena_pose();
   Log.info("Arena placed at {:.2f},{:.2f},{:.2f}, yaw {:.0f} deg, scale {:.4f}", a.pos.x, a.pos.y, a.pos.z,
            a.yaw * 57.2958f, a.scale);
@@ -1533,36 +1622,77 @@ void end_grab() {
 // point on its laser.
 XrVector3f drag_point(const Hand& hand) { return hand.direct ? hand.touch : hand.origin + hand.dir * G.dist; }
 
-void begin_one_hand(int h, const ArenaPose& a) {
+void begin_one_hand(int h, XrVector3f pos) {
   const Hand& hand = G.hands[h];
   G.oneHand = h;
   G.twoHands = false;
-  G.start = a;
-  // The laser's hit, or (back from two hands with the laser off the arena)
-  // the point on the laser nearest the arena.
+  G.start = arena_pose();
+  G.screenStart = screen_pose();
+  // The laser's hit, or (back from two hands with the laser off the target)
+  // the point on the laser nearest the target.
   if (!hand.direct)
-    G.dist = hand.hit >= 0.f ? hand.hit : std::max(vdot(a.pos - hand.origin, hand.dir), 0.1f);
-  G.offset = a.pos - drag_point(hand);
+    G.dist = hand.hit >= 0.f ? hand.hit : std::max(vdot(pos - hand.origin, hand.dir), 0.1f);
+  G.offset = pos - drag_point(hand);
 }
 
-void begin_two_hands(const ArenaPose& a) {
+void begin_two_hands() {
   const XrVector3f l = G.hands[0].touch, r = G.hands[1].touch;
   const XrVector3f span = r - l;
   G.oneHand = -1;
   G.twoHands = true;
-  G.start = a;
+  G.start = arena_pose();
+  G.screenStart = screen_pose();
   G.mid0 = (l + r) * 0.5f;
   G.span0 = std::max(vlen(span), 0.05f);
   G.heading0 = std::atan2(-span.z, span.x);
 }
 
-// Per display frame. `active`: a fight is paused and on the headset.
-void update_grab(bool active) {
-  ArenaPose a = arena_pose();
-  for (Hand& hand : G.hands) {
-    hand.inside = hand.valid && in_grab_box(a, hand.touch);
-    hand.hit = hand.valid && !hand.inside ? hit_arena(a, hand.origin, hand.dir) : -1.f;
+// The screen while one hand drags it, or two resize it. It keeps facing
+// the head.
+void place_screen() {
+  ScreenPose& s = screen_pose();
+  if (G.oneHand >= 0) {
+    const Hand& hand = G.hands[G.oneHand];
+    if (!hand.direct && !hand.tracked) {
+      // The stick reels it along the laser, about doubling the reach per
+      // second at full tilt.
+      static auto last = std::chrono::steady_clock::now();
+      const auto now = std::chrono::steady_clock::now();
+      const float dt = std::min(std::chrono::duration<float>(now - last).count(), 0.05f);
+      last = now;
+      const float y = B.stickY[G.oneHand];
+      if (std::abs(y) > 0.2f)
+        G.dist = std::clamp(G.dist * std::exp(y * dt * 0.7f), kMinScreenDist, kMaxScreenDist);
+    }
+    s.pos = drag_point(hand) + G.offset;
+  } else {
+    const XrVector3f lp = G.hands[0].touch, rp = G.hands[1].touch;
+    const float ratio = vlen(rp - lp) / G.span0;
+    s.width = std::clamp(G.screenStart.width * ratio, kMinScreenWidth, kMaxScreenWidth);
+    s.pos = G.screenStart.pos + ((lp + rp) * 0.5f - G.mid0);
   }
+  s.orientation = facing(s.pos, B.head);
+}
+
+// Per display frame. `active`: the target shows on the headset and can be
+// placed (a paused fight's arena, or the screen).
+void update_grab(Target target, bool active) {
+  if (target != G.target) {
+    for (Hand& hand : G.hands)
+      hand.engaged = false;
+    end_grab();
+    G.target = target;
+  }
+  ArenaPose a = arena_pose();
+  const ScreenPose& screen = screen_pose();
+  const bool onScreen = target == Target::Screen;
+  for (Hand& hand : G.hands) {
+    hand.inside = hand.valid && (onScreen ? in_screen_box(screen, hand.touch) : in_grab_box(a, hand.touch));
+    hand.hit = hand.valid && !hand.inside
+                   ? (onScreen ? hit_screen(screen, hand.origin, hand.dir) : hit_arena(a, hand.origin, hand.dir))
+                   : -1.f;
+  }
+  B.reelHand = -1;
   if (!active) {
     for (Hand& hand : G.hands)
       hand.engaged = false;
@@ -1590,16 +1720,22 @@ void update_grab(bool active) {
   const bool l = G.hands[0].engaged, r = G.hands[1].engaged;
   if (l && r) {
     if (!G.twoHands)
-      begin_two_hands(a);
+      begin_two_hands();
   } else if (l || r) {
     // Letting go of one of two hands carries on with the other alone.
     if (G.oneHand != (l ? 0 : 1))
-      begin_one_hand(l ? 0 : 1, a);
+      begin_one_hand(l ? 0 : 1, onScreen ? screen.pos : a.pos);
   } else {
     end_grab();
     return;
   }
 
+  if (onScreen) {
+    place_screen();
+    if (G.oneHand >= 0 && !G.hands[G.oneHand].direct && !G.hands[G.oneHand].tracked)
+      B.reelHand = G.oneHand;
+    return;
+  }
   if (G.oneHand >= 0) {
     a.pos = drag_point(G.hands[G.oneHand]) + G.offset;
   } else {
@@ -1779,13 +1915,14 @@ void add_pointer_quad(PointerLayers& out, XrSwapchain swapchain, uint32_t w, uin
   ++out.count;
 }
 
-void build_pointer_layers(PointerLayers& out) {
+// `onTargetOnly`: skip the hands that neither point at the target nor hold it.
+void build_pointer_layers(PointerLayers& out, bool onTargetOnly = false) {
   out.count = 0;
   if (!B.beamSwapchain || !B.dotSwapchain)
     return;
   for (int h = 0; h < 2; ++h) {
     const Hand& hand = G.hands[h];
-    if (!hand.valid)
+    if (!hand.valid || (onTargetOnly && !hand.engaged && !hand.inside && hand.hit < 0.f))
       continue;
     const XrColor4f color = hand.engaged                     ? XrColor4f{1.f, 0.8f, 0.3f, 1.f}
                             : hand.inside || hand.hit >= 0.f ? XrColor4f{0.45f, 0.85f, 1.f, 1.f}
@@ -1881,10 +2018,17 @@ bool render_xr_frame() {
     if (fight && due > 0 && !g_fightPaused && ++shownFor == due + 1)
       ++g_stereoLate;
   }
+  // Paused fights place the arena; menus place the screen.
+  const bool screenShown = !fight && g_streams[kScreen].haveImage;
   const bool pointing = fight && g_fightPaused && B.focused;
+  const bool screenPointing = screenShown && B.focused;
   locate_hands(fs.predictedDisplayTime);
-  update_grab(pointing);
-  B.pointerMode = pointing;
+  update_grab(fight ? Target::Arena : Target::Screen, pointing || screenPointing);
+  // On the screen the grips stay Z unless a laser is on it.
+  const bool onScreen = screenPointing && std::any_of(G.hands.begin(), G.hands.end(), [](const Hand& h) {
+                          return h.engaged || h.inside || h.hit >= 0.f;
+                        });
+  B.pointerMode = pointing || onScreen;
 
   std::array<const XrCompositionLayerBaseHeader*, 3 + kMaxPointerLayers> layers{};
   uint32_t layerCount = 0;
@@ -1946,19 +2090,23 @@ bool render_xr_frame() {
         layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&pointers.quads[i]);
     }
     ++B.fightFrames;
-  } else if (fs.shouldRender && g_streams[kScreen].haveImage) {
+  } else if (fs.shouldRender && screenShown) {
     // A swapchain with no new release shows its last released image, so the
     // screen keeps its picture on display frames the game did not produce.
     const auto& screen = g_streams[kScreen];
-    const float width = env_float("AURORA_XR_SCREEN_WIDTH", 1.6f);
+    const ScreenPose& pose = screen_pose();
     screenQuad.space = B.space;
     screenQuad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
     screenQuad.subImage.swapchain = screen.swapchain;
     screenQuad.subImage.imageRect = {{0, 0}, {static_cast<int32_t>(screen.width), static_cast<int32_t>(screen.height)}};
-    screenQuad.pose.orientation.w = 1.f;
-    screenQuad.pose.position = {0.f, env_float("AURORA_XR_SCREEN_Y", 0.f), -env_float("AURORA_XR_SCREEN_DISTANCE", 1.5f)};
-    screenQuad.size = {width, width * static_cast<float>(screen.height) / static_cast<float>(screen.width)};
+    screenQuad.pose = {pose.orientation, pose.pos};
+    screenQuad.size = {pose.width, pose.width * screen_aspect()};
     layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&screenQuad);
+    if (onScreen) {
+      build_pointer_layers(pointers, true);
+      for (uint32_t i = 0; i < pointers.count; ++i)
+        layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&pointers.quads[i]);
+    }
   }
   XrFrameEndInfo fei{XR_TYPE_FRAME_END_INFO};
   fei.displayTime = fs.predictedDisplayTime;
