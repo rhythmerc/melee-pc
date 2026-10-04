@@ -15,7 +15,10 @@ inline constexpr bool UseTextureBuffer = true;
 inline constexpr uint64_t UniformBufferSize = 25165824; // 24 MiB (ample for Melee peak 24MB, instead of 48MB)
 inline constexpr uint64_t VertexBufferSize = 4194304;   // 4 MiB
 inline constexpr uint64_t IndexBufferSize = 1048576;    // 1 MiB
-inline constexpr uint64_t StorageBufferSize = 4194304;  // 4 MiB
+// Storage holds the CPU-decoded vertices (AURORA_VTX_DECODE), every attribute
+// expanded to floats: 4 MiB overflowed on Pokemon Stadium's first frames in the
+// attract demo (4200356 bytes); a running 4-player Onett peaks near 2.8 MiB.
+inline constexpr uint64_t StorageBufferSize = 16777216; // 16 MiB
 inline constexpr uint64_t TextureUploadSize = 12582912; // 12 MiB
 #else
 inline constexpr uint64_t UniformBufferSize = 50331648; // 48 MiB
