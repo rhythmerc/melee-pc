@@ -153,16 +153,18 @@ and the investigation behind it are in docs/xr-3d-plan.md.
   - **Brinstar (2026-10-04):**
     - Hidden: the cave, with its walls, stalactites, pillars and chains
       (part 1).
-    - The acid (part 8) shows only once it rises to just under the stage
+    - The acid (part 8) fades in as it rises to just under the stage
       (`LevelRule`: its joint 1's height is the acid level, from about −250
-      to 90, with the surface about 90 below it). At its starting level it
-      is far out of bounds. When shown, it's boxed to the stretch of its
-      river around the stage (x −210 to 240, z −90 to 70).
+      to 90, with the surface about 90 below it; hidden below −50, solid
+      from −10, dithered in between through `aurora_xr_world_clips4_fade`).
+      At its starting level it is far out of bounds. When shown, it's boxed
+      to the stretch of its river around the stage (x −120 to 125, z −90 to
+      70).
     - `MELEE_XR_LEVEL_LOG` logs a level rule's joint height while
       surveying.
   - **Onett (2026-10-04):** everything is in part 5. The town behind
     (joint 14) and the hills (23) are hidden, and the rest is boxed in by
-    clip planes (x −140 to 150, z −45 to 70). That leaves the block you
+    clip planes (x −140 to 150, z −70 to 70). That leaves the block you
     fight on: its lot, the road in front, and the clothesline between the
     poles over the right house, which has collision. The clothesline isn't
     one of the town joint's (8) meshes, so a box was simpler than mesh rules.
@@ -574,7 +576,8 @@ Each hand points a laser at the arena. A controller's laser comes out of
 its tip. A tracked hand's runs from an estimated shoulder through the index
 knuckle, so it holds still while you pinch. Once the touch point (the
 controller's tip, or the pinch) is inside the arena's grab box, a bit larger
-than the stage, the laser gives way to a dot there.
+than the stage and centered on the arena center (Corneria's is the Great
+Fox), the laser gives way to a dot there.
 
 - **One hand.** Squeeze or pinch with the laser on the arena, or inside the
   box. The arena hangs off the laser at the point you grabbed, or off the
@@ -840,6 +843,7 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `MELEE_XR_IZUMI_REFLECTION` | unset | Keep Fountain of Dreams' reflection render in mixed reality |
 | `MELEE_XR_IZUMI_WATER` | `60,100,160` | Fountain water colour in mixed reality (looks red/blue swapped in the desktop build) |
 | `MELEE_XR_CLIPZ` | unset | Try back cuts: `grkind:part:z[:fade],...` cuts that part behind z |
+| `MELEE_XR_LEVEL_FADE` | unset | Override every level rule's fade band, `min,full` (surveying) |
 | `MELEE_XR_LEVEL_LOG` | unset | Log the height of each level rule's joint (`LevelRule`) about twice a second |
 | `MELEE_XR_JOINT_LOG` | unset | Log each part's joints (index, depth, meshes, position) once |
 | `MELEE_XR_CLIPP` | unset | Try any plane: `grkind:part:a:b:c:d[:fade];...` keeps where ax+by+cz+d ≥ 0. Any env plane replaces that part's built-in ones (up to 4) |

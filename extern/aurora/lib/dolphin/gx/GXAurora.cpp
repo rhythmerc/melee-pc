@@ -69,11 +69,18 @@ void aurora_xr_world_clips(const float plane1[4], float fade1, const float plane
 // Two markers: planes 1-2 (category 4; also clears 3-4) then planes 3-4
 // (category 5). Rows: plane, plane, fades. 0,0,0,1 always passes.
 void aurora_xr_world_clips4(const float planes[][4], const float fades[], int count) {
-  if (planes == nullptr || count <= 0) {
+  aurora_xr_world_clips4_fade(planes, fades, count, 1.f);
+}
+
+// Row 2 of the first marker carries the opacity after the two fades.
+void aurora_xr_world_clips4_fade(const float planes[][4], const float fades[], int count, float opacity) {
+  if ((planes == nullptr || count <= 0) && opacity >= 1.f) {
     aurora_xr_camera(4, nullptr);
     return;
   }
-  for (int half = 0; half < 2 && half * 2 < count; ++half) {
+  if (planes == nullptr)
+    count = 0;
+  for (int half = 0; half < 2 && (half == 0 || half * 2 < count); ++half) {
     float m[3][4] = {{0.f, 0.f, 0.f, 1.f}, {0.f, 0.f, 0.f, 1.f}, {}};
     for (int k = 0; k < 2; ++k) {
       const int i = half * 2 + k;
@@ -83,6 +90,8 @@ void aurora_xr_world_clips4(const float planes[][4], const float fades[], int co
         m[2][k] = fades[i];
       }
     }
+    if (half == 0)
+      m[2][2] = opacity;
     aurora_xr_camera(4 + half, m);
   }
 }

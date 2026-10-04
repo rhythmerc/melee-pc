@@ -2209,13 +2209,17 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}{11}
           for (size_t at = shaderSource.find("@location(", v0); at != std::string::npos && at < v1;
                at = shaderSource.find("@location(", at + 1))
             loc = std::max(loc, std::atoi(shaderSource.c_str() + at + 10));
-          shaderSource.insert(fsBody + 1, "\n    if (xr_bayer(in.pos.xy) >= clamp(min(min(in.xr_fade.x, in.xr_fade.y), min(in.xr_fade.z, in.xr_fade.w)), 0.0, 1.0)) { discard; }");
+          shaderSource.insert(fsBody + 1, "\n    if (xr_bayer(in.pos.xy) >= clamp(min(min(in.xr_fade.x, in.xr_fade.y), min(in.xr_fade.z, in.xr_fade.w)), 0.0, 1.0) * in.xr_opacity) { discard; }");
           // The distance to the plane in fade bands, interpolated (it is
           // linear, so exact) and clamped per fragment. A per-vertex 0/1 would
           // blend across triangles that span the plane. Fade band 0 is a hard
           // cut: a huge scale makes the ramp sub-pixel.
-          shaderSource.insert(retAt, "out.xr_fade = vec4f(xr_clip_d(0u), xr_clip_d(1u), xr_clip_d(2u), xr_clip_d(3u));\n    ");
-          shaderSource.insert(v1, fmt::format("    @location({}) xr_fade: vec4f,\n", loc + 1));
+          // The draw's opacity (aurora_xr_world_clips4_fade) scales the
+          // dither threshold: the whole draw dissolves.
+          shaderSource.insert(retAt, "out.xr_fade = vec4f(xr_clip_d(0u), xr_clip_d(1u), xr_clip_d(2u), xr_clip_d(3u));\n    "
+                                     "out.xr_opacity = 1.0 - bitcast<f32>(xr.enabled.y);\n    ");
+          shaderSource.insert(v1, fmt::format("    @location({}) xr_fade: vec4f,\n    @location({}) @interpolate(flat) xr_opacity: f32,\n",
+                                              loc + 1, loc + 2));
           shaderSource.insert(v0, "fn xr_clip_d(i: u32) -> f32 {\n"
                                   "    return dot(xr.clip[i], vec4f(xr_cam, 1.0)) * "
                                   "select(1.0e6, 1.0 / xr.fade[i], xr.fade[i] > 0.0);\n}\n"

@@ -32,6 +32,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <bit>
 #include <cmath>
 #include <limits>
 #include <initializer_list>
@@ -1419,19 +1420,18 @@ void set_arena_pose(const ArenaPose& a) {
   g_arena = a;
 }
 
-// What the lasers can grab, in game units around the stage's origin: wider
-// and taller than any stage's main platform, so pointing near it is enough.
+// What the lasers can grab, in game units around the arena center (the game
+// point placed at the arena position, aurora_xr_set_arena_center): wider and
+// taller than any stage's main platform, so pointing near it is enough.
 constexpr XrVector3f kGrabBoxMin{-120.f, -80.f, -60.f};
 constexpr XrVector3f kGrabBoxMax{120.f, 100.f, 60.f};
 // Meters per game unit: Final Destination from about 25 cm to 8.5 m wide.
 constexpr float kMinArenaScale = 0.0015f, kMaxArenaScale = 0.05f;
 
-// A room point (meters) in game units.
-XrVector3f to_game(const ArenaPose& a, XrVector3f p) {
-  const XrVector3f g = rot_y(p - a.pos, -a.yaw) * (1.f / a.scale);
-  std::lock_guard lock{g_arenaMutex};
-  return g + XrVector3f{g_arenaCenter[0], g_arenaCenter[1], g_arenaCenter[2]};
-}
+// A room point (meters) in game units from the arena center. Not from the
+// world origin: on Corneria, centered on the Great Fox far above it, the box
+// sat well below the ship.
+XrVector3f to_game(const ArenaPose& a, XrVector3f p) { return rot_y(p - a.pos, -a.yaw) * (1.f / a.scale); }
 
 bool in_grab_box(const ArenaPose& a, XrVector3f p) {
   const XrVector3f g = to_game(a, p);
@@ -2678,8 +2678,9 @@ struct GpuTiming {
   std::array<wgpu::PassTimestampWrites, kZoneCount> writes{};
 };
 
-// The multiview shader's XrEye: one matrix per eye, the enabled flags, then
-// a clip plane in game camera space (aurora_xr_world_clip).
+// The multiview shader's XrEye: one matrix per eye, the enabled flags (y:
+// 1 - the clipped draws' opacity, as float bits), then the clip planes in
+// game camera space (aurora_xr_world_clip).
 constexpr uint64_t kMultiviewEyeSize = 2 * 64 + 16 + 4 * 16 + 16; // ... 4 clip planes, fade bands
 
 struct Renderer3D {
@@ -3281,6 +3282,8 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
       if (g_multiview) {
         mv[t].m[eye] = u.m;
         mv[t].enabled[0] = 1;
+        // The clipped geometry's dissolve, as 1 - opacity (0: solid).
+        mv[t].enabled[1] = std::bit_cast<uint32_t>(t > 0 ? 1.f - frame.xrTransforms[t - 1][32] : 0.f);
         for (int k = 0; k < 4; ++k) {
           std::copy(clipCam[k].begin(), clipCam[k].end(), mv[t].clip[k]);
           mv[t].fade[k] = t > 0 ? frame.xrTransforms[t - 1][28 + k] : 0.f;

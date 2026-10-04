@@ -85,6 +85,10 @@ void aurora_xr_world_clips(const float plane1[4], float fade1, const float plane
 /* Up to four planes (all must pass), each with its fade band; count 0 =
  * none. */
 void aurora_xr_world_clips4(const float planes[][4], const float fades[], int count);
+/* The same, with the clipped geometry also dissolved as a whole: opacity 1
+ * is solid, lower values dither more of it away (0: none left). With count
+ * 0 and opacity below 1, only the dissolve applies. */
+void aurora_xr_world_clips4_fade(const float planes[][4], const float fades[], int count, float opacity);
 
 #ifdef __cplusplus
 }

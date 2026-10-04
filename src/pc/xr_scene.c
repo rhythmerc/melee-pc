@@ -207,12 +207,12 @@ static const ClipRule s_clips[] = {
      * front, cut out of the town. */
     CLIP_LEFT(0x14, 5, -140.f, 6.f),
     CLIP_RIGHT(0x14, 5, 150.f, 6.f),
-    CLIP_BEHIND(0x14, 5, -45.f, 6.f),
+    CLIP_BEHIND(0x14, 5, -70.f, 6.f),
     CLIP_FRONT(0x14, 5, 70.f, 6.f),
     /* Brinstar: only the stretch of the acid's river around the stage (it
      * runs the length of the cave). LevelRule hides it while it is low. */
-    CLIP_LEFT(0x08, 8, -210.f, 15.f),
-    CLIP_RIGHT(0x08, 8, 240.f, 15.f),
+    CLIP_LEFT(0x08, 8, -120.f, 12.f),
+    CLIP_RIGHT(0x08, 8, 125.f, 12.f),
     CLIP_FRONT(0x08, 8, 70.f, 15.f),
     CLIP_BEHIND(0x08, 8, -90.f, 15.f),
 };
@@ -237,14 +237,15 @@ typedef struct {
     int grkind;
     int map_id;
     int jobj;
-    float min_y;
+    float min_y;  /* below: hidden */
+    float full_y; /* above: solid; in between it dissolves in */
 } LevelRule;
 
 static const LevelRule s_levels[] = {
     /* Brinstar: the acid (joint 1's height is its level, about -250 to 90;
      * the surface sits about 90 below). It starts far below, out of bounds,
-     * and shows once it rises to just under the stage. */
-    {0x08, 8, 1, -25.f},
+     * and fades in as it rises to just under the stage. */
+    {0x08, 8, 1, -50.f, -10.f},
 };
 #define LEVEL_COUNT ((int)(sizeof s_levels / sizeof s_levels[0]))
 
@@ -261,7 +262,8 @@ static HSD_JObj* nth_joint(HSD_JObj* jobj, int* n) {
     return NULL;
 }
 
-static bool below_level(int grkind, int map_id, HSD_JObj* root) {
+/* 1: shown; 0: hidden; in between, how far a rising part has faded in. */
+static float level_opacity(int grkind, int map_id, HSD_JObj* root) {
     for (int i = 0; i < LEVEL_COUNT; i++) {
         if (s_levels[i].grkind != grkind || s_levels[i].map_id != map_id || root == NULL) {
             continue;
@@ -276,11 +278,18 @@ static bool below_level(int grkind, int map_id, HSD_JObj* root) {
                             s_levels[i].jobj, j->translate.y, s_levels[i].min_y);
             }
         }
-        if (j != NULL && j->translate.y < s_levels[i].min_y) {
-            return true;
+        if (j != NULL) {
+            const LevelRule* l = &s_levels[i];
+            float lo = l->min_y, hi = l->full_y;
+            const char* band = getenv("MELEE_XR_LEVEL_FADE"); /* surveying: "min,full" */
+            if (band != NULL) {
+                sscanf(band, "%f,%f", &lo, &hi);
+            }
+            const float t = hi > lo ? (j->translate.y - lo) / (hi - lo) : (j->translate.y >= lo ? 1.f : 0.f);
+            return t <= 0.f ? 0.f : t >= 1.f ? 1.f : t;
         }
     }
-    return false;
+    return 1.f;
 }
 
 #define MAX_RULES 256
@@ -707,11 +716,12 @@ bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {
         memcpy(fades, env_fades, sizeof fades);
         n_planes = env_n;
     }
-    if (n_planes > 0) {
-        aurora_xr_world_clips4((const float(*)[4])planes, fades, n_planes);
+    const float opacity = level_opacity(grkind, map_id, root);
+    if (n_planes > 0 || (opacity > 0.f && opacity < 1.f)) {
+        aurora_xr_world_clips4_fade((const float(*)[4])planes, fades, n_planes, opacity);
         s_clip_active = true;
     }
-    const bool visible = part_visible(grkind, map_id, layer) && !below_level(grkind, map_id, root);
+    const bool visible = part_visible(grkind, map_id, layer) && opacity > 0.f;
     const bool log = s_log_joints && joint_log_due(grkind, map_id);
     if (has_joint_rules(grkind, map_id) || log) {
         s_hidden_joint_count = 0;

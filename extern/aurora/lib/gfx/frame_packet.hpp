@@ -228,7 +228,7 @@ struct FramePacket {
   // Command::xrTransform - 1 indexes this.
   // Then four clip planes (all must pass; 0,0,0,1 always passes) and their
   // fade bands (game units; 0 = a hard cut).
-  std::vector<std::array<float, 32>> xrTransforms;
+  std::vector<std::array<float, 33>> xrTransforms; // move 3x4, clip planes 4x4, fades 4, opacity
 };
 
 } // namespace aurora::gfx::detail
