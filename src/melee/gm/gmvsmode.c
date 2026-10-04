@@ -213,6 +213,16 @@ void onEnterDebugVs(GameModeState* state)
             start->players[i].slot_type = Gm_PKind_Cpu;
         }
     }
+    /* MELEE_DEBUG_VS_CPU_LEVEL=<1-9>: the CPUs' level (strong CPUs end a
+     * stock match quickly, for runs that need its results screen). */
+    if (getenv("MELEE_DEBUG_VS_CPU_LEVEL") != NULL) {
+        int level = atoi(getenv("MELEE_DEBUG_VS_CPU_LEVEL"));
+        if (level >= 1 && level <= 9) {
+            for (i = 0; i < Gm_Player_NumMax; i++) {
+                start->players[i].cpu_level = (u8) level;
+            }
+        }
+    }
     /* MELEE_DEBUG_VS_STOCKS=<n>: a stock match instead of an untimed time
      * one, so a run can end on GAME! with stocks the replay (src/pc/slp.c)
      * must carry. */

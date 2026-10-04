@@ -1,5 +1,11 @@
 #include "gmresult.h"
 
+#ifdef TARGET_PC
+#include "pc/pc.h"
+
+#include <stdlib.h>
+#endif
+
 #include "types.h"
 #include <melee/lb/lb_013B.h>
 
@@ -1755,6 +1761,11 @@ void gm_Scene_Results_OnEnter(void* arg0_)
     ResultsStatsInfo* info;
     MatchEnd* me_iter;
     ResultsData* data_iter;
+#ifdef TARGET_PC
+    if (getenv("MELEE_SCENE_LOG") != NULL) {
+        pc_log_line("scene: results enter");
+    }
+#endif
 
     PAD_STACK(0x28);
 
@@ -1842,5 +1853,10 @@ void gm_Scene_Results_OnEnter(void* arg0_)
 
 void gm_Scene_Results_OnExit(void* unused)
 {
+#ifdef TARGET_PC
+    if (getenv("MELEE_SCENE_LOG") != NULL) {
+        pc_log_line("scene: results exit");
+    }
+#endif
     fn_801701AC();
 }
