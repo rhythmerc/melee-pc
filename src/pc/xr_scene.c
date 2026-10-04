@@ -589,20 +589,31 @@ static float stage_top(void) {
     const float left = Stage_GetBlastZoneLeftOffset(), right = Stage_GetBlastZoneRightOffset();
     const float bottom = Stage_GetBlastZoneBottomOffset(), up = Stage_GetBlastZoneTopOffset();
     float top = NAN, min_x = INFINITY, max_x = -INFINITY;
-    for (int i = 0; i < coll->line_count; i++) {
-        if (!(mpLineGetKind(i) & CollLine_Floor)) {
-            continue;
-        }
-        Vec3 v[2];
-        mpLineGetV0Pos(i, &v[0]);
-        mpLineGetV1Pos(i, &v[1]);
-        for (int k = 0; k < 2; k++) {
-            if (v[k].x >= left && v[k].x <= right && v[k].y >= bottom && v[k].y <= up) {
-                if (isnan(top) || v[k].y > top) {
-                    top = v[k].y;
+    /* Only the floor and dynamic groups: mpLibLoad fills groundCollLine
+     * per group range, and an index outside every range is uninitialised
+     * (its line pointer is garbage). */
+    static const int groups[] = {MapLineGroup_Floor, MapLineGroup_Dynamic};
+    for (size_t g = 0; g < sizeof groups / sizeof groups[0]; g++) {
+        const int start = coll->ranges[groups[g]].start;
+        const int count = coll->ranges[groups[g]].count;
+        for (int i = start; i < start + count && i < coll->line_count; i++) {
+            if (!(mpLineGetKind(i) & CollLine_Floor)) {
+                continue;
+            }
+            Vec3 v[2];
+            mpLineGetV0Pos(i, &v[0]);
+            mpLineGetV1Pos(i, &v[1]);
+            if (v[0].x == v[1].x && v[0].y == v[1].y) {
+                continue; /* pruned as empty (mpPruneEmptyLines) */
+            }
+            for (int k = 0; k < 2; k++) {
+                if (v[k].x >= left && v[k].x <= right && v[k].y >= bottom && v[k].y <= up) {
+                    if (isnan(top) || v[k].y > top) {
+                        top = v[k].y;
+                    }
+                    min_x = v[k].x < min_x ? v[k].x : min_x;
+                    max_x = v[k].x > max_x ? v[k].x : max_x;
                 }
-                min_x = v[k].x < min_x ? v[k].x : min_x;
-                max_x = v[k].x > max_x ? v[k].x : max_x;
             }
         }
     }
