@@ -92,11 +92,9 @@ and the investigation behind it are in docs/xr-3d-plan.md.
       Dream Land, Yoshi's Island 64, Battlefield, Final Destination.
   - **Open questions** (left as they are):
     - Kongo Jungle: the waterfall shares a part with the plateau.
-    - Yoshi's Island: the rock pillars and clouds share joints with the
-      stage blocks.
     - Mushroom Kingdom and Mushroom Kingdom II: the sky and hills are mixed
       into the stage meshes.
-    - Onett and Fourside: which buildings count as stage.
+    - Fourside: which buildings count as stage.
     - Rainbow Cruise and Icicle Mountain: scrolling stages.
     - Flat Zone: the Game & Watch frame.
     - Mute City and Big Blue: left for their own treatment.
@@ -162,6 +160,18 @@ and the investigation behind it are in docs/xr-3d-plan.md.
       river around the stage (x −210 to 240, z −90 to 70).
     - `MELEE_XR_LEVEL_LOG` logs a level rule's joint height while
       surveying.
+  - **Onett (2026-10-04):** everything is in part 5. Hidden: the ground
+    and road in front (joint 2), the town around the three buildings you
+    fight on (8), the ground behind them (14) and the hills (23). The cars
+    still drive past in front, over nothing.
+  - **Yoshi's Island (2026-10-04):** the clouds behind the stage (part 1,
+    joints 2-7) and the scenery far behind it (20-23, 25-27, 29) are hidden.
+    - Still open: the tall slanted rock at the right. Its body is mesh 30 of
+      joint 10, but more of it (a strip down its face, with the island's
+      rock base) doesn't respond to mesh rules. A tilted clip took the left
+      islands' trees with it.
+    - Mesh rules now reach meshes 32-63 of a joint (a 64-bit mask). Before,
+      `1 << 33` wrapped to mesh 1.
   - **To revisit: Fountain of Dreams.** It runs badly on the Quest even
     without the reflection render. Profile it, then build a proper 3D
     reflection: mirror the world draws about the water plane per eye,

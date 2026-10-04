@@ -17,6 +17,7 @@
 #include <sysdolphin/baselib/jobj.h>
 
 #include <math.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -118,10 +119,34 @@ static const PartRule s_builtin_rules[] = {
     /* Kongo Jungle 64: the jungle (part 3 joint 7) and the sky (joint 34). */
     {0x1E, 3, 7, -1, false},
     {0x1E, 3, 34, -1, false},
-    /* Yoshi's Island: the sky (part 1 joint 28). */
+    /* Yoshi's Island: the sky (part 1 joint 28), the clouds behind the
+     * stage (2-7) and the scenery far behind it (20-23, 25-27, 29). The
+     * tall slanted rock at the right is still shown: it is mesh 30 of joint
+     * 10 with more of it that mesh rules don't reach. */
     {0x0B, 1, 28, -1, false},
+    {0x0B, 1, 2, -1, false},
+    {0x0B, 1, 3, -1, false},
+    {0x0B, 1, 4, -1, false},
+    {0x0B, 1, 5, -1, false},
+    {0x0B, 1, 6, -1, false},
+    {0x0B, 1, 7, -1, false},
+    {0x0B, 1, 20, -1, false},
+    {0x0B, 1, 21, -1, false},
+    {0x0B, 1, 22, -1, false},
+    {0x0B, 1, 23, -1, false},
+    {0x0B, 1, 25, -1, false},
+    {0x0B, 1, 26, -1, false},
+    {0x0B, 1, 27, -1, false},
+    {0x0B, 1, 29, -1, false},
     /* Brinstar: the cave, its walls, stalactites, pillars and chains. */
     {0x08, 1, -1, -1, false},
+    /* Onett: everything is in part 5. Hidden: the ground and road in front
+     * (joint 2), the town around the three buildings you fight on (8), the
+     * ground behind them (14) and the hills (23). */
+    {0x14, 5, 2, -1, false},
+    {0x14, 5, 8, -1, false},
+    {0x14, 5, 14, -1, false},
+    {0x14, 5, 23, -1, false},
 };
 
 /* Joints moved in the 3D view only: the joint and everything under it are
@@ -277,10 +302,11 @@ static int s_category = AURORA_XR_MONO;
  * their hidden meshes (all bits: the whole joint) and their move (-1:
  * none). */
 #define MAX_HIDDEN_JOINTS 1024
-#define ALL_DOBJS 0xFFFFFFFFu
+#define ALL_DOBJS UINT64_MAX
+#define MAX_DOBJS 64
 typedef struct {
     HSD_JObj* jobj;
-    unsigned dobjs;
+    uint64_t dobjs;
     int move;
 } HiddenJoint;
 enum { CHANGED_MONO = 1, CHANGED_MOVE = 2 };
@@ -430,7 +456,7 @@ static void walk_joints(HSD_JObj* jobj, int grkind, int map_id, int depth, bool 
                 mv = i;
             }
         }
-        unsigned dobjs = 0; /* meshes hidden while the joint is shown */
+        uint64_t dobjs = 0; /* meshes hidden while the joint is shown */
         for (int i = 0; i < s_rule_count; i++) {
             const PartRule* r = &s_rules[i];
             if (r->grkind != grkind || r->map_id != map_id || r->jobj != idx) {
@@ -439,13 +465,15 @@ static void walk_joints(HSD_JObj* jobj, int grkind, int map_id, int depth, bool 
             if (r->dobj < 0) {
                 vis = r->show;
                 dobjs = 0;
+            } else if (r->dobj >= MAX_DOBJS) {
+                continue;
             } else if (r->show) {
-                dobjs &= ~(1u << r->dobj);
+                dobjs &= ~((uint64_t) 1 << r->dobj);
             } else {
-                dobjs |= 1u << r->dobj;
+                dobjs |= (uint64_t) 1 << r->dobj;
             }
         }
-        const unsigned hidden = vis ? dobjs : ALL_DOBJS;
+        const uint64_t hidden = vis ? dobjs : ALL_DOBJS;
         if ((hidden != 0 || mv >= 0) && s_hidden_joint_count < MAX_HIDDEN_JOINTS) {
             s_hidden_joints[s_hidden_joint_count++] = (HiddenJoint){jobj, hidden, mv};
         }
@@ -560,7 +588,7 @@ static float stage_top(void) {
     }
     const float left = Stage_GetBlastZoneLeftOffset(), right = Stage_GetBlastZoneRightOffset();
     const float bottom = Stage_GetBlastZoneBottomOffset(), up = Stage_GetBlastZoneTopOffset();
-    float top = NAN;
+    float top = NAN, min_x = INFINITY, max_x = -INFINITY;
     for (int i = 0; i < coll->line_count; i++) {
         if (!(mpLineGetKind(i) & CollLine_Floor)) {
             continue;
@@ -569,14 +597,18 @@ static float stage_top(void) {
         mpLineGetV0Pos(i, &v[0]);
         mpLineGetV1Pos(i, &v[1]);
         for (int k = 0; k < 2; k++) {
-            if (v[k].x >= left && v[k].x <= right && v[k].y >= bottom && v[k].y <= up &&
-                (isnan(top) || v[k].y > top)) {
-                top = v[k].y;
+            if (v[k].x >= left && v[k].x <= right && v[k].y >= bottom && v[k].y <= up) {
+                if (isnan(top) || v[k].y > top) {
+                    top = v[k].y;
+                }
+                min_x = v[k].x < min_x ? v[k].x : min_x;
+                max_x = v[k].x > max_x ? v[k].x : max_x;
             }
         }
     }
     if (getenv("MELEE_XR_STAGE_LOG") != NULL) {
-        pc_log_line("xr: stage %d top floor at y %.1f", stage_info.grkind, top);
+        pc_log_line("xr: stage %d top floor at y %.1f; floors from x %.1f to %.1f", stage_info.grkind, top, min_x,
+                    max_x);
     }
     return top;
 }
@@ -817,7 +849,8 @@ int pc_xr_jobj_begin(HSD_JObj* jobj) {
 int pc_xr_dobj_begin(HSD_JObj* jobj, int dobj_index) {
     const HiddenJoint* h = find_joint(jobj);
     /* A wholly hidden joint is already out of the 3D view. */
-    if (h == NULL || h->dobjs == ALL_DOBJS || dobj_index > 31 || !(h->dobjs & (1u << dobj_index))) {
+    if (h == NULL || h->dobjs == ALL_DOBJS || dobj_index >= MAX_DOBJS ||
+        !(h->dobjs & ((uint64_t) 1 << dobj_index))) {
         return 0;
     }
     aurora_xr_camera(AURORA_XR_HIDDEN, NULL);
