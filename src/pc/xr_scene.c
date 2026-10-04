@@ -156,9 +156,9 @@ static MoveRule s_moves[16] = {
     {0x06, 4, 2, {0, 0, 0}, {10, 0, -80}, 0.56f},
     /* Yoshi's Island: the clouds (part 1 joints 20-23, 25-27, 29, with the
      * Bullet Bill and the sign), from hundreds of units behind and to the
-     * sides into the sky just behind the stage, above the HUD's damage
-     * meters: shrunk to 0.3 about the middle of the cloud field. */
-#define YI_CLOUDS(j) {0x0B, 1, j, {100, 90, -350}, {0, 170, -140}, 0.3f}
+     * sides to just behind the stage, a little above the back pillars'
+     * trees: shrunk to 0.3 about the middle of the cloud field. */
+#define YI_CLOUDS(j) {0x0B, 1, j, {100, 90, -350}, {0, 70, -150}, 0.3f}
     YI_CLOUDS(20), YI_CLOUDS(21), YI_CLOUDS(22), YI_CLOUDS(23),
     YI_CLOUDS(25), YI_CLOUDS(26), YI_CLOUDS(27), YI_CLOUDS(29),
 #undef YI_CLOUDS

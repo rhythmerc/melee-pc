@@ -172,8 +172,8 @@ and the investigation behind it are in docs/xr-3d-plan.md.
   - **Yoshi's Island (2026-10-04):** the clouds (part 1 joints 20-23,
     25-27 and 29, with the Bullet Bill and the sign) are pulled in from far
     behind and to the sides. They're shrunk to 0.3 about the middle of the
-    cloud field, into the sky just behind the stage, above the HUD's damage
-    meters (move rules). The back pillars' trees (joints 2-7) stay.
+    cloud field, to just behind the stage, a little above the back pillars'
+    trees (move rules). The back pillars' trees (joints 2-7) stay.
     - Still open: the tall slanted rock at the right. Its body is mesh 30 of
       joint 10, but more of it (a strip down its face, with the island's
       rock base) doesn't respond to mesh rules. A tilted clip took the left
