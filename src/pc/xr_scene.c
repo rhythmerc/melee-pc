@@ -579,50 +579,16 @@ void pc_xr_poll_control(void) {
 }
 
 /* The highest floor within the blast zones (world units), for the HUD;
- * NAN when the stage has none or its collision isn't loaded yet. The lines
- * come from the stage's collision data as loaded from disc (the floor and
- * dynamic groups), bounds-checked: groundCollLine entries outside the group
- * ranges are uninitialised, and reading through them crashed on the Quest.
- * Their vertices' positions are the live ones (mpVtxGetPos), so floors that
- * move count where they are on the fight's first frame. */
+ * NAN when the stage has none or its collision isn't loaded yet. The walk
+ * is in mplib.c: the collision data is in the disc's byte order, which this
+ * file isn't built to read on every platform (clang on Android). */
 static int s_top_grkind = -1;
 
 static float stage_top(void) {
-    const MapCollData* coll = stage_info.coll_data;
-    if (coll == NULL || coll != mpLib_8004D164()) {
+    float top, min_x, max_x;
+    if (!mpLib_FloorExtent(Stage_GetBlastZoneLeftOffset(), Stage_GetBlastZoneRightOffset(),
+                           Stage_GetBlastZoneBottomOffset(), Stage_GetBlastZoneTopOffset(), &top, &min_x, &max_x)) {
         return NAN;
-    }
-    const MapLine* lines = DP(MapLine, coll->lines);
-    if (lines == NULL) {
-        return NAN;
-    }
-    const float left = Stage_GetBlastZoneLeftOffset(), right = Stage_GetBlastZoneRightOffset();
-    const float bottom = Stage_GetBlastZoneBottomOffset(), up = Stage_GetBlastZoneTopOffset();
-    float top = NAN, min_x = INFINITY, max_x = -INFINITY;
-    static const int groups[] = {MapLineGroup_Floor, MapLineGroup_Dynamic};
-    for (size_t g = 0; g < sizeof groups / sizeof groups[0]; g++) {
-        const int start = coll->ranges[groups[g]].start;
-        const int count = coll->ranges[groups[g]].count;
-        for (int i = start; i >= 0 && i < start + count && i < coll->line_count; i++) {
-            const MapLine* line = &lines[i];
-            const unsigned flags = line->hi_flags;
-            if (!(flags & LINE_FLAG_KIND & CollLine_Floor) || (flags & LINE_FLAG_EMPTY) ||
-                line->v0_idx >= coll->vert_count || line->v1_idx >= coll->vert_count) {
-                continue;
-            }
-            const int v[2] = {line->v0_idx, line->v1_idx};
-            for (int k = 0; k < 2; k++) {
-                float x, y;
-                mpVtxGetPos(v[k], &x, &y); /* where it is now (moving joints too) */
-                if (x >= left && x <= right && y >= bottom && y <= up) {
-                    if (isnan(top) || y > top) {
-                        top = y;
-                    }
-                    min_x = x < min_x ? x : min_x;
-                    max_x = x > max_x ? x : max_x;
-                }
-            }
-        }
     }
     pc_log_line("xr: stage %d top floor at y %.1f; floors from x %.1f to %.1f", stage_info.grkind, top, min_x,
                 max_x);

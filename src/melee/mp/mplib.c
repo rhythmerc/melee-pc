@@ -7160,3 +7160,55 @@ void mpLib_DrawZones(void)
     }
     HSD_StateInvalidate(-1);
 }
+
+#ifdef TARGET_PC
+bool mpLib_FloorExtent(float left, float right, float bottom, float top, float* top_out, float* min_x_out,
+                       float* max_x_out)
+{
+    static const int groups[] = { MapLineGroup_Floor, MapLineGroup_Dynamic };
+    MapCollData* coll = mpLib_804D64B4;
+    bool found = false;
+    size_t g;
+
+    if (coll == NULL || groundCollLine == NULL || groundCollVtx == NULL) {
+        return false;
+    }
+    for (g = 0; g < sizeof groups / sizeof groups[0]; g++) {
+        int start = coll->ranges[groups[g]].start;
+        int end = start + coll->ranges[groups[g]].count;
+        int i;
+        if (end > coll->line_count) {
+            end = coll->line_count;
+        }
+        for (i = start < 0 ? 0 : start; i < end; i++) {
+            Vec3 v[2];
+            int k;
+            if (!(mpLineGetKind(i) & CollLine_Floor) ||
+                (groundCollLine[i].flags & LINE_FLAG_EMPTY))
+            {
+                continue;
+            }
+            mpLineGetV0Pos(i, &v[0]);
+            mpLineGetV1Pos(i, &v[1]);
+            for (k = 0; k < 2; k++) {
+                if (v[k].x < left || v[k].x > right || v[k].y < bottom ||
+                    v[k].y > top)
+                {
+                    continue;
+                }
+                if (!found || v[k].y > *top_out) {
+                    *top_out = v[k].y;
+                }
+                if (!found || v[k].x < *min_x_out) {
+                    *min_x_out = v[k].x;
+                }
+                if (!found || v[k].x > *max_x_out) {
+                    *max_x_out = v[k].x;
+                }
+                found = true;
+            }
+        }
+    }
+    return found;
+}
+#endif

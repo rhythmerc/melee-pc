@@ -220,4 +220,13 @@
 /* 05A340 */ void mpLib_DrawZones(void);
 /* 458868 */ extern mpCollisionBox mpLib_80458868[2];
 
+#ifdef TARGET_PC
+/* The highest floor point and the floors' x span (world units) within the
+ * given bounds, from the loaded collision (floor and dynamic line groups,
+ * live positions). False when nothing is loaded or nothing lies inside.
+ * For code built without the disc structs' byte order (src/pc). */
+bool mpLib_FloorExtent(float left, float right, float bottom, float top, float* top_out, float* min_x_out,
+                       float* max_x_out);
+#endif
+
 #endif
