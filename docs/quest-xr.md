@@ -86,7 +86,6 @@ and the investigation behind it are in docs/xr-3d-plan.md.
       stage blocks.
     - Mushroom Kingdom and Mushroom Kingdom II: the sky and hills are mixed
       into the stage meshes.
-    - Brinstar: the acid hazard and the cave walls.
     - Onett and Fourside: which buildings count as stage.
     - Rainbow Cruise and Icicle Mountain: scrolling stages.
     - Flat Zone: the Game & Watch frame.
@@ -143,6 +142,16 @@ and the investigation behind it are in docs/xr-3d-plan.md.
       their own rules: a joint's rule overrides its parent's.
     - The castle body (14) stays whole under the roof, like a model on the
       table. A clip below the roof line would leave only the roof.
+  - **Brinstar (2026-10-04):**
+    - Hidden: the cave, with its walls, stalactites, pillars and chains
+      (part 1).
+    - The acid (part 8) shows only once it rises to just under the stage
+      (`LevelRule`: its joint 1's height is the acid level, from about −250
+      to 90, with the surface about 90 below it). At its starting level it
+      is far out of bounds. When shown, it's boxed to the stretch of its
+      river around the stage (x −210 to 240, z −90 to 70).
+    - `MELEE_XR_LEVEL_LOG` logs a level rule's joint height while
+      surveying.
   - **To revisit: Fountain of Dreams.** It runs badly on the Quest even
     without the reflection render. Profile it, then build a proper 3D
     reflection: mirror the world draws about the water plane per eye,
@@ -795,6 +804,7 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `MELEE_XR_IZUMI_REFLECTION` | unset | Keep Fountain of Dreams' reflection render in mixed reality |
 | `MELEE_XR_IZUMI_WATER` | `60,100,160` | Fountain water colour in mixed reality (looks red/blue swapped in the desktop build) |
 | `MELEE_XR_CLIPZ` | unset | Try back cuts: `grkind:part:z[:fade],...` cuts that part behind z |
+| `MELEE_XR_LEVEL_LOG` | unset | Log the height of each level rule's joint (`LevelRule`) about twice a second |
 | `MELEE_XR_JOINT_LOG` | unset | Log each part's joints (index, depth, meshes, position) once |
 | `MELEE_XR_CLIPP` | unset | Try any plane: `grkind:part:a:b:c:d[:fade];...` keeps where ax+by+cz+d ≥ 0. Any env plane replaces that part's built-in ones (up to 4) |
 | `MELEE_XR_CLIP_LOG` | unset | Log the first 40 stage part begins (stage, part, layer) |

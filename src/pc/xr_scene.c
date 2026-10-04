@@ -114,6 +114,8 @@ static const PartRule s_builtin_rules[] = {
     {0x1E, 3, 34, -1, false},
     /* Yoshi's Island: the sky (part 1 joint 28). */
     {0x0B, 1, 28, -1, false},
+    /* Brinstar: the cave, its walls, stalactites, pillars and chains. */
+    {0x08, 1, -1, -1, false},
 };
 
 /* Joints moved in the 3D view only: the joint and everything under it are
@@ -178,6 +180,12 @@ static const ClipRule s_clips[] = {
     CLIP_RIGHT(0x05, 6, 125.f, 8.f),
     CLIP_FRONT(0x05, 6, 45.f, 8.f),
     CLIP_BEHIND(0x05, 6, -100.f, 8.f),
+    /* Brinstar: only the stretch of the acid's river around the stage (it
+     * runs the length of the cave). LevelRule hides it while it is low. */
+    CLIP_LEFT(0x08, 8, -210.f, 15.f),
+    CLIP_RIGHT(0x08, 8, 240.f, 15.f),
+    CLIP_FRONT(0x08, 8, 70.f, 15.f),
+    CLIP_BEHIND(0x08, 8, -90.f, 15.f),
 };
 #define CLIP_COUNT ((int)(sizeof s_clips / sizeof s_clips[0]))
 
@@ -192,6 +200,59 @@ static const CenterRule s_centers[] = {
     {0x0E, 40.f, 255.f, 0.f}, /* Corneria: the Great Fox flies far above the origin */
 };
 #define CENTER_COUNT ((int)(sizeof s_centers / sizeof s_centers[0]))
+
+/* Stage parts hidden in the 3D view while one of their joints (by index in
+ * a depth-first walk, as in PartRule) sits below a height (its translation,
+ * game units). For hazards that only matter once they come up. */
+typedef struct {
+    int grkind;
+    int map_id;
+    int jobj;
+    float min_y;
+} LevelRule;
+
+static const LevelRule s_levels[] = {
+    /* Brinstar: the acid (joint 1's height is its level, about -250 to 90;
+     * the surface sits about 90 below). It starts far below, out of bounds,
+     * and shows once it rises to just under the stage. */
+    {0x08, 8, 1, -25.f},
+};
+#define LEVEL_COUNT ((int)(sizeof s_levels / sizeof s_levels[0]))
+
+static HSD_JObj* nth_joint(HSD_JObj* jobj, int* n) {
+    for (; jobj != NULL; jobj = jobj->next) {
+        if ((*n)-- == 0) {
+            return jobj;
+        }
+        HSD_JObj* found = nth_joint(jobj->child, n);
+        if (found != NULL) {
+            return found;
+        }
+    }
+    return NULL;
+}
+
+static bool below_level(int grkind, int map_id, HSD_JObj* root) {
+    for (int i = 0; i < LEVEL_COUNT; i++) {
+        if (s_levels[i].grkind != grkind || s_levels[i].map_id != map_id || root == NULL) {
+            continue;
+        }
+        int n = s_levels[i].jobj;
+        /* The root alone: its siblings are other parts. */
+        HSD_JObj* j = n == 0 ? root : (n--, nth_joint(root->child, &n));
+        if (j != NULL && getenv("MELEE_XR_LEVEL_LOG") != NULL) {
+            static unsigned calls;
+            if (calls++ % 120 == 0) {
+                pc_log_line("xr: stage %d part %d joint %d at y %.1f (shown from %.1f)", grkind, map_id,
+                            s_levels[i].jobj, j->translate.y, s_levels[i].min_y);
+            }
+        }
+        if (j != NULL && j->translate.y < s_levels[i].min_y) {
+            return true;
+        }
+    }
+    return false;
+}
 
 #define MAX_RULES 256
 static PartRule s_rules[MAX_RULES];
@@ -572,7 +633,7 @@ bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {
         aurora_xr_world_clips4((const float(*)[4])planes, fades, n_planes);
         s_clip_active = true;
     }
-    const bool visible = part_visible(grkind, map_id, layer);
+    const bool visible = part_visible(grkind, map_id, layer) && !below_level(grkind, map_id, root);
     const bool log = s_log_joints && joint_log_due(grkind, map_id);
     if (has_joint_rules(grkind, map_id) || log) {
         s_hidden_joint_count = 0;
