@@ -119,25 +119,11 @@ static const PartRule s_builtin_rules[] = {
     /* Kongo Jungle 64: the jungle (part 3 joint 7) and the sky (joint 34). */
     {0x1E, 3, 7, -1, false},
     {0x1E, 3, 34, -1, false},
-    /* Yoshi's Island: the sky (part 1 joint 28), the clouds behind the
-     * stage (2-7) and the scenery far behind it (20-23, 25-27, 29). The
-     * tall slanted rock at the right is still shown: it is mesh 30 of joint
-     * 10 with more of it that mesh rules don't reach. */
+    /* Yoshi's Island: the sky (part 1 joint 28). The clouds far behind are
+     * pulled in (s_moves). The tall slanted rock at the right is still
+     * shown: it is mesh 30 of joint 10 with more of it that mesh rules
+     * don't reach. */
     {0x0B, 1, 28, -1, false},
-    {0x0B, 1, 2, -1, false},
-    {0x0B, 1, 3, -1, false},
-    {0x0B, 1, 4, -1, false},
-    {0x0B, 1, 5, -1, false},
-    {0x0B, 1, 6, -1, false},
-    {0x0B, 1, 7, -1, false},
-    {0x0B, 1, 20, -1, false},
-    {0x0B, 1, 21, -1, false},
-    {0x0B, 1, 22, -1, false},
-    {0x0B, 1, 23, -1, false},
-    {0x0B, 1, 25, -1, false},
-    {0x0B, 1, 26, -1, false},
-    {0x0B, 1, 27, -1, false},
-    {0x0B, 1, 29, -1, false},
     /* Brinstar: the cave, its walls, stalactites, pillars and chains. */
     {0x08, 1, -1, -1, false},
     /* Onett: everything is in part 5. Hidden: the town behind (joint 14) and
@@ -168,6 +154,14 @@ static MoveRule s_moves[16] = {
     /* Great Bay: the sea, shrunk to the stage's footprint and moved under
      * it (it only extended toward the player). */
     {0x06, 4, 2, {0, 0, 0}, {10, 0, -80}, 0.56f},
+    /* Yoshi's Island: the clouds (part 1 joints 20-23, 25-27, 29, with the
+     * Bullet Bill and the sign), from hundreds of units behind and to the
+     * sides into the sky just behind the stage, above the HUD's damage
+     * meters: shrunk to 0.3 about the middle of the cloud field. */
+#define YI_CLOUDS(j) {0x0B, 1, j, {100, 90, -350}, {0, 170, -140}, 0.3f}
+    YI_CLOUDS(20), YI_CLOUDS(21), YI_CLOUDS(22), YI_CLOUDS(23),
+    YI_CLOUDS(25), YI_CLOUDS(26), YI_CLOUDS(27), YI_CLOUDS(29),
+#undef YI_CLOUDS
 };
 static int s_move_count = -1; /* built-ins, then MELEE_XR_MOVE entries */
 #define MOVE_COUNT s_move_count
