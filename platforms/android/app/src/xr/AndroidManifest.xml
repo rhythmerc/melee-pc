@@ -17,6 +17,8 @@
     <!-- Hand tracking (XR_EXT_hand_tracking): pinches place the arena. -->
     <uses-feature android:name="oculus.software.handtracking" android:required="false" />
     <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
+    <!-- XR_META_boundary_visibility: hide the Guardian boundary in mixed reality. -->
+    <uses-permission android:name="com.oculus.permission.BOUNDARY_VISIBILITY" />
 
     <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
     <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />

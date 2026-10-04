@@ -180,7 +180,10 @@ and the investigation behind it are in docs/xr-3d-plan.md.
   (`XR_META_boundary_visibility`), since passthrough already shows the room.
   The runtime only allows that while a passthrough layer is shown, so full
   VR gets the boundary back. `AURORA_XR_BOUNDARY=1` keeps it in mixed
-  reality too.
+  reality too. It needs the `com.oculus.permission.BOUNDARY_VISIBILITY`
+  permission in the manifest; without it the runtime doesn't offer the
+  extension. With Guardian paused (`debug.oculus.guardian_pause`, for
+  unattended runs) every request fails with `XR_ERROR_RUNTIME_FAILURE`.
 - **Mixed reality vs full VR.** Every hide, clip and move applies only in
   mixed reality (`pc_xr_mixed_reality`). Full VR renders stages whole, and
   passthrough is stopped (`xrPassthroughPauseFB`, not just a missing layer).

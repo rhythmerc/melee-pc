@@ -506,6 +506,7 @@ bool create_instance() {
 #ifdef XR_META_boundary_visibility
   if (B.hasBoundaryVisibilityExt)
     B.requestBoundaryVisibility = xr_proc<PFN_xrRequestBoundaryVisibilityMETA>("xrRequestBoundaryVisibilityMETA");
+  Log.info("XR_META_boundary_visibility {}", B.requestBoundaryVisibility ? "available" : "unavailable");
 #endif
   return true;
 }
@@ -2062,6 +2063,8 @@ void sync_boundary() {
   B.boundarySuppressed = want;
   const XrResult r = B.requestBoundaryVisibility(
       B.session, want ? XR_BOUNDARY_VISIBILITY_SUPPRESSED_META : XR_BOUNDARY_VISIBILITY_NOT_SUPPRESSED_META);
+  if (r == XR_SUCCESS)
+    Log.info("Boundary {} requested", want ? "suppression" : "restore");
   if (r == XR_BOUNDARY_VISIBILITY_SUPPRESSION_NOT_ALLOWED_META || XR_FAILED(r)) {
     static int warnings = 0;
     if (warnings++ < 3)
