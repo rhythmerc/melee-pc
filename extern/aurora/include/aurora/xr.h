@@ -55,6 +55,11 @@ void aurora_xr_set_passthrough(bool on);
  * thread. */
 void aurora_xr_set_arena_center(float x, float y, float z);
 
+/* The height (world units) of the stage's highest floor, so the HUD can
+ * float clear of it. NaN: unknown (the HUD keeps a fixed height). Any
+ * thread. */
+void aurora_xr_set_stage_top(float y);
+
 /* True while an OpenXR session is presenting the game. Any thread. */
 bool aurora_xr_active(void);
 void aurora_xr_camera(int category, const float view[3][4]);

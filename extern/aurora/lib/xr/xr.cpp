@@ -33,6 +33,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <initializer_list>
 #include <cstdio>
 #include <cstdlib>
@@ -233,6 +234,8 @@ ArenaPose g_arena;
 // The game point (game units) placed at the arena position: a stage whose
 // geometry sits far from the origin is centered by aurora_xr_set_arena_center.
 std::array<float, 3> g_arenaCenter{};
+// The stage's highest floor (game units; NaN: unknown), for the HUD.
+float g_stageTop = std::numeric_limits<float>::quiet_NaN();
 bool g_arenaInit = false;
 float g_defaultArenaScale = 0.006f;
 
@@ -1101,6 +1104,8 @@ void note_ready_latency(uint64_t lat) {
 // Releases drawn images in acquisition order: waits (on the GPU, on our
 // queue) for Dawn's semaphores, puts the image back in the layout the
 // runtime expects, then hands it to the runtime.
+void write_dump_layout(const std::array<XrView, 2>& views);
+
 bool release_ready(Stream& st, bool& released) {
   released = false;
   for (;;) {
@@ -1192,6 +1197,8 @@ bool release_ready(Stream& st, bool& released) {
         vkCmdCopyImageToBuffer(s.cmd, s.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, st.dumpBuf, 1, &rb);
         st.dumpSlot = index;
         layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        if (&st == &g_streams[kStereo])
+          write_dump_layout(s.views);
       }
       if (layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
         const auto back = barrier(s.image, layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -1771,6 +1778,52 @@ void update_grab(Target target, bool active) {
 
 // ---------------------------------------------------------------- XR thread: lasers
 
+// Where the HUD quad goes, in the room. It moves, turns and scales with the
+// arena.
+void hud_placement(XrPosef& pose, XrExtent2Df& size) {
+  const auto& hud = g_streams[kHud];
+  const ArenaPose arena = arena_pose();
+  const float k = arena.scale / g_defaultArenaScale;
+  const float width = env_float("AURORA_XR_HUD_WIDTH", 0.9f) * k;
+  size = {width, hud.width > 0 ? width * static_cast<float>(hud.height) / static_cast<float>(hud.width) : width};
+  // Above the arena's back edge, like a scoreboard. Quad layers draw over
+  // the 3D view, so the HUD's bottom edge (where the damage meters are)
+  // clears the stage's highest floor by about a fighter's height; on low
+  // stages it keeps AURORA_XR_HUD_HEIGHT (its center above the arena).
+  float height = env_float("AURORA_XR_HUD_HEIGHT", 0.55f) * k;
+  float top, centerY;
+  {
+    std::lock_guard lock{g_arenaMutex};
+    top = g_stageTop;
+    centerY = g_arenaCenter[1];
+  }
+  if (!std::isnan(top) && !std::getenv("AURORA_XR_HUD_HEIGHT")) {
+    const float clear = env_float("AURORA_XR_HUD_CLEARANCE", 40.f); // game units
+    height = std::max(height, (top + clear - centerY) * arena.scale + size.height * 0.5f);
+  }
+  pose.orientation = yaw_quat(arena.yaw);
+  pose.position = arena.pos + rot_y({0.f, height, -0.15f * k}, arena.yaw);
+}
+
+// AURORA_XR_DUMP: the left eye's view and the HUD quad, so a dump of the 3D
+// image can be composited with the HUD offline (one line each:
+// position xyz, orientation xyzw, then fov angles or quad size).
+void write_dump_layout(const std::array<XrView, 2>& views) {
+  XrPosef hud{};
+  XrExtent2Df size{};
+  hud_placement(hud, size);
+  if (FILE* f = std::fopen((B.dumpDir + "/xr_layout.txt").c_str(), "w")) {
+    const XrPosef& e = views[0].pose;
+    const XrFovf& fov = views[0].fov;
+    std::fprintf(f, "eye %f %f %f %f %f %f %f %f %f %f %f\n", e.position.x, e.position.y, e.position.z,
+                 e.orientation.x, e.orientation.y, e.orientation.z, e.orientation.w, fov.angleLeft, fov.angleRight,
+                 fov.angleUp, fov.angleDown);
+    std::fprintf(f, "hud %f %f %f %f %f %f %f %f %f\n", hud.position.x, hud.position.y, hud.position.z,
+                 hud.orientation.x, hud.orientation.y, hud.orientation.z, hud.orientation.w, size.width, size.height);
+    std::fclose(f);
+  }
+}
+
 // Fill a one-image swapchain once; the runtime keeps showing it.
 bool create_static_swapchain(XrSwapchain& out, uint32_t w, uint32_t h, const std::vector<uint8_t>& rgba) {
   XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
@@ -2113,20 +2166,12 @@ bool render_xr_frame() {
     proj.views = projViews.data();
     layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj);
     if (hud.haveImage && now - hud.lastRelease < std::chrono::milliseconds(250)) {
-      // The HUD floats above the arena's back edge, like a scoreboard, and
-      // moves, turns and scales with it.
-      const ArenaPose arena = arena_pose();
-      const float k = arena.scale / g_defaultArenaScale;
-      const float width = env_float("AURORA_XR_HUD_WIDTH", 0.9f) * k;
       hudQuad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
       hudQuad.space = B.space;
       hudQuad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
       hudQuad.subImage.swapchain = hud.swapchain;
       hudQuad.subImage.imageRect = {{0, 0}, {static_cast<int32_t>(hud.width), static_cast<int32_t>(hud.height)}};
-      hudQuad.pose.orientation = yaw_quat(arena.yaw);
-      hudQuad.pose.position =
-          arena.pos + rot_y({0.f, env_float("AURORA_XR_HUD_HEIGHT", 0.55f) * k, -0.15f * k}, arena.yaw);
-      hudQuad.size = {width, width * static_cast<float>(hud.height) / static_cast<float>(hud.width)};
+      hud_placement(hudQuad.pose, hudQuad.size);
       layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&hudQuad);
     }
     if (pointing) {
@@ -3586,6 +3631,11 @@ extern "C" void aurora_xr_set_paused(bool paused) { aurora::xr::g_fightPaused = 
 extern "C" void aurora_xr_set_passthrough(bool on) { aurora::xr::g_passthroughWanted = on; }
 
 extern "C" bool aurora_xr_active(void) { return aurora::xr::active(); }
+
+extern "C" void aurora_xr_set_stage_top(float y) {
+  std::lock_guard lock{aurora::xr::g_arenaMutex};
+  aurora::xr::g_stageTop = y;
+}
 
 extern "C" void aurora_xr_set_arena_center(float x, float y, float z) {
   std::lock_guard lock{aurora::xr::g_arenaMutex};

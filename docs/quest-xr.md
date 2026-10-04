@@ -56,6 +56,16 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     holograms.
 - **HUD.** HUD draws are replayed onto their own plane above the arena.
   Bright text and icons are opaque, and black areas are see-through.
+  - **Height per stage.** A quad layer draws over the 3D view whatever its
+    depth, so the HUD's bottom edge, where the damage meters are, sits about
+    a fighter's height (`AURORA_XR_HUD_CLEARANCE`, 40 units) above the
+    stage's highest floor. That's taken from the collision lines inside the
+    blast zones on the fight's first frame (`aurora_xr_set_stage_top`).
+    Before, it was a fixed 0.55 m above the arena center, and the meters
+    covered top platforms (Battlefield, Yoshi's Story, Yoshi's Island).
+  - **Previews.** With `AURORA_XR_DUMP`, `xr_layout.txt` holds the left
+    eye's pose and field of view and the HUD quad's pose and size, so a dump
+    can be composited with the HUD offline.
 - **Stage backgrounds.** Stage parts on layer 2, the far background, are
   left out of the 3D view. Layers 0 and 1 are the stage itself. Per-stage
   rules in `xr_scene.c` can name a whole part, one joint of a part (and
@@ -796,7 +806,8 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_ARENA_YAW` | 0 | Starting arena turn in degrees (counter-clockwise from above) |
 | `AURORA_XR_ARENA_POS` | `0,-0.45,-1.0` | Starting arena center, in meters, in the starting head space |
 | `AURORA_XR_HUD_WIDTH` | 0.9 | HUD plane width in meters |
-| `AURORA_XR_HUD_HEIGHT` | 0.55 | HUD plane height above the arena in meters |
+| `AURORA_XR_HUD_HEIGHT` | 0.55 | Lowest HUD plane height (center) above the arena in meters; set, it's fixed there |
+| `AURORA_XR_HUD_CLEARANCE` | 40 | Game units between the stage's highest floor and the HUD's bottom edge |
 | `AURORA_XR_HUD_BACKDROP` | 0 | Minimum HUD alpha, as a translucent panel behind it |
 | `AURORA_XR_DUMP` | unset | Directory to write each stream's image once (PPM, plus alpha as PGM) |
 | `MELEE_XR_STAGE_LAYERS` | `0xB` | Stage layers shown in 3D, as a bitmask |

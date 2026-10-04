@@ -8,9 +8,15 @@
 
 #include <aurora/xr.h>
 #include <melee/gm/gmscene.h>
+#include <melee/gr/ground.h>
+#include <melee/gr/stage.h>
+#include <melee/mp/forward.h>
+#include <melee/mp/mplib.h>
+#include <melee/mp/types.h>
 #include <sysdolphin/baselib/dobj.h>
 #include <sysdolphin/baselib/jobj.h>
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -544,6 +550,37 @@ void pc_xr_poll_control(void) {
     }
 }
 
+/* The highest floor within the blast zones (world units), for the HUD;
+ * NAN when the stage has none. Floors that move are taken where they are
+ * when the fight's first frame draws. */
+static float stage_top(void) {
+    MapCollData* coll = mpLib_8004D164();
+    if (coll == NULL) {
+        return NAN;
+    }
+    const float left = Stage_GetBlastZoneLeftOffset(), right = Stage_GetBlastZoneRightOffset();
+    const float bottom = Stage_GetBlastZoneBottomOffset(), up = Stage_GetBlastZoneTopOffset();
+    float top = NAN;
+    for (int i = 0; i < coll->line_count; i++) {
+        if (!(mpLineGetKind(i) & CollLine_Floor)) {
+            continue;
+        }
+        Vec3 v[2];
+        mpLineGetV0Pos(i, &v[0]);
+        mpLineGetV1Pos(i, &v[1]);
+        for (int k = 0; k < 2; k++) {
+            if (v[k].x >= left && v[k].x <= right && v[k].y >= bottom && v[k].y <= up &&
+                (isnan(top) || v[k].y > top)) {
+                top = v[k].y;
+            }
+        }
+    }
+    if (getenv("MELEE_XR_STAGE_LOG") != NULL) {
+        pc_log_line("xr: stage %d top floor at y %.1f", stage_info.grkind, top);
+    }
+    return top;
+}
+
 bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {
     if (s_category != AURORA_XR_WORLD) {
         return false;
@@ -563,6 +600,7 @@ bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {
             sscanf(env, "%f,%f,%f", &c[0], &c[1], &c[2]);
         }
         aurora_xr_set_arena_center(c[0], c[1], c[2]);
+        aurora_xr_set_stage_top(stage_top());
     }
     s_clip_active = false;
     if (!pc_xr_mixed_reality()) {
