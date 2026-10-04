@@ -23,7 +23,11 @@ typedef struct grBb_TrackEntry {
     Vec3 delta;
 } grBb_TrackEntry;
 
-typedef struct grBb_YakumonoParam {
+/* From the stage file: big-endian disc data (DISC_STRUCT, and DiscVec3 for
+ * the nested vector, which the byte order doesn't reach). The upstream sync
+ * in d8f2384 dropped both, and every field read byte-swapped: the track's
+ * ground speed threw fighters to x = -4e8 and the camera asserted. */
+typedef struct DISC_STRUCT grBb_YakumonoParam {
     f32 x0;
     f32 x4;
     f32 x8;
@@ -100,7 +104,7 @@ typedef struct grBb_YakumonoParam {
     f32 x128;
     f32 x12C;
     f32 x130;
-    Vec3 x134_translate;
+    DiscVec3 x134_translate;
     f32 x140_scale;
 } grBb_YakumonoParam;
 

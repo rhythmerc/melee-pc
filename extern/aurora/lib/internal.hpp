@@ -2,6 +2,10 @@
 
 #include "logging.hpp" // IWYU pragma: keep
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
+
 #include <aurora/aurora.h>
 
 #include <array>
@@ -347,6 +351,12 @@ private:
                 "requested, capacity %zu (frame budget in gfx/resources.hpp)\n",
                 m_name != nullptr ? m_name : "<unnamed>", size, m_capacity);
         fflush(stderr);
+#ifdef __ANDROID__
+        // stderr goes nowhere on Android.
+        __android_log_print(ANDROID_LOG_FATAL, "Aurora",
+                            "staging pool '%s' overflowed: %zu bytes requested, capacity %zu",
+                            m_name != nullptr ? m_name : "<unnamed>", size, m_capacity);
+#endif
         abort();
       }
       if (size < m_capacity * 2) {
