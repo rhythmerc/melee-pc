@@ -822,8 +822,8 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR` | set by `MeleeXrActivity`; off otherwise | Present to the headset |
 | `AURORA_XR_PASSTHROUGH` | 1 | Passthrough behind the screen |
 | `AURORA_XR_BOUNDARY` | 0 | 1 keeps the Guardian boundary in mixed reality (by default it's hidden while passthrough shows the room) |
-| `AURORA_XR_SCREEN_WIDTH` | 1.6 | Starting screen width in meters (grab with two hands to change) |
-| `AURORA_XR_SCREEN_DISTANCE` | 1.5 | Meters in front of the starting head position |
+| `AURORA_XR_SCREEN_WIDTH` | 1.0 | Starting screen width in meters (grab with two hands to change) |
+| `AURORA_XR_SCREEN_DISTANCE` | 1.1 | Meters in front of the starting head position |
 | `AURORA_XR_SCREEN_Y` | 0 | Height offset in meters |
 | `AURORA_XR_SCREEN_HEIGHT` | 1080 | Screen texture height in pixels |
 | `AURORA_XR_3D` | 1 | 3D fights. Set 0 to keep fights on the virtual screen |
