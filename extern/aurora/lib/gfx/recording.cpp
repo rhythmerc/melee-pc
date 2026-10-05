@@ -1269,6 +1269,49 @@ void xr_set_category(XrCategory category, const float* view3x4) {
 bool xr_recording_world() noexcept { return g_recorder.xrCategory == XrCategory::World; }
 bool xr_soft_clip_active() noexcept { return g_xrClip.has_value(); }
 
+const XrClipCamera* xr_clip_camera() noexcept {
+  if (!g_xrClip || !g_recorder.active()) {
+    return nullptr;
+  }
+  static XrClipCamera out;
+  static std::array<float, 21> forClip{};
+  static std::array<float, 12> forView{};
+  const auto& v = g_recorder.frame().xrWorldView;
+  if (*g_xrClip == forClip && v == forView) {
+    return &out;
+  }
+  forClip = *g_xrClip;
+  forView = v;
+  // plane_cam = plane_world · V⁻¹, as the eye replay does (lib/xr). V is the
+  // game's world -> camera 3x4 (row-major).
+  const float a = v[0], b = v[1], c = v[2], d = v[4], e = v[5], f = v[6], g = v[8], h = v[9], k = v[10];
+  const float A = e * k - f * h, B = f * g - d * k, C = d * h - e * g;
+  const float det = a * A + b * B + c * C;
+  const float inv = det != 0.f ? 1.f / det : 0.f;
+  // Rows of the 3x3 inverse.
+  const float r[3][3] = {{A * inv, (c * h - b * k) * inv, (b * f - c * e) * inv},
+                         {B * inv, (a * k - c * g) * inv, (c * d - a * f) * inv},
+                         {C * inv, (b * g - a * h) * inv, (a * e - b * d) * inv}};
+  float m[4][4]{};
+  for (int i = 0; i < 3; ++i) {
+    for (int j = 0; j < 3; ++j)
+      m[i][j] = r[i][j];
+    m[i][3] = -(r[i][0] * v[3] + r[i][1] * v[7] + r[i][2] * v[11]);
+  }
+  m[3][3] = 1.f;
+  for (int p = 0; p < 4; ++p) {
+    for (int j = 0; j < 4; ++j) {
+      float s = 0.f;
+      for (int i = 0; i < 4; ++i)
+        s += (*g_xrClip)[p * 4 + i] * m[i][j];
+      out.planes[p][j] = s;
+    }
+    out.fades[p] = (*g_xrClip)[16 + p];
+  }
+  out.opacity = (*g_xrClip)[20];
+  return &out;
+}
+
 namespace {
 std::atomic<const RenderTargetLayout*> g_xrMultiviewLayout{nullptr};
 } // namespace

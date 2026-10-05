@@ -2223,11 +2223,13 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}{11}
           shaderSource.insert(v0, "fn xr_clip_d(i: u32) -> f32 {\n"
                                   "    return dot(xr.clip[i], vec4f(xr_cam, 1.0)) * "
                                   "select(1.0e6, 1.0 / xr.fade[i], xr.fade[i] > 0.0);\n}\n"
+                                  // 4x4 Bayer by bit interleave (no indexed array:
+                                  // Adreno spills those to scratch memory).
                                   "fn xr_bayer(p: vec2f) -> f32 {\n"
-                                  "    var m = array<f32, 16>(0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0,"
-                                  " 3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);\n"
-                                  "    let i = vec2u(p) % vec2u(4u);\n"
-                                  "    return (m[i.y * 4u + i.x] + 0.5) / 16.0;\n}\n\n");
+                                  "    let y = vec2u(p).y;\n"
+                                  "    let x = vec2u(p).x ^ y;\n"
+                                  "    let m = ((x & 1u) << 3u) | ((y & 1u) << 2u) | (x & 2u) | ((y >> 1u) & 1u);\n"
+                                  "    return (f32(m) + 0.5) / 16.0;\n}\n\n");
         }
       }
 

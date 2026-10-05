@@ -141,6 +141,10 @@ struct DrawCache {
   gfx::PipelineRef xrPipelineRef{};
   gfx::PipelineRef xrForPipeline{};
   uint64_t xrForLayout = 0;
+  // Its dithering twin, for clipped world draws that straddle a clip.
+  gfx::PipelineRef xrSoftRef{};
+  gfx::PipelineRef xrSoftForPipeline{};
+  uint64_t xrSoftForLayout = 0;
   GXBindGroups bindGroups{};
   uint64_t bindGeneration = 0;
   GXVtxFmt fmt = GX_MAX_VTXFMT;
@@ -520,6 +524,151 @@ static gfx::Range push_decoded_vertices(const ShaderConfig& config, const u8* ra
   return gfx::push_storage_aligned(out.data(), out.size(), alignment);
 }
 
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+enum class XrClipClass : u8 { Inside, Straddle, Outside };
+
+// Where a clipped world draw lies against the current clip, from its
+// vertices' distances to each plane (linear across a triangle, so the
+// vertices bound every fragment). Inside: past every fade band, drawn
+// solid without discard (keeps early depth). Outside: wholly cut by one
+// plane, dropped from the eyes. Straddle: needs the dithering pipeline.
+static XrClipClass classify_xr_clip(const ShaderConfig& config, const u8* raw, u16 vtxCount) noexcept {
+  static const bool enabled = [] {
+    const char* v = std::getenv("AURORA_XR_CLIP_CLASSIFY");
+    return v == nullptr || *v != '0';
+  }();
+  const auto* clip = gfx::xr_clip_camera();
+  if (!enabled || clip == nullptr || clip->opacity < 1.f || config.lineMode != 0) {
+    return XrClipClass::Straddle;
+  }
+  const auto& pos = config.attrs[GX_VA_POS];
+  const auto& idx = config.attrs[GX_VA_PNMTXIDX];
+  if (pos.attrType == GX_NONE || (idx.attrType != GX_NONE && idx.attrType != GX_DIRECT)) {
+    return XrClipClass::Straddle;
+  }
+  int planes[4];
+  int planeCount = 0;
+  for (int k = 0; k < 4; ++k) {
+    const auto& pl = clip->planes[k];
+    if (pl[0] != 0.f || pl[1] != 0.f || pl[2] != 0.f || pl[3] < 0.f) {
+      planes[planeCount++] = k;
+    }
+  }
+  if (planeCount == 0) {
+    return XrClipClass::Inside;
+  }
+  // Each plane in a position matrix's model space, made when first used.
+  float model[MaxPnMtx][4][4];
+  u16 made = 0;
+  float lo[4], hi[4];
+  std::fill_n(lo, 4, INFINITY);
+  std::fill_n(hi, 4, -INFINITY);
+  const u32 compSize = comp_type_size(GX_VA_POS, static_cast<GXCompType>(pos.compType));
+  const u32 comps = std::min<u32>(pos.cnt, 3);
+  for (u32 v = 0; v < vtxCount; ++v) {
+    const u8* vtx = raw + v * config.vtxStride;
+    const u32 mtx = idx.attrType == GX_DIRECT ? std::min<u32>(vtx[idx.offset] / 3u, MaxPnMtx - 1)
+                                              : std::min<u32>(g_gxState.currentPnMtx, MaxPnMtx - 1);
+    if ((made & (1u << mtx)) == 0) {
+      made |= 1u << mtx;
+      const f32* m = reinterpret_cast<const f32*>(&g_gxState.pnMtx[mtx].pos);
+      for (int n = 0; n < planeCount; ++n) {
+        const auto& pl = clip->planes[planes[n]];
+        for (int j = 0; j < 4; ++j)
+          model[mtx][n][j] = pl[0] * m[j] + pl[1] * m[4 + j] + pl[2] * m[8 + j];
+        model[mtx][n][3] += pl[3];
+      }
+    }
+    bool le = false;
+    const u8* src = decoded_source(pos, GX_VA_POS, 0, vtx, le);
+    if (src == nullptr) {
+      return XrClipClass::Straddle;
+    }
+    float p[3] = {0.f, 0.f, 0.f};
+    for (u32 c = 0; c < comps; ++c)
+      p[c] = decode_component(src + c * compSize, pos.compType, pos.frac, le);
+    for (int n = 0; n < planeCount; ++n) {
+      const float* q = model[mtx][n];
+      const float d = q[0] * p[0] + q[1] * p[1] + q[2] * p[2] + q[3];
+      lo[n] = std::min(lo[n], d);
+      hi[n] = std::max(hi[n], d);
+    }
+  }
+  // Margins (game units) cover float differences from the GPU's transform.
+  constexpr float eps = 1e-2f;
+  bool inside = true;
+  for (int n = 0; n < planeCount; ++n) {
+    if (hi[n] < -eps) {
+      return XrClipClass::Outside;
+    }
+    inside &= lo[n] > clip->fades[planes[n]] + eps;
+  }
+  return inside ? XrClipClass::Inside : XrClipClass::Straddle;
+}
+
+// The multiview twin of the current pipeline for `layout`, cached per
+// (pipeline, layout).
+static gfx::PipelineRef xr_twin(const gfx::RenderTargetLayout& layout, gfx::PipelineRef& ref,
+                                gfx::PipelineRef& forPipeline, uint64_t& forLayout) noexcept {
+  auto& cache = sDrawCache;
+  if (forPipeline != cache.pipelineRef || forLayout != layout.key) {
+    ref = gfx::find_pipeline(cache.config, layout);
+    forPipeline = cache.pipelineRef;
+    forLayout = layout.key;
+  }
+  return ref;
+}
+
+static gfx::PipelineRef xr_soft_twin(const gfx::RenderTargetLayout& mv) noexcept {
+  static gfx::RenderTargetLayout soft;
+  static uint64_t softFor = 0;
+  if (softFor != mv.key) {
+    softFor = mv.key;
+    soft = mv;
+    soft.xrSoftClip = 1;
+    gfx::detail::finalize_render_target_layout(soft);
+  }
+  auto& cache = sDrawCache;
+  return xr_twin(soft, cache.xrSoftRef, cache.xrSoftForPipeline, cache.xrSoftForLayout);
+}
+
+// The eye pipeline for a world draw's vertices (0: not drawn in the eyes).
+static gfx::PipelineRef xr_world_pipeline(const u8* raw, u16 vtxCount) noexcept {
+  if (!gfx::xr_recording_world()) {
+    return 0;
+  }
+  const auto* mv = gfx::xr_multiview_layout();
+  if (mv == nullptr) {
+    return 0;
+  }
+  auto& cache = sDrawCache;
+  if (gfx::xr_soft_clip_active()) {
+    const auto cls = classify_xr_clip(cache.config.shaderConfig, raw, vtxCount);
+    // AURORA_XR_CLIP_STATS=1: how clipped draws were classed, every 20000.
+    static const bool stats = std::getenv("AURORA_XR_CLIP_STATS") != nullptr;
+    if (stats) {
+      static u32 draws[3], verts[3], n;
+      ++draws[u8(cls)];
+      verts[u8(cls)] += vtxCount;
+      if (++n % 20000 == 0) {
+        Log.info("XR clip draws (verts): inside {} ({}), straddle {} ({}), outside {} ({})", draws[0], verts[0],
+                 draws[1], verts[1], draws[2], verts[2]);
+        std::fill_n(draws, 3, 0u), std::fill_n(verts, 3, 0u);
+      }
+    }
+    switch (cls) {
+    case XrClipClass::Outside:
+      return 0;
+    case XrClipClass::Straddle:
+      return xr_soft_twin(*mv);
+    case XrClipClass::Inside:
+      break;
+    }
+  }
+  return xr_twin(*mv, cache.xrPipelineRef, cache.xrForPipeline, cache.xrForLayout);
+}
+#endif
+
 static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Range vertRange, gfx::Range idxRange,
                          u32 numIndices, const u8* raw) noexcept {
   auto& state = g_gxState;
@@ -686,30 +835,9 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       sc.decodedPos || sc.decodedAll ? push_decoded_vertices(sc, raw, vtxCount, 4) : gfx::Range{};
   gfx::PipelineRef xrPipeline = 0;
 #if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
-  if (gfx::xr_recording_world()) {
-    if (const auto* mv = gfx::xr_multiview_layout()) {
-      // Soft-clipped stage parts use a dithering variant; everything else
-      // keeps early depth (no discard).
-      static gfx::RenderTargetLayout soft;
-      static uint64_t softFor = 0;
-      const gfx::RenderTargetLayout* layout = mv;
-      if (gfx::xr_soft_clip_active()) {
-        if (softFor != mv->key) {
-          softFor = mv->key;
-          soft = *mv;
-          soft.xrSoftClip = 1;
-          gfx::detail::finalize_render_target_layout(soft);
-        }
-        layout = &soft;
-      }
-      if (cache.xrForPipeline != cache.pipelineRef || cache.xrForLayout != layout->key) {
-        cache.xrPipelineRef = gfx::find_pipeline(cache.config, *layout);
-        cache.xrForPipeline = cache.pipelineRef;
-        cache.xrForLayout = layout->key;
-      }
-      xrPipeline = cache.xrPipelineRef;
-    }
-  }
+  // Clipped stage parts: only draws that straddle a clip use the dithering
+  // variant; the rest keep early depth (no discard) or are dropped.
+  xrPipeline = xr_world_pipeline(raw, vtxCount);
 #endif
   gfx::push_draw_command(DrawData{
       .pipeline = cache.pipelineRef,
@@ -765,12 +893,20 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& 
   auto* lastDraw = cleanState ? gfx::get_last_draw_command<DrawData>() : nullptr;
   // A draw with decoded positions merges only while its range can grow in
   // place: nothing else may have been pushed to the storage pool since.
-  const bool canMerge = lastDraw != nullptr && lastDraw->instanceCount == 1 &&
-                        (lastDraw->posRange.size == 0 ||
-                         gfx::storage_tail() == size_t{lastDraw->posRange.offset} + lastDraw->posRange.size);
+  bool canMerge = lastDraw != nullptr && lastDraw->instanceCount == 1 &&
+                  (lastDraw->posRange.size == 0 ||
+                   gfx::storage_tail() == size_t{lastDraw->posRange.offset} + lastDraw->posRange.size);
 
   // Push raw vertex data to buffer. Merged draws must remain contiguous with the previous range.
   const auto vertexData = reader.take(totalVtxBytes);
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+  // Clipped world draws merge only with draws of their own class (inside,
+  // straddling, outside), so a merged draw never needs the dithering
+  // pipeline just because some of it straddles.
+  if (canMerge && gfx::xr_soft_clip_active()) {
+    canMerge = xr_world_pipeline(vertexData.data(), vtxCount) == lastDraw->xrPipeline;
+  }
+#endif
   // AURORA_LOG_QUADPOS=1: log the vertex POSITIONS of untextured 4-vertex
   // quads. Sampling these draws by count is useless -- there are tens of
   // thousands per run and only a handful are the white artifact -- so the

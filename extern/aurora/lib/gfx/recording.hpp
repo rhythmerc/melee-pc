@@ -129,6 +129,16 @@ void xr_set_world_clip_more(const float* planes);
 bool xr_recording_world() noexcept;
 // FIFO thread: a world clip is set (its draws need the clipping pipelines).
 bool xr_soft_clip_active() noexcept;
+// FIFO thread: the current world clip as the eye shaders test it, in game
+// camera space (planes kept where dot >= 0, against vec4(mv_pos, 1)), with
+// each plane's fade band (game units, 0 = hard) and the draw's opacity. Unused
+// planes are (0, 0, 0, 1). Null when no clip is set.
+struct XrClipCamera {
+  float planes[4][4];
+  float fades[4];
+  float opacity;
+};
+const XrClipCamera* xr_clip_camera() noexcept;
 // The layout lib/xr replays world draws into with multiview (null = none),
 // published once from the render worker and read by the FIFO thread.
 void set_xr_multiview_layout(const RenderTargetLayout& layout) noexcept;
