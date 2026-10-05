@@ -227,7 +227,7 @@ std::atomic<uint32_t> g_stereoLate{0};
 // moves it while the player drags the arena during a pause; the render
 // worker reads it for every 3D frame.
 struct ArenaPose {
-  XrVector3f pos{0.f, -0.45f, -1.f};
+  XrVector3f pos{0.f, -0.35f, -1.f};
   float yaw = 0.f;
   float scale = 0.006f;
 };
@@ -1488,9 +1488,9 @@ float hit_arena(const ArenaPose& a, XrVector3f origin, XrVector3f dir) {
 // The virtual screen, in the starting head space: a quad facing +Z in its
 // own frame. XR thread only. Kept for the whole session.
 struct ScreenPose {
-  XrVector3f pos{0.f, 0.f, -1.1f};
+  XrVector3f pos{0.f, 0.f, -1.25f};
   XrQuaternionf orientation{0.f, 0.f, 0.f, 1.f};
-  float width = 1.f; // meters: about 49 degrees across at 1.1 m
+  float width = 1.f; // meters: about 44 degrees across at 1.25 m
 };
 ScreenPose g_screen;
 bool g_screenInit = false;
@@ -1501,7 +1501,7 @@ constexpr float kMinScreenDist = 0.3f, kMaxScreenDist = 10.f;
 ScreenPose& screen_pose() {
   if (!g_screenInit) {
     g_screenInit = true;
-    g_screen.pos = {0.f, env_float("AURORA_XR_SCREEN_Y", 0.f), -env_float("AURORA_XR_SCREEN_DISTANCE", 1.1f)};
+    g_screen.pos = {0.f, env_float("AURORA_XR_SCREEN_Y", 0.f), -env_float("AURORA_XR_SCREEN_DISTANCE", 1.25f)};
     g_screen.width = env_float("AURORA_XR_SCREEN_WIDTH", 1.f);
   }
   return g_screen;

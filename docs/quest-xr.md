@@ -568,12 +568,12 @@ and takes the disc from the launcher's `launcher.cfg`.
 Each stage starts placed by its own entry in `xr_scene.c`
 (`s_placements`): the game point that sits at the arena position, which is
 its main floor centered on where the fight happens (Corneria's Great Fox,
-Peach's Castle's roof), and its size against the arena's shared scale.
+Peach's Castle's roof), and its size against the default arena scale.
 Sizes meet halfway between the game's proportions and making every stage's
-floors as wide as Final Destination's, `sqrt(171 / floor width)` rounded:
-Temple at 0.65, Fountain of Dreams at 1.15. Moving stages and stages still
-being surveyed (Fourside, both Mushroom Kingdoms) aren't listed and sit at
-the world origin at scale 1.
+floors as wide as Final Destination's, `sqrt(171 / floor width)` rounded
+(Fountain of Dreams at 1.15), except Temple, tuned down to 0.55 to fit in
+view. Moving stages and stages still being surveyed (Fourside, both
+Mushroom Kingdoms) aren't listed and sit at the world origin at scale 1.
 
 Pause the fight to move the arena. Put a controller down and that hand is
 tracked instead (`XR_EXT_hand_tracking`), and a pinch does what the grip
@@ -823,7 +823,7 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_PASSTHROUGH` | 1 | Passthrough behind the screen |
 | `AURORA_XR_BOUNDARY` | 0 | 1 keeps the Guardian boundary in mixed reality (by default it's hidden while passthrough shows the room) |
 | `AURORA_XR_SCREEN_WIDTH` | 1.0 | Starting screen width in meters (grab with two hands to change) |
-| `AURORA_XR_SCREEN_DISTANCE` | 1.1 | Meters in front of the starting head position |
+| `AURORA_XR_SCREEN_DISTANCE` | 1.25 | Meters in front of the starting head position |
 | `AURORA_XR_SCREEN_Y` | 0 | Height offset in meters |
 | `AURORA_XR_SCREEN_HEIGHT` | 1080 | Screen texture height in pixels |
 | `AURORA_XR_3D` | 1 | 3D fights. Set 0 to keep fights on the virtual screen |
@@ -841,7 +841,7 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_PIPELINE_INLINE` | 0 | Compile pipelines on the render thread instead of the compile thread |
 | `AURORA_XR_ARENA_SCALE` | 0.006 | Starting meters per game unit, times each stage's own size (grab with two hands to change) |
 | `AURORA_XR_ARENA_YAW` | 0 | Starting arena turn in degrees (counter-clockwise from above) |
-| `AURORA_XR_ARENA_POS` | `0,-0.45,-1.0` | Starting arena center, in meters, in the starting head space |
+| `AURORA_XR_ARENA_POS` | `0,-0.35,-1.0` | Starting arena center, in meters, in the starting head space |
 | `AURORA_XR_HUD_WIDTH` | 0.9 | HUD plane width in meters |
 | `AURORA_XR_HUD_HEIGHT` | 0.55 | Lowest HUD plane height (center) above the arena in meters; set, it's fixed there |
 | `AURORA_XR_HUD_CLEARANCE` | 40 | Game units between the stage's highest floor and the HUD's bottom edge |

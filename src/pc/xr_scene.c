@@ -240,7 +240,7 @@ static const StagePlacement s_placements[] = {
     {0x04, 5.f, 0.f, 0.f, 1.f},      /* Kongo Jungle */
     {0x05, 0.f, 0.f, 0.f, 0.9f},     /* Jungle Japes */
     {0x06, -10.f, 0.f, 0.f, 0.85f},  /* Great Bay: its floors reach further left */
-    {0x07, 0.f, 0.f, 0.f, 0.65f},    /* Hyrule Temple */
+    {0x07, 0.f, 0.f, 0.f, 0.55f},    /* Hyrule Temple: smaller than the rule gives, to fit in view */
     {0x08, 0.f, 0.f, 0.f, 1.1f},     /* Brinstar */
     {0x0A, 0.f, 0.f, 0.f, 1.15f},    /* Yoshi's Story */
     {0x0B, 0.f, 0.f, 0.f, 0.9f},     /* Yoshi's Island */
