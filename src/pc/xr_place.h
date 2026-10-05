@@ -9,8 +9,10 @@
  *
  * The hold runs no simulation ticks at all: no game state changes, nothing
  * is consumed and no frame passes, so a replay or a recording can't tell.
- * It never happens in netplay, where the peer (VR or not, this build or
- * not) expects the match to start on the agreed frame. MELEE_XR_PLACE=0
+ * It happens only when an XR session is already presenting as the fight
+ * opens, so builds without XR, and an XR build playing flat, are never
+ * held. It never happens in netplay, where the peer (VR or not, this build
+ * or not) expects the match to start on the agreed frame. MELEE_XR_PLACE=0
  * turns it off. */
 #ifndef PC_XR_PLACE_H
 #define PC_XR_PLACE_H

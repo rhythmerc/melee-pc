@@ -616,8 +616,11 @@ A or Start begins the fight, B puts the stage back where it started, and Y
 shows or hides the how-to cards. The cards float above where the arena
 starts, in the HUD's place; the button legend sits just below its front
 edge. The cards show on the session's first hold, and later holds show
-only the legend. Each stage is held once per session.
-`MELEE_XR_PLACE=0` turns the hold off.
+only the legend. Each stage is held once per session, and only when the
+headset is already presenting as the fight opens: a build without XR, or
+an XR build playing on the flat window, never waits (the hook compiles to
+`false` without `AURORA_ENABLE_OPENXR`). `MELEE_XR_PLACE=0` turns the hold
+off.
 
 The hold isn't Melee's pause, which is game state. The scene loop
 (`gm_801A4D34`) keeps drawing every frame but runs no simulation ticks, and

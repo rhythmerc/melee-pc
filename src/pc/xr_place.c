@@ -27,10 +27,8 @@
 
 /* Stages (grkind) placed this session. */
 static uint8_t s_placed[32];
-/* The stage to offer (-1: none), the passes left to offer it in, and the
- * one held (-1: none). */
+/* The stage to offer next pass (-1: none) and the one held (-1: none). */
 static int s_pending = -1;
-static int s_pending_passes;
 static int s_holding = -1;
 /* The how-to cards: showing now, and shown once this session already. */
 static bool s_cards;
@@ -109,9 +107,6 @@ static void end_hold(void) {
 void pc_xr_place_stage_ready(int grkind) {
     if (s_holding < 0 && !placed(grkind)) {
         s_pending = grkind;
-        /* A session still starting gets a moment, but a hold never comes
-         * later than the fight's opening (Ready... GO). */
-        s_pending_passes = 90;
     }
 }
 
@@ -121,19 +116,14 @@ bool pc_xr_place_hold(void) {
             return false;
         }
         const int grkind = s_pending;
-        /* Netplay: the peer starts the match on the agreed frame whatever
-         * this side shows, so the stage keeps its default placement. */
-        if (!enabled() || pc_net_active() || placed(grkind)) {
-            s_pending = -1;
-            return false;
-        }
-        if (!aurora_xr_active()) {
-            if (--s_pending_passes <= 0) {
-                s_pending = -1;
-            }
-            return false;
-        }
         s_pending = -1;
+        /* Only with a headset already presenting: an XR build playing flat
+         * (no runtime, no session yet) never waits for one. Netplay: the
+         * peer starts the match on the agreed frame whatever this side
+         * shows, so the stage keeps its default placement. */
+        if (!enabled() || !aurora_xr_active() || pc_net_active() || placed(grkind)) {
+            return false;
+        }
         static bool loaded;
         if (!loaded) {
             loaded = true;
