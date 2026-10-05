@@ -822,8 +822,8 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR` | set by `MeleeXrActivity`; off otherwise | Present to the headset |
 | `AURORA_XR_PASSTHROUGH` | 1 | Passthrough behind the screen |
 | `AURORA_XR_BOUNDARY` | 0 | 1 keeps the Guardian boundary in mixed reality (by default it's hidden while passthrough shows the room) |
-| `AURORA_XR_SCREEN_WIDTH` | 1.0 | Starting screen width in meters (grab with two hands to change) |
-| `AURORA_XR_SCREEN_DISTANCE` | 1.25 | Meters in front of the starting head position |
+| `AURORA_XR_SCREEN_WIDTH` | 0.7 | Starting screen width in meters (grab with two hands to change) |
+| `AURORA_XR_SCREEN_DISTANCE` | 0.85 | Meters in front of the starting head position |
 | `AURORA_XR_SCREEN_Y` | 0 | Height offset in meters |
 | `AURORA_XR_SCREEN_HEIGHT` | 1080 | Screen texture height in pixels |
 | `AURORA_XR_3D` | 1 | 3D fights. Set 0 to keep fights on the virtual screen |
@@ -839,11 +839,11 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_HUD_SCALE` | 0.5 | HUD texture resolution, relative to the screen |
 | `AURORA_XR_TIMING` | 1 | Log GPU pass times every 10 s |
 | `AURORA_PIPELINE_INLINE` | 0 | Compile pipelines on the render thread instead of the compile thread |
-| `AURORA_XR_ARENA_SCALE` | 0.006 | Starting meters per game unit, times each stage's own size (grab with two hands to change) |
+| `AURORA_XR_ARENA_SCALE` | 0.0035 | Starting meters per game unit, times each stage's own size (grab with two hands to change) |
 | `AURORA_XR_ARENA_YAW` | 0 | Starting arena turn in degrees (counter-clockwise from above) |
-| `AURORA_XR_ARENA_POS` | `0,-0.35,-1.0` | Starting arena center, in meters, in the starting head space |
-| `AURORA_XR_HUD_WIDTH` | 0.9 | HUD plane width in meters |
-| `AURORA_XR_HUD_HEIGHT` | 0.55 | Lowest HUD plane height (center) above the arena in meters; set, it's fixed there |
+| `AURORA_XR_ARENA_POS` | `0,-0.25,-0.7` | Starting arena center, in meters, in the starting head space |
+| `AURORA_XR_HUD_WIDTH` | 0.5 | HUD plane width in meters |
+| `AURORA_XR_HUD_HEIGHT` | 0.3 | Lowest HUD plane height (center) above the arena in meters; set, it's fixed there |
 | `AURORA_XR_HUD_CLEARANCE` | 40 | Game units between the stage's highest floor and the HUD's bottom edge |
 | `AURORA_XR_HUD_BACKDROP` | 0 | Minimum HUD alpha, as a translucent panel behind it |
 | `AURORA_XR_DUMP` | unset | Directory to write each stream's image once (PPM, plus alpha as PGM) |

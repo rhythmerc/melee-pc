@@ -227,9 +227,9 @@ std::atomic<uint32_t> g_stereoLate{0};
 // moves it while the player drags the arena during a pause; the render
 // worker reads it for every 3D frame.
 struct ArenaPose {
-  XrVector3f pos{0.f, -0.35f, -1.f};
+  XrVector3f pos{0.f, -0.25f, -0.7f};
   float yaw = 0.f;
-  float scale = 0.006f;
+  float scale = 0.0035f;
 };
 std::mutex g_arenaMutex;
 // The current stage's arena (aurora_xr_set_stage).
@@ -1422,7 +1422,7 @@ void init_arena() {
   ArenaPose& d = g_defaultArena;
   if (const char* v = std::getenv("AURORA_XR_ARENA_POS"))
     std::sscanf(v, "%f,%f,%f", &d.pos.x, &d.pos.y, &d.pos.z);
-  d.scale = env_float("AURORA_XR_ARENA_SCALE", 0.006f);
+  d.scale = env_float("AURORA_XR_ARENA_SCALE", 0.0035f);
   d.yaw = env_float("AURORA_XR_ARENA_YAW", 0.f) * 3.14159265f / 180.f; // degrees
   g_arena = d;
   g_arena.scale *= g_stageScale;
@@ -1488,9 +1488,9 @@ float hit_arena(const ArenaPose& a, XrVector3f origin, XrVector3f dir) {
 // The virtual screen, in the starting head space: a quad facing +Z in its
 // own frame. XR thread only. Kept for the whole session.
 struct ScreenPose {
-  XrVector3f pos{0.f, 0.f, -1.25f};
+  XrVector3f pos{0.f, 0.f, -0.85f};
   XrQuaternionf orientation{0.f, 0.f, 0.f, 1.f};
-  float width = 1.f; // meters: about 44 degrees across at 1.25 m
+  float width = 0.7f; // meters: about 45 degrees across at 0.85 m
 };
 ScreenPose g_screen;
 bool g_screenInit = false;
@@ -1501,8 +1501,8 @@ constexpr float kMinScreenDist = 0.3f, kMaxScreenDist = 10.f;
 ScreenPose& screen_pose() {
   if (!g_screenInit) {
     g_screenInit = true;
-    g_screen.pos = {0.f, env_float("AURORA_XR_SCREEN_Y", 0.f), -env_float("AURORA_XR_SCREEN_DISTANCE", 1.25f)};
-    g_screen.width = env_float("AURORA_XR_SCREEN_WIDTH", 1.f);
+    g_screen.pos = {0.f, env_float("AURORA_XR_SCREEN_Y", 0.f), -env_float("AURORA_XR_SCREEN_DISTANCE", 0.85f)};
+    g_screen.width = env_float("AURORA_XR_SCREEN_WIDTH", 0.7f);
   }
   return g_screen;
 }
@@ -1819,13 +1819,13 @@ void hud_placement(XrPosef& pose, XrExtent2Df& size) {
     std::lock_guard lock{g_arenaMutex};
     k = arena.scale / (g_defaultArena.scale * g_stageScale);
   }
-  const float width = env_float("AURORA_XR_HUD_WIDTH", 0.9f) * k;
+  const float width = env_float("AURORA_XR_HUD_WIDTH", 0.5f) * k;
   size = {width, hud.width > 0 ? width * static_cast<float>(hud.height) / static_cast<float>(hud.width) : width};
   // Above the arena's back edge, like a scoreboard. Quad layers draw over
   // the 3D view, so the HUD's bottom edge (where the damage meters are)
   // clears the stage's highest floor by about a fighter's height; on low
   // stages it keeps AURORA_XR_HUD_HEIGHT (its center above the arena).
-  float height = env_float("AURORA_XR_HUD_HEIGHT", 0.55f) * k;
+  float height = env_float("AURORA_XR_HUD_HEIGHT", 0.3f) * k;
   float top, centerY;
   {
     std::lock_guard lock{g_arenaMutex};
@@ -2623,8 +2623,8 @@ Mat4 projection(const XrFovf& fov, float near) {
 }
 
 // Game units -> meters in the starting head space: T(pos) · R_y(yaw) ·
-// S(scale). The scale starts at AURORA_XR_ARENA_SCALE (default 0.006: Final
-// Destination's ~170-unit stage is about 1 m wide); the player can move,
+// S(scale). The scale starts at AURORA_XR_ARENA_SCALE (default 0.0035: Final
+// Destination's ~170-unit stage is about 0.6 m wide); the player can move,
 // turn and scale the arena during a pause.
 Mat4 arena_transform() {
   const ArenaPose a = arena_pose();
