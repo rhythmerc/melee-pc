@@ -235,6 +235,10 @@ ArenaPose g_arena;
 // The game point (game units) placed at the arena position: a stage whose
 // geometry sits far from the origin is centered by aurora_xr_set_arena_center.
 std::array<float, 3> g_arenaCenter{};
+// The stage's own size against the shared scale (aurora_xr_set_stage_scale):
+// g_arena.scale is the player's, the same for every stage; the arena is drawn
+// at that times this.
+float g_stageScale = 1.f;
 // The stage's highest floor (game units; NaN: unknown), for the HUD.
 float g_stageTop = std::numeric_limits<float>::quiet_NaN();
 bool g_arenaInit = false;
@@ -1403,6 +1407,7 @@ XrQuaternionf quat_from_axes(XrVector3f x, XrVector3f y, XrVector3f z) {
   return q;
 }
 
+// The arena as drawn: its scale is the player's times the stage's.
 ArenaPose arena_pose() {
   std::lock_guard lock{g_arenaMutex};
   if (!g_arenaInit) {
@@ -1412,12 +1417,17 @@ ArenaPose arena_pose() {
     g_arena.scale = g_defaultArenaScale = env_float("AURORA_XR_ARENA_SCALE", 0.006f);
     g_arena.yaw = env_float("AURORA_XR_ARENA_YAW", 0.f) * 3.14159265f / 180.f; // degrees
   }
-  return g_arena;
+  ArenaPose a = g_arena;
+  a.scale *= g_stageScale;
+  return a;
 }
 
+// Takes a pose as drawn; the player's scale is kept without the stage's, so
+// a resize carries over to the next stage.
 void set_arena_pose(const ArenaPose& a) {
   std::lock_guard lock{g_arenaMutex};
   g_arena = a;
+  g_arena.scale /= g_stageScale;
 }
 
 // What the lasers can grab, in game units around the arena center (the game
@@ -1640,9 +1650,17 @@ void end_grab() {
     Log.info("Screen placed at {:.2f},{:.2f},{:.2f}, width {:.2f} m", s.pos.x, s.pos.y, s.pos.z, s.width);
     return;
   }
-  const ArenaPose a = arena_pose();
-  Log.info("Arena placed at {:.2f},{:.2f},{:.2f}, yaw {:.0f} deg, scale {:.4f}", a.pos.x, a.pos.y, a.pos.z,
-           a.yaw * 57.2958f, a.scale);
+  arena_pose(); // initialized
+  ArenaPose a;
+  float stage;
+  {
+    std::lock_guard lock{g_arenaMutex};
+    a = g_arena;
+    stage = g_stageScale;
+  }
+  // The shared scale, as AURORA_XR_ARENA_SCALE takes it.
+  Log.info("Arena placed at {:.2f},{:.2f},{:.2f}, yaw {:.0f} deg, scale {:.4f} (this stage x{:.2f})", a.pos.x,
+           a.pos.y, a.pos.z, a.yaw * 57.2958f, a.scale, stage);
 }
 
 // What a hand drags alone: its pinch or controller tip, or the grabbed
@@ -1784,7 +1802,12 @@ void update_grab(Target target, bool active) {
 void hud_placement(XrPosef& pose, XrExtent2Df& size) {
   const auto& hud = g_streams[kHud];
   const ArenaPose arena = arena_pose();
-  const float k = arena.scale / g_defaultArenaScale;
+  // The HUD follows the player's resizes, not the stage's own scale.
+  float k;
+  {
+    std::lock_guard lock{g_arenaMutex};
+    k = g_arena.scale / g_defaultArenaScale;
+  }
   const float width = env_float("AURORA_XR_HUD_WIDTH", 0.9f) * k;
   size = {width, hud.width > 0 ? width * static_cast<float>(hud.height) / static_cast<float>(hud.width) : width};
   // Above the arena's back edge, like a scoreboard. Quad layers draw over
@@ -3641,6 +3664,11 @@ extern "C" bool aurora_xr_active(void) { return aurora::xr::active(); }
 extern "C" void aurora_xr_set_stage_top(float y) {
   std::lock_guard lock{aurora::xr::g_arenaMutex};
   aurora::xr::g_stageTop = y;
+}
+
+extern "C" void aurora_xr_set_stage_scale(float k) {
+  std::lock_guard lock{aurora::xr::g_arenaMutex};
+  aurora::xr::g_stageScale = k > 0.f ? k : 1.f;
 }
 
 extern "C" void aurora_xr_set_arena_center(float x, float y, float z) {

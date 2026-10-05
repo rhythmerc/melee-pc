@@ -565,6 +565,16 @@ and takes the disc from the launcher's `launcher.cfg`.
 
 ### Placing the arena
 
+Each stage starts placed by its own entry in `xr_scene.c`
+(`s_placements`): the game point that sits at the arena position, which is
+its main floor centered on where the fight happens (Corneria's Great Fox,
+Peach's Castle's roof), and its size against the arena's shared scale.
+Sizes meet halfway between the game's proportions and making every stage's
+floors as wide as Final Destination's, `sqrt(171 / floor width)` rounded:
+Temple at 0.65, Fountain of Dreams at 1.15. Moving stages and stages still
+being surveyed (Fourside, both Mushroom Kingdoms) aren't listed and sit at
+the world origin at scale 1.
+
 Pause the fight to move the arena. Put a controller down and that hand is
 tracked instead (`XR_EXT_hand_tracking`), and a pinch does what the grip
 does. Hands and controllers work the same way and can be mixed. While paused
@@ -588,7 +598,9 @@ Fox), the laser gives way to a dot there.
   the touch points. Moving both hands carries the arena along with that
   point. Letting go of one hand carries on with the other alone.
 
-The HUD moves, turns and scales with the arena. The placement lasts for the
+The HUD moves, turns and scales with the arena. A resize changes the shared
+scale, so the next stage keeps it on top of its own size, and the HUD
+follows only the resize, not the stage's size. The placement lasts for the
 session and is logged when you let go (`Arena placed at x,y,z, yaw, scale`),
 which is handy for `AURORA_XR_ARENA_POS` and `AURORA_XR_ARENA_SCALE`.
 
@@ -824,7 +836,7 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_HUD_SCALE` | 0.5 | HUD texture resolution, relative to the screen |
 | `AURORA_XR_TIMING` | 1 | Log GPU pass times every 10 s |
 | `AURORA_PIPELINE_INLINE` | 0 | Compile pipelines on the render thread instead of the compile thread |
-| `AURORA_XR_ARENA_SCALE` | 0.006 | Starting meters per game unit (grab with two hands to change) |
+| `AURORA_XR_ARENA_SCALE` | 0.006 | Starting meters per game unit, times each stage's own size (grab with two hands to change) |
 | `AURORA_XR_ARENA_YAW` | 0 | Starting arena turn in degrees (counter-clockwise from above) |
 | `AURORA_XR_ARENA_POS` | `0,-0.45,-1.0` | Starting arena center, in meters, in the starting head space |
 | `AURORA_XR_HUD_WIDTH` | 0.9 | HUD plane width in meters |
@@ -840,6 +852,7 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `MELEE_XR_CLIP` | unset | Try clips: `grkind:part:y[:fade],...` cuts that part below y, fading across `fade` units |
 | `MELEE_XR_MOVE` | unset | Try moves: `gk:part:joint:scale:px:py:pz:tx:ty:tz;...` |
 | `MELEE_XR_CENTER` | per stage | Arena center override, `x,y,z` game units |
+| `MELEE_XR_STAGE_SCALE` | per stage | The stage's size against the arena scale (1: as Final Destination) |
 | `MELEE_XR_IZUMI_REFLECTION` | unset | Keep Fountain of Dreams' reflection render in mixed reality |
 | `MELEE_XR_IZUMI_WATER` | `60,100,160` | Fountain water colour in mixed reality (looks red/blue swapped in the desktop build) |
 | `MELEE_XR_CLIPZ` | unset | Try back cuts: `grkind:part:z[:fade],...` cuts that part behind z |

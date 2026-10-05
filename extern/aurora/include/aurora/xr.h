@@ -55,6 +55,11 @@ void aurora_xr_set_passthrough(bool on);
  * thread. */
 void aurora_xr_set_arena_center(float x, float y, float z);
 
+/* The stage's size against the arena's shared scale (1 by default): the
+ * arena is drawn at its scale times this. The player's resizes change the
+ * shared scale, so they carry over to other stages. Any thread. */
+void aurora_xr_set_stage_scale(float k);
+
 /* The height (world units) of the stage's highest floor, so the HUD can
  * float clear of it. NaN: unknown (the HUD keeps a fixed height). Any
  * thread. */

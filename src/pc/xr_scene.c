@@ -218,17 +218,46 @@ static const ClipRule s_clips[] = {
 };
 #define CLIP_COUNT ((int)(sizeof s_clips / sizeof s_clips[0]))
 
-/* The game point placed at the arena's center, for stages whose action is
- * far from the world origin. */
+/* Where each stage sits in the arena by default: the game point placed at
+ * the arena position (its main floor, centered on where the fight happens)
+ * and its size against the arena's shared scale (1: Final Destination's
+ * ~170-unit floor is about 1 m wide at the default 0.006 m/unit). Sizes
+ * meet halfway between keeping the game's proportions and making every
+ * stage's floors as wide as Final Destination's, sqrt(171 / floor width),
+ * so Temple still reads as big and Fountain as small, but both fit in view
+ * at the default distance. The player's grabs move and resize on top of
+ * this, and carry over between stages. Stages not listed sit at the world
+ * origin at scale 1. MELEE_XR_CENTER="x,y,z" and MELEE_XR_STAGE_SCALE
+ * override for the stage being played. */
 typedef struct {
     int grkind;
     float x, y, z;
-} CenterRule;
+    float scale;
+} StagePlacement;
 
-static const CenterRule s_centers[] = {
-    {0x0E, 40.f, 255.f, 0.f}, /* Corneria: the Great Fox flies far above the origin */
+static const StagePlacement s_placements[] = {
+    {0x02, 0.f, 84.f, 0.f, 0.8f},    /* Peach's Castle: the roof, high above the origin */
+    {0x04, 5.f, 0.f, 0.f, 1.f},      /* Kongo Jungle */
+    {0x05, 0.f, 0.f, 0.f, 0.9f},     /* Jungle Japes */
+    {0x06, -10.f, 0.f, 0.f, 0.85f},  /* Great Bay: its floors reach further left */
+    {0x07, 0.f, 0.f, 0.f, 0.65f},    /* Hyrule Temple */
+    {0x08, 0.f, 0.f, 0.f, 1.1f},     /* Brinstar */
+    {0x0A, 0.f, 0.f, 0.f, 1.15f},    /* Yoshi's Story */
+    {0x0B, 0.f, 0.f, 0.f, 0.9f},     /* Yoshi's Island */
+    {0x0C, 0.f, 0.f, 0.f, 1.15f},    /* Fountain of Dreams */
+    {0x0D, 0.f, 0.f, 0.f, 0.9f},     /* Green Greens */
+    {0x0E, -10.f, 285.f, 0.f, 0.8f}, /* Corneria: the Great Fox's deck, far above the origin */
+    {0x0F, 0.f, 0.f, 0.f, 0.95f},    /* Venom */
+    {0x10, 0.f, 0.f, 0.f, 1.f},      /* Pokemon Stadium */
+    {0x14, 0.f, 0.f, 0.f, 0.8f},     /* Onett */
+    {0x1B, 0.f, 0.f, 0.f, 1.1f},     /* Flat Zone */
+    {0x1C, 0.f, 0.f, 0.f, 1.05f},    /* Dream Land */
+    {0x1D, 0.f, 0.f, 0.f, 1.f},      /* Yoshi's Island 64 */
+    {0x1E, 0.f, 0.f, 0.f, 1.f},      /* Kongo Jungle 64 */
+    {0x24, 0.f, 0.f, 0.f, 1.1f},     /* Battlefield */
+    {0x25, 0.f, 0.f, 0.f, 1.f},      /* Final Destination */
 };
-#define CENTER_COUNT ((int)(sizeof s_centers / sizeof s_centers[0]))
+#define PLACEMENT_COUNT ((int)(sizeof s_placements / sizeof s_placements[0]))
 
 /* Stage parts hidden in the 3D view while one of their joints (by index in
  * a depth-first walk, as in PartRule) sits below a height (its translation,
@@ -629,18 +658,25 @@ bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {
     if (grkind != s_center_grkind) {
         s_center_grkind = grkind;
         float c[3] = {0.f, 0.f, 0.f};
-        for (int i = 0; i < CENTER_COUNT; i++) {
-            if (s_centers[i].grkind == grkind && grkind != 0) {
-                c[0] = s_centers[i].x;
-                c[1] = s_centers[i].y;
-                c[2] = s_centers[i].z;
+        float scale = 1.f;
+        for (int i = 0; i < PLACEMENT_COUNT; i++) {
+            if (s_placements[i].grkind == grkind && grkind != 0) {
+                c[0] = s_placements[i].x;
+                c[1] = s_placements[i].y;
+                c[2] = s_placements[i].z;
+                scale = s_placements[i].scale;
             }
         }
         const char* env = getenv("MELEE_XR_CENTER");
         if (env != NULL) {
             sscanf(env, "%f,%f,%f", &c[0], &c[1], &c[2]);
         }
+        env = getenv("MELEE_XR_STAGE_SCALE");
+        if (env != NULL) {
+            scale = (float) atof(env);
+        }
         aurora_xr_set_arena_center(c[0], c[1], c[2]);
+        aurora_xr_set_stage_scale(scale);
         s_top_grkind = -1;
     }
     if (grkind != s_top_grkind) {
