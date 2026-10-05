@@ -45,6 +45,21 @@ bool aurora_xr_pace(void);
  * arena to move, turn and scale it instead of pressing Z. */
 void aurora_xr_set_paused(bool paused);
 
+/* The fight is held before it starts so the player can place the stage:
+ * the hands grab the arena as in a pause. 0: not held; 1: held, showing
+ * the button legend; 2: held, showing the how-to cards and the legend.
+ * Any thread. */
+void aurora_xr_set_placing(int mode);
+
+/* Puts the current stage back at its default placement for this session.
+ * Any thread. */
+void aurora_xr_reset_stage(void);
+
+/* The pictures shown while placing (aurora_xr_set_placing): 0 the how-to
+ * cards, 1 the button legend. `rgba` is width x height straight-alpha
+ * RGBA8, copied before returning. Once each, before the first placing. */
+void aurora_xr_set_placing_image(int which, int width, int height, const unsigned char* rgba);
+
 /* Whether the room shows behind the game (passthrough): on for mixed
  * reality, off for full VR, where passthrough is stopped, not just hidden.
  * On by default. Any thread. */

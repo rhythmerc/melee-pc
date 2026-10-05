@@ -4,6 +4,7 @@
 #include "pc/pc.h"
 #include "pc/slp.h"
 #include "pc/widescreen.h"
+#include "pc/xr_place.h"
 #endif
 
 #include "gm_1A36.h"
@@ -421,6 +422,13 @@ void gm_801A4D34(void (*on_frame)(void), GameSceneInfo* info)
         }
 #endif
 
+#ifdef TARGET_PC
+        /* XR: a stage's first fight of the session waits here, drawn but
+         * not ticked, while the player places it (src/pc/xr_place.h). */
+        if (pc_xr_place_hold()) {
+            pad_queue_count = 0;
+        }
+#endif
         for (i = 0; i < pad_queue_count; i++) {
             HSD_PerfSetStartTime();
 #ifdef TARGET_PC

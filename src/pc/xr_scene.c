@@ -5,6 +5,7 @@
 #ifdef AURORA_ENABLE_OPENXR
 
 #include "pc/pc.h"
+#include "pc/xr_place.h"
 
 #include <aurora/xr.h>
 #include <melee/gm/gmscene.h>
@@ -684,6 +685,7 @@ bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {
         aurora_xr_set_stage_top(top);
         if (!isnan(top)) {
             s_top_grkind = grkind;
+            pc_xr_place_stage_ready(grkind);
         }
     }
     s_clip_active = false;

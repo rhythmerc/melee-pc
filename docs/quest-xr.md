@@ -607,6 +607,33 @@ stage N placed at x,y,z, yaw, scale`, the scale without the stage's own),
 which is handy for tuning every stage's default with `AURORA_XR_ARENA_POS`
 and `AURORA_XR_ARENA_SCALE` in `melee-env.txt`.
 
+#### Before the first fight
+
+The first time a stage's fight starts in a session, the game waits on that
+first frame so you can place the stage before "Ready... GO!"
+(`src/pc/xr_place.c`). The hands grab the arena the same way as in a pause.
+A or Start begins the fight, B puts the stage back where it started, and Y
+shows or hides the how-to cards. The cards float above where the arena
+starts, in the HUD's place; the button legend sits just below its front
+edge. The cards show on the session's first hold, and later holds show
+only the legend. Each stage is held once per session.
+`MELEE_XR_PLACE=0` turns the hold off.
+
+The hold isn't Melee's pause, which is game state. The scene loop
+(`gm_801A4D34`) keeps drawing every frame but runs no simulation ticks, and
+the pad input that comes in is dropped, so no game state changes and no
+frame passes. A fight that is being recorded or replayed is unaffected, and
+the button that ends the hold counts on its release, so the fight never
+starts with it held. Netplay never holds. The peer starts the match on the
+agreed frame, whether it is this build, VR or not, so placement stays local
+presentation: it never touches the simulation, the wire, or tick timing.
+In netplay the stage starts at its default placement.
+
+The pictures are `resources/xr/place-cards.png` and `place-legend.png`,
+drawn in Melee's menu style by `tools/xr_cards/make_cards.py` from
+Battlefield captures in `tools/xr_cards/shots/` (desktop build,
+`AURORA_XR_DUMP`, left eye). Rerun the script after changing them.
+
 ### Placing the screen
 
 The virtual screen (menus, character and stage select, results) is grabbed
@@ -810,6 +837,9 @@ AURORA_XR=1 build/linux-xr-fork/melee disc.rvz
 | Either grip | Z (grabs the arena while paused, or the screen with a laser on it; with hands, pinch) |
 | Left menu button | Start |
 
+While a stage waits before its first fight, A or Start begins it, B resets
+the stage's placement, and Y shows or hides the how-to cards.
+
 An external gamepad plays as usual. Its Select switches mixed reality and
 full VR instead of opening the port menu.
 
@@ -866,6 +896,9 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `MELEE_XR_CLIP_LOG` | unset | Log the first 40 stage part begins (stage, part, layer) |
 | `MELEE_XR_PTCL` | unset | Hide more stage particles: `grkind:bank:id,...` (id -1 is the whole bank) |
 | `MELEE_XR_PTCL_LOG` | unset | Log each stage particle drawn once (bank, id, position) |
+| `MELEE_XR_PLACE` | 1 | `0`: never hold a stage's first fight for placing it |
+| `AURORA_XR_PLACE_CARDS` | `0,0.42,-0.3,0.85` | How-to cards: `dx,dy,dz,width` (meters) from where the arena starts |
+| `AURORA_XR_PLACE_LEGEND` | `0,-0.17,0.12,0.34` | Button legend while placing, the same way |
 | `AURORA_XR_DUMP_AFTER` | 300 | Stream frames to wait before `AURORA_XR_DUMP` writes |
 
 ## Measured: virtual screen only (Quest 3, 72 Hz, before 120 Hz lock-step)

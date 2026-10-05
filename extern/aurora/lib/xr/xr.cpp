@@ -254,6 +254,19 @@ float g_stageTop = std::numeric_limits<float>::quiet_NaN();
 // Set by the game every fight frame (aurora_xr_set_paused): the fight is
 // paused, so the controllers point and grab instead of playing.
 std::atomic<bool> g_fightPaused{false};
+// Set by the game (aurora_xr_set_placing): the fight is held before it
+// starts for placing the stage. 0 no; 1 with the legend; 2 with the cards.
+std::atomic<int> g_placing{0};
+
+// The pictures shown while placing (aurora_xr_set_placing_image): given on
+// the game thread, made into swapchains on the XR thread when first shown.
+struct PlacingImage {
+  std::vector<uint8_t> rgba; // straight alpha; kept for a new session
+  uint32_t width = 0, height = 0;
+  XrSwapchain swapchain = XR_NULL_HANDLE;
+};
+std::mutex g_placingMutex;
+std::array<PlacingImage, 2> g_placingImages; // the cards, the legend
 
 // Set by the game (aurora_xr_set_passthrough): mixed reality shows the room,
 // full VR doesn't. The XR thread pauses or starts passthrough to match.
@@ -2064,6 +2077,87 @@ void build_pointer_layers(PointerLayers& out, bool onTargetOnly = false) {
   }
 }
 
+// ---------------------------------------------------------------- XR thread: placing the stage
+//
+// While the game holds a fight before it starts (aurora_xr_set_placing), the
+// how-to cards float above and behind where the arena starts, and the button
+// legend just below its front edge, both turned to face the starting head
+// position. They stay put while the player moves the arena.
+
+// Premultiplied for the compositor, in the swapchain's encoding.
+bool upload_placing_image(PlacingImage& img) {
+  const bool srgb = B.swapFormat == VK_FORMAT_R8G8B8A8_SRGB;
+  std::array<float, 256> decode;
+  for (int i = 0; i < 256; ++i) {
+    const float c = i / 255.f;
+    decode[i] = c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+  }
+  constexpr int kSteps = 4096;
+  std::vector<uint8_t> encode(kSteps + 1);
+  for (int i = 0; i <= kSteps; ++i) {
+    const float l = static_cast<float>(i) / kSteps;
+    const float c = !srgb ? l : l <= 0.0031308f ? l * 12.92f : 1.055f * std::pow(l, 1.f / 2.4f) - 0.055f;
+    encode[i] = static_cast<uint8_t>(std::lround(c * 255.f));
+  }
+  std::vector<uint8_t> px(img.rgba.size());
+  for (size_t i = 0; i + 3 < px.size(); i += 4) {
+    const float a = img.rgba[i + 3] / 255.f;
+    for (int c = 0; c < 3; ++c)
+      px[i + c] = encode[static_cast<int>(std::lround(decode[img.rgba[i + c]] * a * kSteps))];
+    px[i + 3] = img.rgba[i + 3];
+  }
+  return create_static_swapchain(img.swapchain, img.width, img.height, px);
+}
+
+constexpr size_t kMaxPlacingLayers = 2;
+
+struct PlacingLayers {
+  std::array<XrCompositionLayerQuad, kMaxPlacingLayers> quads;
+  uint32_t count = 0;
+};
+
+void build_placing_layers(PlacingLayers& out, int mode) {
+  out.count = 0;
+  const ArenaPose d = [] {
+    std::lock_guard lock{g_arenaMutex};
+    init_arena();
+    return g_defaultArena;
+  }();
+  // Where each sits against the arena's starting position, and its width
+  // (meters). AURORA_XR_PLACE_CARDS / _LEGEND: "dx,dy,dz,width".
+  struct Spot {
+    const char* env;
+    XrVector3f offset;
+    float width;
+  };
+  const std::array<Spot, 2> spots{{{"AURORA_XR_PLACE_CARDS", {0.f, 0.42f, -0.3f}, 0.85f},
+                                    {"AURORA_XR_PLACE_LEGEND", {0.f, -0.17f, 0.12f}, 0.34f}}};
+  std::lock_guard lock{g_placingMutex};
+  for (int which = mode >= 2 ? 0 : 1; which < 2; ++which) {
+    PlacingImage& img = g_placingImages[which];
+    if (img.width == 0)
+      continue;
+    if (!img.swapchain && !upload_placing_image(img)) {
+      Log.warn("Placing picture {} unavailable", which);
+      img.width = 0;
+      continue;
+    }
+    Spot spot = spots[which];
+    if (const char* v = std::getenv(spot.env))
+      std::sscanf(v, "%f,%f,%f,%f", &spot.offset.x, &spot.offset.y, &spot.offset.z, &spot.width);
+    const XrVector3f pos = d.pos + spot.offset;
+    auto& q = out.quads[out.count++];
+    q = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+    q.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+    q.space = B.space;
+    q.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    q.subImage.swapchain = img.swapchain;
+    q.subImage.imageRect = {{0, 0}, {static_cast<int32_t>(img.width), static_cast<int32_t>(img.height)}};
+    q.pose = {facing(pos, {0.f, 0.f, 0.f}), pos};
+    q.size = {spot.width, spot.width * static_cast<float>(img.height) / static_cast<float>(img.width)};
+  }
+}
+
 // Full VR stops passthrough outright (the cameras stop, not just the layer),
 // mixed reality starts it again.
 void sync_passthrough() {
@@ -2137,6 +2231,9 @@ bool render_xr_frame() {
   const auto& stereo = g_streams[kStereo];
   const auto& hud = g_streams[kHud];
   const bool fight = stereo.haveImage && now - stereo.lastRelease < std::chrono::milliseconds(250);
+  // Paused, or held before it starts for placing the stage.
+  const int placing = g_placing.load();
+  const bool held = g_fightPaused || placing > 0;
   {
     // Each 3D image is due for g_displayPerGameFrame display frames under
     // lock-step pacing; one shown longer is late. Counted once per image.
@@ -2144,17 +2241,17 @@ bool render_xr_frame() {
     static int shownFor = 0;
     const int due = g_displayPerGameFrame.load();
     if (stereo.releases != lastReleases) {
-      if (fight && !g_fightPaused && shownFor > 0)
+      if (fight && !held && shownFor > 0)
         ++B.shownHistogram[std::min(shownFor, 4) - 1];
       lastReleases = stereo.releases;
       shownFor = 0;
     }
-    if (fight && due > 0 && !g_fightPaused && ++shownFor == due + 1)
+    if (fight && due > 0 && !held && ++shownFor == due + 1)
       ++g_stereoLate;
   }
-  // Paused fights place the arena; menus place the screen.
+  // Held fights place the arena; menus place the screen.
   const bool screenShown = !fight && g_streams[kScreen].haveImage;
-  const bool pointing = fight && g_fightPaused && B.focused;
+  const bool pointing = fight && held && B.focused;
   const bool screenPointing = screenShown && B.focused;
   locate_hands(fs.predictedDisplayTime);
   update_grab(fight ? Target::Arena : Target::Screen, pointing || screenPointing);
@@ -2164,7 +2261,7 @@ bool render_xr_frame() {
                         });
   B.pointerMode = pointing || onScreen;
 
-  std::array<const XrCompositionLayerBaseHeader*, 3 + kMaxPointerLayers> layers{};
+  std::array<const XrCompositionLayerBaseHeader*, 3 + kMaxPlacingLayers + kMaxPointerLayers> layers{};
   uint32_t layerCount = 0;
   XrCompositionLayerPassthroughFB ptLayer{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
   sync_passthrough();
@@ -2179,6 +2276,7 @@ bool render_xr_frame() {
   XrCompositionLayerQuad hudQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
   XrCompositionLayerQuad screenQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
   PointerLayers pointers;
+  PlacingLayers placingLayers;
   if (fs.shouldRender && fight) {
     // Premultiplied alpha (no UNPREMULTIPLIED bit): the arena's coverage
     // hides the room, effects outside it add light over passthrough.
@@ -2202,7 +2300,8 @@ bool render_xr_frame() {
     proj.viewCount = 2;
     proj.views = projViews.data();
     layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj);
-    if (hud.haveImage && now - hud.lastRelease < std::chrono::milliseconds(250)) {
+    // The how-to cards take the HUD's place above the arena.
+    if (hud.haveImage && now - hud.lastRelease < std::chrono::milliseconds(250) && placing < 2) {
       hudQuad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
       hudQuad.space = B.space;
       hudQuad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
@@ -2210,6 +2309,11 @@ bool render_xr_frame() {
       hudQuad.subImage.imageRect = {{0, 0}, {static_cast<int32_t>(hud.width), static_cast<int32_t>(hud.height)}};
       hud_placement(hudQuad.pose, hudQuad.size);
       layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&hudQuad);
+    }
+    if (placing > 0) {
+      build_placing_layers(placingLayers, placing);
+      for (uint32_t i = 0; i < placingLayers.count; ++i)
+        layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&placingLayers.quads[i]);
     }
     if (pointing) {
       build_pointer_layers(pointers);
@@ -2357,6 +2461,14 @@ void teardown() {
     if (*sc)
       xrDestroySwapchain(*sc);
     *sc = XR_NULL_HANDLE;
+  }
+  {
+    std::lock_guard lock{g_placingMutex};
+    for (auto& img : g_placingImages) {
+      if (img.swapchain)
+        xrDestroySwapchain(img.swapchain);
+      img.swapchain = XR_NULL_HANDLE;
+    }
   }
   if (B.actionSet)
     xrDestroyActionSet(B.actionSet); // destroys its actions too
@@ -3667,6 +3779,30 @@ extern "C" bool aurora_xr_get_pad(PADStatus* out) {
 }
 
 extern "C" void aurora_xr_set_paused(bool paused) { aurora::xr::g_fightPaused = paused; }
+
+extern "C" void aurora_xr_set_placing(int mode) { aurora::xr::g_placing = mode; }
+
+extern "C" void aurora_xr_reset_stage(void) {
+  using namespace aurora::xr;
+  std::lock_guard lock{g_arenaMutex};
+  init_arena();
+  g_stageArenas.erase(g_stage);
+  g_arena = g_defaultArena;
+  g_arena.scale *= g_stageScale;
+}
+
+extern "C" void aurora_xr_set_placing_image(int which, int width, int height, const unsigned char* rgba) {
+  using namespace aurora::xr;
+  if (which < 0 || which >= static_cast<int>(g_placingImages.size()) || width <= 0 || height <= 0 || !rgba)
+    return;
+  std::lock_guard lock{g_placingMutex};
+  PlacingImage& img = g_placingImages[which];
+  if (img.swapchain)
+    return; // already shown; pictures are given once
+  img.width = static_cast<uint32_t>(width);
+  img.height = static_cast<uint32_t>(height);
+  img.rgba.assign(rgba, rgba + static_cast<size_t>(width) * height * 4);
+}
 
 extern "C" void aurora_xr_set_passthrough(bool on) { aurora::xr::g_passthroughWanted = on; }
 
