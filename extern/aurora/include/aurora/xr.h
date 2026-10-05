@@ -50,15 +50,14 @@ void aurora_xr_set_paused(bool paused);
  * On by default. Any thread. */
 void aurora_xr_set_passthrough(bool on);
 
-/* The game point (world units) that sits at the arena position; 0,0,0 by
- * default. For stages whose action happens far from the world origin. Any
- * thread. */
-void aurora_xr_set_arena_center(float x, float y, float z);
-
-/* The stage's size against the arena's shared scale (1 by default): the
- * arena is drawn at its scale times this. The player's resizes change the
- * shared scale, so they carry over to other stages. Any thread. */
-void aurora_xr_set_stage_scale(float k);
+/* The stage now playing (any id the game keys its stages by), the game
+ * point (world units) that sits at the arena position, for stages whose
+ * action happens far from the world origin, and its size against the
+ * default arena scale (AURORA_XR_ARENA_SCALE). The arena goes back to where
+ * the player last put this stage this session, or else to the default
+ * placement at this stage's size. Placing one stage never moves another.
+ * Any thread. */
+void aurora_xr_set_stage(int stage, float x, float y, float z, float scale);
 
 /* The height (world units) of the stage's highest floor, so the HUD can
  * float clear of it. NaN: unknown (the HUD keeps a fixed height). Any

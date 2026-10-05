@@ -218,8 +218,8 @@ and the investigation behind it are in docs/xr-3d-plan.md.
   particle stays in the 3D view. A `ParticleRule` names a stage and a
   particle bank, and optionally one id (ids number instances, so most rules
   take the whole bank). Hidden particles still draw into the flat frame.
-- **Arena center.** `aurora_xr_set_arena_center` puts a game point at the
-  arena position (`CenterRule`).
+- **Stage placement.** `aurora_xr_set_stage` names the stage, the game point
+  at the arena position, and the stage's size (`s_placements`).
 - **Moving pieces.** A rule can also move a joint in the 3D view only.
   `aurora_xr_world_transform` gives the following world draws an extra
   world-space placement, and the replay binds a separate eye matrix for
@@ -598,11 +598,14 @@ Fox), the laser gives way to a dot there.
   the touch points. Moving both hands carries the arena along with that
   point. Letting go of one hand carries on with the other alone.
 
-The HUD moves, turns and scales with the arena. A resize changes the shared
-scale, so the next stage keeps it on top of its own size, and the HUD
-follows only the resize, not the stage's size. The placement lasts for the
-session and is logged when you let go (`Arena placed at x,y,z, yaw, scale`),
-which is handy for `AURORA_XR_ARENA_POS` and `AURORA_XR_ARENA_SCALE`.
+The HUD moves, turns and scales with the arena. It follows your resizes but
+not the stage's own size. Placing the arena places only the stage you're
+playing: other stages keep their own placement, and this one comes back
+where you left it the next time it's played. The placements last for the
+session, not across launches. Each is logged when you let go (`Arena for
+stage N placed at x,y,z, yaw, scale`, the scale without the stage's own),
+which is handy for tuning every stage's default with `AURORA_XR_ARENA_POS`
+and `AURORA_XR_ARENA_SCALE` in `melee-env.txt`.
 
 ### Placing the screen
 

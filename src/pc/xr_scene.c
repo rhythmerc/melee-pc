@@ -225,8 +225,8 @@ static const ClipRule s_clips[] = {
  * meet halfway between keeping the game's proportions and making every
  * stage's floors as wide as Final Destination's, sqrt(171 / floor width),
  * so Temple still reads as big and Fountain as small, but both fit in view
- * at the default distance. The player's grabs move and resize on top of
- * this, and carry over between stages. Stages not listed sit at the world
+ * at the default distance. The player's grabs place only the stage being
+ * played, for the rest of the session. Stages not listed sit at the world
  * origin at scale 1. MELEE_XR_CENTER="x,y,z" and MELEE_XR_STAGE_SCALE
  * override for the stage being played. */
 typedef struct {
@@ -675,8 +675,7 @@ bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {
         if (env != NULL) {
             scale = (float) atof(env);
         }
-        aurora_xr_set_arena_center(c[0], c[1], c[2]);
-        aurora_xr_set_stage_scale(scale);
+        aurora_xr_set_stage(grkind, c[0], c[1], c[2], scale);
         s_top_grkind = -1;
     }
     if (grkind != s_top_grkind) {
