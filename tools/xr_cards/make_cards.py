@@ -239,7 +239,7 @@ def picture_start(w, h):
 
 
 def board():
-    W, H = s(1680), s(848)
+    W, H = s(1680), s(752)
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     # Melee's menu frame: a red-orange rounded border round a dark panel,
@@ -278,11 +278,6 @@ def board():
     for i, c in enumerate(cards):
         img.alpha_composite(c, (s(40) + i * (cw + gap), y))
 
-    # Melee's description box: white rim, dark inside.
-    by = y + ch + s(22)
-    d.rounded_rectangle((s(300), by, W - s(300), H - s(30)), radius=s(14), fill=(16, 16, 20, 235), outline=(236, 236, 240), width=s(4))
-    d.text((W // 2, (by + H - s(30)) // 2), "Each stage keeps its place for the rest of this session.",
-           font=font(26), fill=WHITE, anchor="mm")
     return img
 
 
