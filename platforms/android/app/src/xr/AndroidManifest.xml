@@ -17,6 +17,9 @@
     <!-- Hand tracking (XR_EXT_hand_tracking): pinches place the arena. -->
     <uses-feature android:name="oculus.software.handtracking" android:required="false" />
     <uses-permission android:name="com.oculus.permission.HAND_TRACKING" />
+    <!-- XR_FB_render_model: the controllers' own models (ghost controllers when recording). -->
+    <uses-feature android:name="com.oculus.feature.RENDER_MODEL" android:required="false" />
+    <uses-permission android:name="com.oculus.permission.RENDER_MODEL" />
     <!-- XR_META_boundary_visibility: hide the Guardian boundary in mixed reality. -->
     <uses-permission android:name="com.oculus.permission.BOUNDARY_VISIBILITY" />
 

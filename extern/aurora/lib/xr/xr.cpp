@@ -6,6 +6,9 @@
 #include "../webgpu/gpu.hpp"
 #include "../gfx/recording.hpp"
 #include "../gfx/xr_replay.hpp"
+
+#define CGLTF_IMPLEMENTATION
+#include "third_party/cgltf.h"
 #include "../gx/gx.hpp"
 
 #include <aurora/gfx.hpp>
@@ -340,11 +343,29 @@ struct Bridge {
   // Pointing and grabbing the arena while a fight is paused.
   std::array<XrAction, 2> aim{}, grab{};
   std::array<XrSpace, 2> aimSpace{};
+  // Uploads to static swapchains still on the GPU: freed once their fence
+  // signals (free_finished_uploads), never waited on mid-session.
+  struct Upload {
+    VkBuffer buf = VK_NULL_HANDLE;
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+  };
+  std::vector<Upload> uploads;
+  std::array<XrAction, 2> gripPose{};  // where the controller sits in the hand (ghost controllers)
+  std::array<XrSpace, 2> gripSpace{};
+  std::array<bool, 2> controllerInHand{}; // the hand's current interaction profile is a Touch controller
   bool pointerMode = false; // last frame: the grips grab (paused fight, or a laser on the screen) instead of pressing Z
   int reelHand = -1;        // last frame: the controller dragging the screen; its stick pushes and pulls it
   std::array<float, 2> stickY{}; // each controller's raw thumbstick Y (left: control stick, right: C-stick)
   // Hand tracking (XR_EXT_hand_tracking): pinches grab the arena too.
   bool hasHandTrackingExt = false;
+  bool hasHandMeshExt = false; // XR_FB_hand_tracking_mesh: the system's hand mesh (ghost hands)
+  PFN_xrGetHandMeshFB getHandMesh = nullptr;
+  bool hasRenderModelExt = false; // XR_FB_render_model: the controllers' models (ghost controllers)
+  PFN_xrGetRenderModelPropertiesFB getRenderModelProperties = nullptr;
+  PFN_xrLoadRenderModelFB loadRenderModel = nullptr;
+  PFN_xrEnumerateRenderModelPathsFB enumerateRenderModelPaths = nullptr;
   PFN_xrCreateHandTrackerEXT createHandTracker = nullptr;
   PFN_xrDestroyHandTrackerEXT destroyHandTracker = nullptr;
   PFN_xrLocateHandJointsEXT locateHandJoints = nullptr;
@@ -457,6 +478,8 @@ bool create_instance() {
     B.hasColorScaleBias |= !std::strcmp(p.extensionName, XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME);
     B.hasPerfSettingsExt |= !std::strcmp(p.extensionName, XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
     B.hasHandTrackingExt |= !std::strcmp(p.extensionName, XR_EXT_HAND_TRACKING_EXTENSION_NAME);
+    B.hasHandMeshExt |= !std::strcmp(p.extensionName, XR_FB_HAND_TRACKING_MESH_EXTENSION_NAME);
+    B.hasRenderModelExt |= !std::strcmp(p.extensionName, XR_FB_RENDER_MODEL_EXTENSION_NAME);
 #ifdef XR_META_boundary_visibility
     B.hasBoundaryVisibilityExt |= !std::strcmp(p.extensionName, XR_META_BOUNDARY_VISIBILITY_EXTENSION_NAME);
 #endif
@@ -478,6 +501,13 @@ bool create_instance() {
   B.hasHandTrackingExt &= env_flag("AURORA_XR_HANDS", true);
   if (B.hasHandTrackingExt)
     exts.push_back(XR_EXT_HAND_TRACKING_EXTENSION_NAME);
+  // Only for ghost hands (recording); nothing else draws hands.
+  B.hasHandMeshExt &= B.hasHandTrackingExt && env_flag("AURORA_XR_GHOST_HANDS", false);
+  if (B.hasHandMeshExt)
+    exts.push_back(XR_FB_HAND_TRACKING_MESH_EXTENSION_NAME);
+  B.hasRenderModelExt &= env_flag("AURORA_XR_GHOST_HANDS", false);
+  if (B.hasRenderModelExt)
+    exts.push_back(XR_FB_RENDER_MODEL_EXTENSION_NAME);
 #ifdef XR_META_boundary_visibility
   // AURORA_XR_BOUNDARY=1 keeps the Guardian boundary in mixed reality.
   B.hasBoundaryVisibilityExt &= !env_flag("AURORA_XR_BOUNDARY", false);
@@ -527,6 +557,13 @@ bool create_instance() {
     B.createHandTracker = xr_proc<PFN_xrCreateHandTrackerEXT>("xrCreateHandTrackerEXT");
     B.destroyHandTracker = xr_proc<PFN_xrDestroyHandTrackerEXT>("xrDestroyHandTrackerEXT");
     B.locateHandJoints = xr_proc<PFN_xrLocateHandJointsEXT>("xrLocateHandJointsEXT");
+  }
+  if (B.hasHandMeshExt)
+    B.getHandMesh = xr_proc<PFN_xrGetHandMeshFB>("xrGetHandMeshFB");
+  if (B.hasRenderModelExt) {
+    B.getRenderModelProperties = xr_proc<PFN_xrGetRenderModelPropertiesFB>("xrGetRenderModelPropertiesFB");
+    B.loadRenderModel = xr_proc<PFN_xrLoadRenderModelFB>("xrLoadRenderModelFB");
+    B.enumerateRenderModelPaths = xr_proc<PFN_xrEnumerateRenderModelPathsFB>("xrEnumerateRenderModelPathsFB");
   }
 #ifdef XR_META_boundary_visibility
   if (B.hasBoundaryVisibilityExt)
@@ -867,6 +904,8 @@ bool create_input() {
       !create_action(B.trigR, "r", "R", XR_ACTION_TYPE_FLOAT_INPUT) ||
       !create_action(B.aim[0], "aim_left", "Left pointer", XR_ACTION_TYPE_POSE_INPUT) ||
       !create_action(B.aim[1], "aim_right", "Right pointer", XR_ACTION_TYPE_POSE_INPUT) ||
+      !create_action(B.gripPose[0], "grip_left", "Left controller", XR_ACTION_TYPE_POSE_INPUT) ||
+      !create_action(B.gripPose[1], "grip_right", "Right controller", XR_ACTION_TYPE_POSE_INPUT) ||
       !create_action(B.grab[0], "grab_left", "Left grab", XR_ACTION_TYPE_FLOAT_INPUT) ||
       !create_action(B.grab[1], "grab_right", "Right grab", XR_ACTION_TYPE_FLOAT_INPUT))
     return false;
@@ -886,6 +925,8 @@ bool create_input() {
                                  {B.trigR, "/user/hand/right/input/trigger/value"},
                                  {B.aim[0], "/user/hand/left/input/aim/pose"},
                                  {B.aim[1], "/user/hand/right/input/aim/pose"},
+                                 {B.gripPose[0], "/user/hand/left/input/grip/pose"},
+                                 {B.gripPose[1], "/user/hand/right/input/grip/pose"},
                                  {B.grab[0], "/user/hand/left/input/squeeze/value"},
                                  {B.grab[1], "/user/hand/right/input/squeeze/value"},
                              });
@@ -908,6 +949,8 @@ bool create_input() {
     asci.action = B.aim[h];
     asci.poseInActionSpace.orientation.w = 1.f;
     XR_TRY(xrCreateActionSpace(B.session, &asci, &B.aimSpace[h]));
+    asci.action = B.gripPose[h];
+    XR_TRY(xrCreateActionSpace(B.session, &asci, &B.gripSpace[h]));
   }
   Log.info("Controller input ready ({})", touch ? "Touch controller bindings" : "simple controller only");
   return true;
@@ -1573,6 +1616,9 @@ struct Hand {
   bool engaged = false;               // holding the arena
   bool direct = false;                // engaged from inside the box: drags by `touch`, not along the laser
   float hit = -1.f;                   // outside the box: meters along the laser to the arena, -1 = none
+  std::array<XrHandJointLocationEXT, XR_HAND_JOINT_COUNT_EXT> joints{}; // while tracked (ghost hands)
+  bool gripValid = false;                                               // holding a controller: where (ghost controllers)
+  XrPosef grip{};
 };
 
 struct Grab {
@@ -1610,6 +1656,7 @@ bool locate_pinch(int h, XrTime time, Hand& hand) {
   if (XR_FAILED(B.locateHandJoints(B.handTrackers[h], &li, &locs)) || !locs.isActive)
     return false;
   hand.tracked = true;
+  hand.joints = joints;
   const auto& thumb = joints[XR_HAND_JOINT_THUMB_TIP_EXT];
   const auto& index = joints[XR_HAND_JOINT_INDEX_TIP_EXT];
   const auto& knuckle = joints[XR_HAND_JOINT_INDEX_PROXIMAL_EXT];
@@ -1633,6 +1680,16 @@ void locate_hands(XrTime time) {
     const bool wasTracked = hand.tracked;
     hand.wasHeld = hand.held;
     hand.valid = false;
+    hand.gripValid = false;
+    if (B.gripSpace[h] && B.controllerInHand[h]) {
+      XrSpaceLocation grip{XR_TYPE_SPACE_LOCATION};
+      if (XR_SUCCEEDED(xrLocateSpace(B.gripSpace[h], B.space, time, &grip)) &&
+          (grip.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
+          (grip.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT)) {
+        hand.gripValid = true;
+        hand.grip = grip.pose;
+      }
+    }
     if (!B.focused) {
       hand.held = false;
       continue;
@@ -1870,6 +1927,20 @@ void write_dump_layout(const std::array<XrView, 2>& views) {
   }
 }
 
+// Static swapchain uploads whose copies have finished: free what they used.
+// `all`: wait for the rest too (teardown, after the queue is idle).
+void free_finished_uploads(bool all = false) {
+  std::erase_if(B.uploads, [all](const auto& u) {
+    if (!all && vkGetFenceStatus(B.dev, u.fence) != VK_SUCCESS)
+      return false;
+    vkDestroyFence(B.dev, u.fence, nullptr);
+    vkFreeCommandBuffers(B.dev, B.pool, 1, &u.cmd);
+    vkDestroyBuffer(B.dev, u.buf, nullptr);
+    vkFreeMemory(B.dev, u.mem, nullptr);
+    return true;
+  });
+}
+
 // Fill a one-image swapchain once; the runtime keeps showing it.
 bool create_static_swapchain(XrSwapchain& out, uint32_t w, uint32_t h, const std::vector<uint8_t>& rgba) {
   XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
@@ -1956,10 +2027,17 @@ bool create_static_swapchain(XrSwapchain& out, uint32_t w, uint32_t h, const std
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd;
+    // Not waited on: this queue also carries the stream releases, which
+    // wait on the render worker, which can wait on this thread. The staging
+    // buffer goes once the fence signals.
     VK_TRY(vkQueueSubmit(B.queue, 1, &si, fence));
-    VK_TRY(vkWaitForFences(B.dev, 1, &fence, VK_TRUE, UINT64_MAX));
     XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
     XR_TRY(xrReleaseSwapchainImage(out, &ri));
+    B.uploads.push_back({buf, mem, cmd, fence});
+    buf = VK_NULL_HANDLE;
+    mem = VK_NULL_HANDLE;
+    cmd = VK_NULL_HANDLE;
+    fence = VK_NULL_HANDLE;
     return true;
   };
   const bool ok = upload();
@@ -2156,6 +2234,873 @@ void build_placing_layers(PlacingLayers& out, int mode) {
   }
 }
 
+// ---------------------------------------------------------------- XR thread: recording aids
+//
+// For capturing clips with the headset's recorder, to cut into how-to
+// pictures:
+//   AURORA_XR_CHROMA=r,g,b   a flat colour (0-255) fills the view behind
+//                            everything instead of passthrough
+//   AURORA_XR_GHOST_HANDS=1  tracked hands and held controllers are drawn as
+//                            translucent glowing silhouettes, like the
+//                            system's ghost hands
+// Each is drawn per eye on the CPU into an eye-sized quad in front of that
+// eye: a hand from its joints (tapered capsules between them, plus a few to
+// fill the palm), a controller from a rough Touch shape at its grip pose.
+
+struct Chroma {
+  bool on = false;
+  XrSwapchain swapchain = XR_NULL_HANDLE;
+  XrSpace viewSpace = XR_NULL_HANDLE;
+};
+Chroma g_chroma;
+
+constexpr uint32_t kGhostSize = 768;
+
+struct GhostEye {
+  XrSwapchain swapchain = XR_NULL_HANDLE;
+  std::vector<XrSwapchainImageVulkan2KHR> images;
+  VkBuffer buffer = VK_NULL_HANDLE;
+  VkDeviceMemory memory = VK_NULL_HANDLE;
+  uint8_t* mapped = nullptr;
+  VkCommandBuffer cmd = VK_NULL_HANDLE;
+  VkFence fence = VK_NULL_HANDLE;
+  XrPosef pose{};      // what is drawn now
+  XrExtent2Df size{};
+  bool shown = false;  // something to draw this frame
+  bool pending = false; // a copy into the swapchain is in flight (fence)
+  XrPosef shownPose{}; // what the swapchain holds, and where it goes
+  XrExtent2Df shownSize{};
+  bool showing = false;
+  uint64_t uploaded = 0; // the worker's picture last uploaded (GhostWorker::doneSeq)
+};
+
+// A rigid transform, row-major 3x4: rotation, then translation in column 3.
+struct Rigid {
+  std::array<float, 12> m{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
+  static Rigid from(const XrPosef& p) {
+    const auto& q = p.orientation;
+    const float x = q.x, y = q.y, z = q.z, w = q.w;
+    return {{1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w), p.position.x,
+             2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w), p.position.y,
+             2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y), p.position.z}};
+  }
+  Rigid inverse() const {
+    Rigid r;
+    for (int i = 0; i < 3; ++i)
+      for (int j = 0; j < 3; ++j)
+        r.m[i * 4 + j] = m[j * 4 + i];
+    for (int i = 0; i < 3; ++i)
+      r.m[i * 4 + 3] = -(r.m[i * 4] * m[3] + r.m[i * 4 + 1] * m[7] + r.m[i * 4 + 2] * m[11]);
+    return r;
+  }
+  Rigid operator*(const Rigid& b) const {
+    Rigid r;
+    for (int i = 0; i < 3; ++i)
+      for (int j = 0; j < 4; ++j)
+        r.m[i * 4 + j] = m[i * 4] * b.m[j] + m[i * 4 + 1] * b.m[4 + j] + m[i * 4 + 2] * b.m[8 + j] + (j == 3 ? m[i * 4 + 3] : 0.f);
+    return r;
+  }
+  XrVector3f point(XrVector3f v) const {
+    return {m[0] * v.x + m[1] * v.y + m[2] * v.z + m[3], m[4] * v.x + m[5] * v.y + m[6] * v.z + m[7],
+            m[8] * v.x + m[9] * v.y + m[10] * v.z + m[11]};
+  }
+  XrVector3f dir(XrVector3f v) const {
+    return {m[0] * v.x + m[1] * v.y + m[2] * v.z, m[4] * v.x + m[5] * v.y + m[6] * v.z,
+            m[8] * v.x + m[9] * v.y + m[10] * v.z};
+  }
+};
+
+// The system's hand mesh (XR_FB_hand_tracking_mesh), skinned to the tracked
+// joints each frame: what ghost hands draw when the runtime offers it.
+struct HandMesh {
+  bool tried = false, ok = false;
+  std::vector<XrVector3f> pos, nrm;
+  std::vector<XrVector4sFB> joint;
+  std::vector<XrVector4f> weight;
+  std::vector<int32_t> tris;
+  std::array<Rigid, XR_HAND_JOINT_COUNT_EXT> invBind{};
+  // This frame: room-space positions and normals, and a fade toward the
+  // forearm. `skinned` false: draw the capsules instead.
+  bool skinned = false;
+  std::vector<XrVector3f> wpos, wnrm;
+  std::vector<float> fade;
+};
+
+struct Ghost {
+  bool on = false, ready = false, failed = false;
+  std::array<GhostEye, 2> eyes;
+  std::array<HandMesh, 2> meshes;
+  std::array<HandMesh, 2> controllers; // the controllers' models, static (no skinning)
+  // The mesh raster, supersampled 2x over the hands' bounding box.
+  std::vector<float> depth, rim, fade;
+  std::vector<float> dist; // per pixel: signed distance (pixels) to the nearest hand part
+  std::array<uint8_t, 4097> encode{};
+};
+Ghost g_ghost;
+
+// Drawing the ghosts takes milliseconds, so a worker thread does it, from
+// the latest hands and views the XR thread posts; the XR thread uploads the
+// newest finished pictures and never waits for one.
+struct GhostWorker {
+  struct Picture {
+    std::vector<uint8_t> rgba;
+    XrPosef pose{};
+    XrExtent2Df size{};
+    bool shown = false;
+  };
+  std::thread thread;
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool stop = false;
+  uint64_t inputSeq = 0, doneSeq = 0;
+  std::array<Hand, 2> hands;
+  std::array<XrView, 2> views;
+  std::array<std::vector<uint8_t>, 2> models; // controller models (GLB) for the worker to parse
+  std::array<Picture, 2> done;                // per eye
+};
+GhostWorker g_ghostWorker;
+
+void init_recording_aids() {
+  if (const char* v = std::getenv("AURORA_XR_CHROMA"); v != nullptr && *v != '\0') {
+    int r = 0, g = 255, b = 0;
+    std::sscanf(v, "%d,%d,%d", &r, &g, &b);
+    std::vector<uint8_t> px(4 * 4 * 4);
+    for (size_t i = 0; i < px.size(); i += 4) {
+      // Stored as given: an sRGB swapchain decodes it back to these values.
+      px[i] = static_cast<uint8_t>(r);
+      px[i + 1] = static_cast<uint8_t>(g);
+      px[i + 2] = static_cast<uint8_t>(b);
+      px[i + 3] = 255;
+    }
+    XrReferenceSpaceCreateInfo rs{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+    rs.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
+    rs.poseInReferenceSpace.orientation.w = 1.f;
+    g_chroma.on = create_static_swapchain(g_chroma.swapchain, 4, 4, px) &&
+                  XR_SUCCEEDED(xrCreateReferenceSpace(B.session, &rs, &g_chroma.viewSpace));
+    Log.info("Recording: chroma backdrop {},{},{} {}", r, g, b, g_chroma.on ? "on" : "unavailable");
+  }
+  g_ghost.on = env_flag("AURORA_XR_GHOST_HANDS", false);
+  if (g_ghost.on)
+    Log.info("Recording: ghost hands and controllers{}", B.handTrackers[0] ? "" : " (controllers only: no hand tracking)");
+}
+
+bool make_ghost_eye(GhostEye& e) {
+  XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+  ci.usageFlags = XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+  ci.format = B.swapFormat;
+  ci.sampleCount = 1;
+  ci.width = ci.height = kGhostSize;
+  ci.faceCount = ci.arraySize = ci.mipCount = 1;
+  XR_TRY(xrCreateSwapchain(B.session, &ci, &e.swapchain));
+  uint32_t n = 0;
+  XR_TRY(xrEnumerateSwapchainImages(e.swapchain, 0, &n, nullptr));
+  e.images.assign(n, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
+  XR_TRY(xrEnumerateSwapchainImages(e.swapchain, n, &n, reinterpret_cast<XrSwapchainImageBaseHeader*>(e.images.data())));
+  VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+  bci.size = kGhostSize * kGhostSize * 4;
+  bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+  VK_TRY(vkCreateBuffer(B.dev, &bci, nullptr, &e.buffer));
+  VkMemoryRequirements req;
+  vkGetBufferMemoryRequirements(B.dev, e.buffer, &req);
+  VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+  mai.allocationSize = req.size;
+  mai.memoryTypeIndex =
+      find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+  if (mai.memoryTypeIndex == UINT32_MAX)
+    return false;
+  VK_TRY(vkAllocateMemory(B.dev, &mai, nullptr, &e.memory));
+  VK_TRY(vkBindBufferMemory(B.dev, e.buffer, e.memory, 0));
+  void* p = nullptr;
+  VK_TRY(vkMapMemory(B.dev, e.memory, 0, bci.size, 0, &p));
+  e.mapped = static_cast<uint8_t*>(p);
+  VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+  cai.commandPool = B.pool;
+  cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+  cai.commandBufferCount = 1;
+  VK_TRY(vkAllocateCommandBuffers(B.dev, &cai, &e.cmd));
+  VkFenceCreateInfo fci{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+  VK_TRY(vkCreateFence(B.dev, &fci, nullptr, &e.fence));
+  return true;
+}
+
+void stop_ghost_worker() {
+  auto& w = g_ghostWorker;
+  if (!w.thread.joinable())
+    return;
+  {
+    std::lock_guard lock{w.mutex};
+    w.stop = true;
+  }
+  w.cv.notify_all();
+  w.thread.join();
+  w.stop = false;
+  w.inputSeq = w.doneSeq = 0;
+  w.done = {};
+}
+
+void destroy_recording_aids() {
+  stop_ghost_worker();
+  if (g_chroma.swapchain)
+    xrDestroySwapchain(g_chroma.swapchain);
+  if (g_chroma.viewSpace)
+    xrDestroySpace(g_chroma.viewSpace);
+  g_chroma = {};
+  for (GhostEye& e : g_ghost.eyes) {
+    if (e.swapchain)
+      xrDestroySwapchain(e.swapchain);
+    if (e.fence)
+      vkDestroyFence(B.dev, e.fence, nullptr);
+    if (e.cmd)
+      vkFreeCommandBuffers(B.dev, B.pool, 1, &e.cmd);
+    if (e.buffer)
+      vkDestroyBuffer(B.dev, e.buffer, nullptr);
+    if (e.memory)
+      vkFreeMemory(B.dev, e.memory, nullptr);
+  }
+  g_ghost = {};
+}
+
+// One tapered capsule (pixels) into the distance field.
+void ghost_capsule(std::vector<float>& dist, float ax, float ay, float ar, float bx, float by, float br) {
+  const float pad = std::max(ar, br) + 8.f;
+  const int x0 = std::max(0, static_cast<int>(std::min(ax, bx) - pad));
+  const int x1 = std::min(static_cast<int>(kGhostSize) - 1, static_cast<int>(std::max(ax, bx) + pad));
+  const int y0 = std::max(0, static_cast<int>(std::min(ay, by) - pad));
+  const int y1 = std::min(static_cast<int>(kGhostSize) - 1, static_cast<int>(std::max(ay, by) + pad));
+  const float dx = bx - ax, dy = by - ay;
+  const float len2 = std::max(dx * dx + dy * dy, 1e-4f);
+  for (int y = y0; y <= y1; ++y)
+    for (int x = x0; x <= x1; ++x) {
+      const float px = x + 0.5f - ax, py = y + 0.5f - ay;
+      const float t = std::clamp((px * dx + py * dy) / len2, 0.f, 1.f);
+      const float ex = px - t * dx, ey = py - t * dy;
+      const float d = std::sqrt(ex * ex + ey * ey) - (ar + t * (br - ar));
+      float& slot = dist[static_cast<size_t>(y) * kGhostSize + x];
+      slot = std::min(slot, d);
+    }
+}
+
+bool load_hand_mesh(int h, HandMesh& hm) {
+  hm.tried = true;
+  if (!B.getHandMesh || !B.handTrackers[h])
+    return false;
+  XrHandTrackingMeshFB m{XR_TYPE_HAND_TRACKING_MESH_FB};
+  XR_TRY(B.getHandMesh(B.handTrackers[h], &m));
+  if (m.jointCountOutput != XR_HAND_JOINT_COUNT_EXT || m.vertexCountOutput == 0 || m.indexCountOutput == 0)
+    return false;
+  std::vector<XrPosef> bind(m.jointCountOutput);
+  std::vector<float> radii(m.jointCountOutput);
+  std::vector<XrHandJointEXT> parents(m.jointCountOutput);
+  std::vector<XrVector2f> uvs(m.vertexCountOutput);
+  hm.pos.resize(m.vertexCountOutput);
+  hm.nrm.resize(m.vertexCountOutput);
+  hm.joint.resize(m.vertexCountOutput);
+  hm.weight.resize(m.vertexCountOutput);
+  std::vector<int16_t> tris(m.indexCountOutput);
+  m.jointCapacityInput = m.jointCountOutput;
+  m.jointBindPoses = bind.data();
+  m.jointRadii = radii.data();
+  m.jointParents = parents.data();
+  m.vertexCapacityInput = m.vertexCountOutput;
+  m.vertexPositions = hm.pos.data();
+  m.vertexNormals = hm.nrm.data();
+  m.vertexUVs = uvs.data();
+  m.vertexBlendIndices = hm.joint.data();
+  m.vertexBlendWeights = hm.weight.data();
+  m.indexCapacityInput = m.indexCountOutput;
+  m.indices = tris.data();
+  XR_TRY(B.getHandMesh(B.handTrackers[h], &m));
+  hm.tris.assign(tris.begin(), tris.end());
+  for (size_t j = 0; j < bind.size(); ++j)
+    hm.invBind[j] = Rigid::from(bind[j]).inverse();
+  hm.wpos.resize(hm.pos.size());
+  hm.wnrm.resize(hm.pos.size());
+  hm.fade.resize(hm.pos.size());
+  Log.info("Recording: {} hand mesh, {} vertices, {} triangles", h == 0 ? "left" : "right", hm.pos.size(),
+           hm.tris.size() / 3);
+  hm.ok = true;
+  return true;
+}
+
+// The mesh posed by this frame's joints (linear blend skinning).
+void skin_hand(const Hand& hand, HandMesh& hm) {
+  hm.skinned = false;
+  if (!hm.ok || !hand.tracked)
+    return;
+  constexpr XrSpaceLocationFlags kValid =
+      XR_SPACE_LOCATION_POSITION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+  std::array<Rigid, XR_HAND_JOINT_COUNT_EXT> skin;
+  for (size_t j = 0; j < skin.size(); ++j) {
+    if ((hand.joints[j].locationFlags & kValid) != kValid)
+      return;
+    skin[j] = Rigid::from(hand.joints[j].pose) * hm.invBind[j];
+  }
+  // Fade out behind the wrist, as the system's hands do.
+  const XrVector3f wrist = hand.joints[XR_HAND_JOINT_WRIST_EXT].pose.position;
+  const XrVector3f arm = vnorm(hand.joints[XR_HAND_JOINT_MIDDLE_METACARPAL_EXT].pose.position - wrist);
+  for (size_t v = 0; v < hm.pos.size(); ++v) {
+    XrVector3f p{}, n{};
+    const XrVector4sFB& ji = hm.joint[v];
+    const XrVector4f& w = hm.weight[v];
+    const int16_t idx[4] = {ji.x, ji.y, ji.z, ji.w};
+    const float wt[4] = {w.x, w.y, w.z, w.w};
+    for (int k = 0; k < 4; ++k) {
+      if (wt[k] <= 0.f || idx[k] < 0 || idx[k] >= XR_HAND_JOINT_COUNT_EXT)
+        continue;
+      p = p + skin[idx[k]].point(hm.pos[v]) * wt[k];
+      n = n + skin[idx[k]].dir(hm.nrm[v]) * wt[k];
+    }
+    hm.wpos[v] = p;
+    hm.wnrm[v] = vnorm(n);
+    hm.fade[v] = std::clamp((vdot(p - wrist, arm) + 0.04f) / 0.04f, 0.f, 1.f);
+  }
+  hm.skinned = true;
+}
+
+// A controller's model from the runtime (XR_FB_render_model), as GLB bytes;
+// empty when it has none. XR thread.
+std::vector<uint8_t> fetch_controller_model(int h) {
+  if (!B.getRenderModelProperties || !B.loadRenderModel)
+    return {};
+  // The runtime only loads paths it has listed this session.
+  uint32_t n = 0;
+  if (B.enumerateRenderModelPaths && XR_SUCCEEDED(B.enumerateRenderModelPaths(B.session, 0, &n, nullptr))) {
+    std::vector<XrRenderModelPathInfoFB> infos(n, {XR_TYPE_RENDER_MODEL_PATH_INFO_FB});
+    B.enumerateRenderModelPaths(B.session, n, &n, infos.data());
+  }
+  XrRenderModelCapabilitiesRequestFB caps{XR_TYPE_RENDER_MODEL_CAPABILITIES_REQUEST_FB};
+  caps.flags = XR_RENDER_MODEL_SUPPORTS_GLTF_2_0_SUBSET_2_BIT_FB;
+  XrRenderModelPropertiesFB props{XR_TYPE_RENDER_MODEL_PROPERTIES_FB};
+  props.next = &caps;
+  const XrResult r = B.getRenderModelProperties(
+      B.session, path(h == 0 ? "/model_fb/controller/left" : "/model_fb/controller/right"), &props);
+  if (XR_FAILED(r) || props.modelKey == XR_NULL_RENDER_MODEL_KEY_FB) {
+    Log.warn("Recording: no {} controller model (XrResult {})", h == 0 ? "left" : "right", static_cast<int>(r));
+    return {};
+  }
+  XrRenderModelLoadInfoFB li{XR_TYPE_RENDER_MODEL_LOAD_INFO_FB};
+  li.modelKey = props.modelKey;
+  XrRenderModelBufferFB buf{XR_TYPE_RENDER_MODEL_BUFFER_FB};
+  if (XR_FAILED(B.loadRenderModel(B.session, &li, &buf)) || buf.bufferCountOutput == 0)
+    return {};
+  std::vector<uint8_t> glb(buf.bufferCountOutput);
+  buf.bufferCapacityInput = buf.bufferCountOutput;
+  buf.buffer = glb.data();
+  if (XR_FAILED(B.loadRenderModel(B.session, &li, &buf)))
+    return {};
+  Log.info("Recording: {} controller model \"{}\", {} bytes", h == 0 ? "left" : "right", props.modelName, glb.size());
+  return glb;
+}
+
+// The model's triangles, all its nodes flattened into one static mesh in
+// the controller's space (buttons and sticks at rest). Ghost worker.
+bool parse_controller_model(const std::vector<uint8_t>& glb, HandMesh& cm) {
+  cm.tried = true;
+  cgltf_options opt{};
+  cgltf_data* data = nullptr;
+  if (cgltf_parse(&opt, glb.data(), glb.size(), &data) != cgltf_result_success)
+    return false;
+  if (cgltf_load_buffers(&opt, data, nullptr) != cgltf_result_success) {
+    cgltf_free(data);
+    return false;
+  }
+  bool missingNormals = false;
+  for (cgltf_size ni = 0; ni < data->nodes_count; ++ni) {
+    const cgltf_node& node = data->nodes[ni];
+    if (!node.mesh)
+      continue;
+    float m[16]; // column-major
+    cgltf_node_transform_world(&node, m);
+    for (cgltf_size pi = 0; pi < node.mesh->primitives_count; ++pi) {
+      const cgltf_primitive& prim = node.mesh->primitives[pi];
+      if (prim.type != cgltf_primitive_type_triangles)
+        continue;
+      const cgltf_accessor *pos = nullptr, *nrm = nullptr;
+      for (cgltf_size ai = 0; ai < prim.attributes_count; ++ai) {
+        if (prim.attributes[ai].type == cgltf_attribute_type_position)
+          pos = prim.attributes[ai].data;
+        else if (prim.attributes[ai].type == cgltf_attribute_type_normal)
+          nrm = prim.attributes[ai].data;
+      }
+      if (!pos)
+        continue;
+      const size_t base = cm.pos.size();
+      for (cgltf_size v = 0; v < pos->count; ++v) {
+        float p[3]{}, n[3]{};
+        cgltf_accessor_read_float(pos, v, p, 3);
+        cm.pos.push_back({m[0] * p[0] + m[4] * p[1] + m[8] * p[2] + m[12], m[1] * p[0] + m[5] * p[1] + m[9] * p[2] + m[13],
+                          m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14]});
+        if (nrm && cgltf_accessor_read_float(nrm, v, n, 3))
+          cm.nrm.push_back(vnorm({m[0] * n[0] + m[4] * n[1] + m[8] * n[2], m[1] * n[0] + m[5] * n[1] + m[9] * n[2],
+                                  m[2] * n[0] + m[6] * n[1] + m[10] * n[2]}));
+        else {
+          cm.nrm.push_back({0.f, 0.f, 0.f});
+          missingNormals = true;
+        }
+      }
+      const cgltf_size count = prim.indices ? prim.indices->count : pos->count;
+      for (cgltf_size k = 0; k < count; ++k)
+        cm.tris.push_back(static_cast<int32_t>(base + (prim.indices ? cgltf_accessor_read_index(prim.indices, k) : k)));
+    }
+  }
+  cgltf_free(data);
+  if (missingNormals) {
+    // Smooth normals from the faces, where the model gives none.
+    std::vector<XrVector3f> acc(cm.pos.size());
+    for (size_t t = 0; t + 2 < cm.tris.size(); t += 3) {
+      const XrVector3f &a = cm.pos[cm.tris[t]], &b = cm.pos[cm.tris[t + 1]], &c = cm.pos[cm.tris[t + 2]];
+      const XrVector3f f = vcross(b - a, c - a);
+      for (int k = 0; k < 3; ++k)
+        acc[cm.tris[t + k]] = acc[cm.tris[t + k]] + f;
+    }
+    for (size_t v = 0; v < cm.pos.size(); ++v)
+      if (vlen(cm.nrm[v]) < 0.5f)
+        cm.nrm[v] = vnorm(acc[v]);
+  }
+  if (cm.pos.empty() || cm.tris.empty())
+    return false;
+  cm.wpos.resize(cm.pos.size());
+  cm.wnrm.resize(cm.pos.size());
+  cm.fade.assign(cm.pos.size(), 1.f);
+  cm.ok = true;
+  return true;
+}
+
+// The model at the controller's grip pose this frame.
+void pose_controller(const Hand& hand, HandMesh& cm) {
+  cm.skinned = false;
+  if (!cm.ok || !hand.gripValid)
+    return;
+  const Rigid r = Rigid::from(hand.grip);
+  for (size_t v = 0; v < cm.pos.size(); ++v) {
+    cm.wpos[v] = r.point(cm.pos[v]);
+    cm.wnrm[v] = r.dir(cm.nrm[v]);
+  }
+  cm.skinned = true;
+}
+
+// The skinned hand meshes as seen from one eye, over what `out` holds:
+// faint where the surface faces the eye, bright toward its silhouette.
+bool draw_hand_meshes(uint8_t* out, const XrView& view, float tl, float tr, float tu, float td) {
+  struct V {
+    float x, y, z, rim, fade;
+    bool ok, front; // in front of the eye; its normal faces the eye
+  };
+  const XrQuaternionf inv = qconj(view.pose.orientation);
+  // The hands, then the controllers.
+  const auto meshAt = [](int k) -> const HandMesh& { return k < 2 ? g_ghost.meshes[k] : g_ghost.controllers[k - 2]; };
+  std::array<std::vector<V>, 4> verts;
+  float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+  for (int h = 0; h < 4; ++h) {
+    const HandMesh& hm = meshAt(h);
+    if (!hm.skinned)
+      continue;
+    auto& vs = verts[h];
+    vs.resize(hm.wpos.size());
+    for (size_t i = 0; i < vs.size(); ++i) {
+      const XrVector3f c = qrot(inv, hm.wpos[i] - view.pose.position);
+      V& v = vs[i];
+      v.ok = c.z < -0.05f;
+      if (!v.ok)
+        continue;
+      v.x = (c.x / -c.z - tl) / (tr - tl) * kGhostSize;
+      v.y = (tu - c.y / -c.z) / (tu - td) * kGhostSize;
+      v.z = -c.z;
+      const XrVector3f n = qrot(inv, hm.wnrm[i]);
+      const float facing = vdot(n, vnorm(c * -1.f));
+      v.front = facing > -0.05f;
+      v.rim = (1.f - std::abs(facing)) * (1.f - std::abs(facing));
+      v.fade = hm.fade[i];
+      x0 = std::min(x0, v.x), y0 = std::min(y0, v.y), x1 = std::max(x1, v.x), y1 = std::max(y1, v.y);
+    }
+  }
+  const int bx0 = std::max(0, static_cast<int>(x0) - 1), by0 = std::max(0, static_cast<int>(y0) - 1);
+  const int bx1 = std::min(static_cast<int>(kGhostSize), static_cast<int>(x1) + 2);
+  const int by1 = std::min(static_cast<int>(kGhostSize), static_cast<int>(y1) + 2);
+  if (bx1 <= bx0 || by1 <= by0)
+    return false;
+  constexpr int kSS = 2;
+  const int sw = (bx1 - bx0) * kSS, sh = (by1 - by0) * kSS;
+  auto& depth = g_ghost.depth;
+  auto& rim = g_ghost.rim;
+  auto& fade = g_ghost.fade;
+  depth.assign(static_cast<size_t>(sw) * sh, 1e9f);
+  rim.resize(depth.size());
+  fade.resize(depth.size());
+  for (int h = 0; h < 4; ++h) {
+    const HandMesh& hm = meshAt(h);
+    if (!hm.skinned)
+      continue;
+    const auto& vs = verts[h];
+    for (size_t t = 0; t + 2 < hm.tris.size(); t += 3) {
+      const int i0 = hm.tris[t], i1 = hm.tris[t + 1], i2 = hm.tris[t + 2];
+      if (i0 < 0 || i1 < 0 || i2 < 0 || static_cast<size_t>(std::max({i0, i1, i2})) >= vs.size())
+        continue;
+      const V &a = vs[i0], &b = vs[i1], &c = vs[i2];
+      if (!a.ok || !b.ok || !c.ok || (!a.front && !b.front && !c.front))
+        continue; // behind the eye, or facing away (hidden by the near side)
+      // Supersample space: (pixel - box origin) * kSS.
+      const float ax = (a.x - bx0) * kSS, ay = (a.y - by0) * kSS;
+      const float bxp = (b.x - bx0) * kSS, byp = (b.y - by0) * kSS;
+      const float cx = (c.x - bx0) * kSS, cy = (c.y - by0) * kSS;
+      const float area = (bxp - ax) * (cy - ay) - (byp - ay) * (cx - ax);
+      if (std::abs(area) < 1e-6f)
+        continue;
+      const int tx0 = std::max(0, static_cast<int>(std::min({ax, bxp, cx})));
+      const int ty0 = std::max(0, static_cast<int>(std::min({ay, byp, cy})));
+      const int tx1 = std::min(sw - 1, static_cast<int>(std::max({ax, bxp, cx})) + 1);
+      const int ty1 = std::min(sh - 1, static_cast<int>(std::max({ay, byp, cy})) + 1);
+      const float inva = 1.f / area;
+      for (int y = ty0; y <= ty1; ++y)
+        for (int x = tx0; x <= tx1; ++x) {
+          const float px = x + 0.5f, py = y + 0.5f;
+          const float w0 = ((bxp - px) * (cy - py) - (byp - py) * (cx - px)) * inva;
+          const float w1 = ((cx - px) * (ay - py) - (cy - py) * (ax - px)) * inva;
+          const float w2 = 1.f - w0 - w1;
+          if (w0 < 0.f || w1 < 0.f || w2 < 0.f)
+            continue;
+          const float z = w0 * a.z + w1 * b.z + w2 * c.z;
+          const size_t i = static_cast<size_t>(y) * sw + x;
+          if (z >= depth[i])
+            continue;
+          depth[i] = z;
+          rim[i] = w0 * a.rim + w1 * b.rim + w2 * c.rim;
+          fade[i] = w0 * a.fade + w1 * b.fade + w2 * c.fade;
+        }
+    }
+  }
+  constexpr float kBody[3] = {0.2f, 0.25f, 0.33f}; // linear; the rim goes toward white
+  bool any = false;
+  for (int y = by0; y < by1; ++y)
+    for (int x = bx0; x < bx1; ++x) {
+      float a = 0.f, col[3] = {0.f, 0.f, 0.f};
+      for (int sy = 0; sy < kSS; ++sy)
+        for (int sx = 0; sx < kSS; ++sx) {
+          const size_t i = static_cast<size_t>((y - by0) * kSS + sy) * sw + (x - bx0) * kSS + sx;
+          if (depth[i] >= 1e9f)
+            continue;
+          const float r = std::clamp(rim[i] * 1.6f, 0.f, 1.f);
+          const float sa = fade[i] * (0.35f + 0.65f * r);
+          a += sa;
+          for (int k = 0; k < 3; ++k)
+            col[k] += (kBody[k] + (1.f - kBody[k]) * r) * sa;
+        }
+      if (a <= 0.f)
+        continue;
+      constexpr float kInv = 1.f / (kSS * kSS);
+      const size_t o = (static_cast<size_t>(y) * kGhostSize + x) * 4;
+      for (int k = 0; k < 3; ++k)
+        out[o + k] = g_ghost.encode[static_cast<int>(std::lround(std::clamp(col[k] * kInv, 0.f, 1.f) * 4096.f))];
+      out[o + 3] = static_cast<uint8_t>(std::lround(std::clamp(a * kInv, 0.f, 1.f) * 255.f));
+      any = true;
+    }
+  return any;
+}
+
+// The hands as seen from one eye, into its staging buffer.
+// Returns whether anything was drawn. Runs on the ghost worker
+// (ghost_worker); `hands` is its copy of the XR thread's.
+bool draw_ghost_eye(uint8_t* out, const XrView& view, const std::array<Hand, 2>& hands, XrPosef& pose,
+                    XrExtent2Df& size) {
+  // A quad 1 m ahead of the eye, as wide and tall as its field of view.
+  const float tl = std::tan(view.fov.angleLeft), tr = std::tan(view.fov.angleRight);
+  const float tu = std::tan(view.fov.angleUp), td = std::tan(view.fov.angleDown);
+  const XrQuaternionf& q = view.pose.orientation;
+  pose = {q, view.pose.position + qrot(q, {(tl + tr) * 0.5f, (tu + td) * 0.5f, -1.f})};
+  size = {tr - tl, tu - td};
+  auto& dist = g_ghost.dist;
+  // Cleared only once a capsule is drawn: the meshes don't use it.
+  bool distReady = false;
+  const auto capsule = [&](float ax, float ay, float ar, float bx, float by, float br) {
+    if (!distReady) {
+      dist.assign(static_cast<size_t>(kGhostSize) * kGhostSize, 1e9f);
+      distReady = true;
+    }
+    ghost_capsule(dist, ax, ay, ar, bx, by, br);
+  };
+  const XrQuaternionf inv = qconj(q);
+  bool any = false;
+  // A point (meters, room space) and radius on the eye's image: x, y and
+  // radius in pixels; false behind or right at the eye.
+  const auto project = [&](XrVector3f p, float r, XrVector3f& out) {
+    const XrVector3f c = qrot(inv, p - view.pose.position);
+    if (c.z > -0.05f)
+      return false;
+    out = {(c.x / -c.z - tl) / (tr - tl) * kGhostSize, (tu - c.y / -c.z) / (tu - td) * kGhostSize,
+           r / -c.z / (tr - tl) * kGhostSize};
+    return std::isfinite(out.x) && std::isfinite(out.y) && std::isfinite(out.z);
+  };
+  // Each hand shows either its controller or itself, never both: the
+  // runtime can report a hand's joints while it holds a controller.
+  for (int h = 0; h < 2; ++h) {
+    const Hand& hand = hands[h];
+    if (!hand.gripValid || g_ghost.controllers[h].skinned)
+      continue; // no controller, or drawn from its model
+    // A Touch controller, roughly, in its grip space (+Y up the handle
+    // through the fist, -Z where the index finger points): the handle, the
+    // head with the thumbstick on top, and the trigger.
+    struct Part {
+      XrVector3f a, b;
+      float ra, rb;
+    };
+    static constexpr Part kController[] = {
+        {{0.f, -0.05f, 0.012f}, {0.f, 0.028f, -0.004f}, 0.015f, 0.019f},       // handle
+        {{-0.021f, 0.044f, -0.022f}, {0.021f, 0.044f, -0.022f}, 0.021f, 0.021f}, // head, across
+        {{0.f, 0.046f, -0.002f}, {0.f, 0.04f, -0.048f}, 0.02f, 0.017f},          // head, front to back
+        {{0.f, 0.058f, -0.022f}, {0.f, 0.064f, -0.023f}, 0.009f, 0.008f},        // thumbstick
+        {{0.f, 0.026f, -0.04f}, {0.f, 0.006f, -0.046f}, 0.011f, 0.009f},         // trigger
+    };
+    for (const Part& part : kController) {
+      XrVector3f a, b;
+      if (project(hand.grip.position + qrot(hand.grip.orientation, part.a), part.ra, a) &&
+          project(hand.grip.position + qrot(hand.grip.orientation, part.b), part.rb, b)) {
+        capsule(a.x, a.y, a.z, b.x, b.y, b.z);
+        any = true;
+      }
+    }
+  }
+  for (int h = 0; h < 2; ++h) {
+    const Hand& hand = hands[h];
+    if (!hand.tracked || hand.gripValid || g_ghost.meshes[h].skinned)
+      continue;
+    std::array<XrVector3f, XR_HAND_JOINT_COUNT_EXT> px{};
+    std::array<bool, XR_HAND_JOINT_COUNT_EXT> ok{};
+    for (size_t j = 0; j < hand.joints.size(); ++j) {
+      const auto& jl = hand.joints[j];
+      ok[j] = (jl.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) &&
+              project(jl.pose.position, std::max(jl.radius, 0.006f), px[j]);
+    }
+    // Fingers at the runtime's joint radii; the palm and wrist at fixed
+    // ones (meters), since the runtime's palm and wrist radii are large
+    // enough to swell the hand into a ball at the wrist.
+    const auto bone = [&](int a, int b, float ra = 0.f, float rb = 0.f) {
+      if (ok[a] && ok[b]) {
+        const auto r = [&](int j, float m) {
+          return m > 0.f ? px[j].z / std::max(hand.joints[j].radius, 0.006f) * m : px[j].z;
+        };
+        capsule(px[a].x, px[a].y, r(a, ra), px[b].x, px[b].y, r(b, rb));
+        any = true;
+      }
+    };
+    constexpr int kWrist = XR_HAND_JOINT_WRIST_EXT, kPalm = XR_HAND_JOINT_PALM_EXT;
+    constexpr float kWristR = 0.017f, kPalmR = 0.022f, kKnuckleR = 0.011f;
+    bone(kWrist, XR_HAND_JOINT_THUMB_METACARPAL_EXT, kWristR, 0.014f);
+    bone(XR_HAND_JOINT_THUMB_METACARPAL_EXT, XR_HAND_JOINT_THUMB_PROXIMAL_EXT, 0.014f);
+    for (int j = XR_HAND_JOINT_THUMB_PROXIMAL_EXT; j < XR_HAND_JOINT_THUMB_TIP_EXT; ++j)
+      bone(j, j + 1);
+    for (int base : {XR_HAND_JOINT_INDEX_METACARPAL_EXT, XR_HAND_JOINT_MIDDLE_METACARPAL_EXT,
+                     XR_HAND_JOINT_RING_METACARPAL_EXT, XR_HAND_JOINT_LITTLE_METACARPAL_EXT}) {
+      bone(kWrist, base + 1, kWristR, kKnuckleR); // the metacarpal, wrist to knuckle
+      for (int j = base + 1; j < base + 4; ++j)   // proximal to tip
+        bone(j, j + 1);
+    }
+    // The knuckle line and the palm's core.
+    bone(XR_HAND_JOINT_INDEX_PROXIMAL_EXT, XR_HAND_JOINT_MIDDLE_PROXIMAL_EXT, kKnuckleR, kKnuckleR);
+    bone(XR_HAND_JOINT_MIDDLE_PROXIMAL_EXT, XR_HAND_JOINT_RING_PROXIMAL_EXT, kKnuckleR, kKnuckleR);
+    bone(XR_HAND_JOINT_RING_PROXIMAL_EXT, XR_HAND_JOINT_LITTLE_PROXIMAL_EXT, kKnuckleR, kKnuckleR);
+    bone(kPalm, XR_HAND_JOINT_MIDDLE_PROXIMAL_EXT, kPalmR, kKnuckleR);
+    bone(kPalm, kWrist, kPalmR, kWristR);
+    bone(kPalm, XR_HAND_JOINT_THUMB_METACARPAL_EXT, kPalmR, 0.014f);
+  }
+  std::memset(out, 0, static_cast<size_t>(kGhostSize) * kGhostSize * 4);
+  const bool meshes = draw_hand_meshes(out, view, tl, tr, tu, td);
+  if (!any)
+    return meshes; // no capsule parts to shade
+  // A mostly solid body (so a chroma key keeps it) and a brighter rim, pale
+  // blue, premultiplied.
+  constexpr float kBody[3] = {0.45f, 0.62f, 0.9f}; // linear; the rim goes toward white
+  const float rim = std::max(2.f, kGhostSize / 260.f);
+  for (size_t i = 0; i < dist.size(); ++i) {
+    const float d = dist[i];
+    if (!(d <= 1.f) || !(d > -1e6f))
+      continue; // outside, or not a number
+    const float cover = std::clamp(0.5f - d, 0.f, 1.f);
+    // A rim falling off inward. No exp: in this library that is the game's
+    // own deterministic libm, far too slow per pixel.
+    const float falloff = rim / (rim + std::max(-d, 0.f));
+    const float edge = falloff * falloff;
+    const float a = cover * (0.75f + 0.25f * edge);
+    for (int c = 0; c < 3; ++c) {
+      const float color = kBody[c] + (1.f - kBody[c]) * edge;
+      out[i * 4 + c] = g_ghost.encode[static_cast<int>(std::lround(color * a * 4096.f))];
+    }
+    out[i * 4 + 3] = static_cast<uint8_t>(std::lround(a * 255.f));
+  }
+  return true;
+}
+
+bool upload_ghost_eye(GhostEye& e) {
+  uint32_t index = 0;
+  XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+  XR_TRY(xrAcquireSwapchainImage(e.swapchain, &ai, &index));
+  XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+  wi.timeout = XR_INFINITE_DURATION;
+  XR_TRY(xrWaitSwapchainImage(e.swapchain, &wi));
+  VK_TRY(vkResetCommandBuffer(e.cmd, 0));
+  VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+  cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+  VK_TRY(vkBeginCommandBuffer(e.cmd, &cbi));
+  VkImageMemoryBarrier bar{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+  bar.srcQueueFamilyIndex = bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  bar.image = e.images[index].image;
+  bar.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+  bar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  bar.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  vkCmdPipelineBarrier(e.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
+                       nullptr, 1, &bar);
+  VkBufferImageCopy region{};
+  region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+  region.imageExtent = {kGhostSize, kGhostSize, 1};
+  vkCmdCopyBufferToImage(e.cmd, e.buffer, bar.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+  bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+  bar.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+  bar.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+  bar.dstAccessMask = 0;
+  vkCmdPipelineBarrier(e.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0,
+                       nullptr, 1, &bar);
+  VK_TRY(vkEndCommandBuffer(e.cmd));
+  VK_TRY(vkResetFences(B.dev, 1, &e.fence));
+  VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+  si.commandBufferCount = 1;
+  si.pCommandBuffers = &e.cmd;
+  // Never waited on here: this queue also carries the stream releases,
+  // which wait on the render worker, which can wait on this thread.
+  VK_TRY(vkQueueSubmit(B.queue, 1, &si, e.fence));
+  e.pending = true;
+  XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+  XR_TRY(xrReleaseSwapchainImage(e.swapchain, &ri));
+  e.shownPose = e.pose;
+  e.shownSize = e.size;
+  return true;
+}
+
+void ghost_worker() {
+  auto& w = g_ghostWorker;
+  std::array<Hand, 2> hands;
+  std::array<XrView, 2> views;
+  uint64_t seq = 0;
+  std::array<GhostWorker::Picture, 2> pics;
+  std::array<std::vector<uint8_t>, 2> models;
+  for (;;) {
+    {
+      std::unique_lock lock{w.mutex};
+      w.cv.wait(lock, [&] { return w.stop || w.inputSeq != seq; });
+      if (w.stop)
+        return;
+      hands = w.hands;
+      views = w.views;
+      seq = w.inputSeq;
+      models.swap(w.models);
+    }
+    for (int h = 0; h < 2; ++h) {
+      if (models[h].empty())
+        continue;
+      HandMesh& cm = g_ghost.controllers[h];
+      if (parse_controller_model(models[h], cm))
+        Log.info("Recording: {} controller mesh, {} vertices, {} triangles", h == 0 ? "left" : "right",
+                 cm.pos.size(), cm.tris.size() / 3);
+      else
+        Log.warn("Recording: {} controller model unreadable", h == 0 ? "left" : "right");
+      models[h].clear();
+    }
+    for (int h = 0; h < 2; ++h) {
+      HandMesh& hm = g_ghost.meshes[h];
+      if (!hm.tried && hands[h].tracked)
+        load_hand_mesh(h, hm);
+      skin_hand(hands[h], hm);
+      if (hands[h].gripValid)
+        hm.skinned = false; // holding a controller: draw that instead
+      pose_controller(hands[h], g_ghost.controllers[h]);
+    }
+    for (int i = 0; i < 2; ++i) {
+      // Swapped with the posted ones: the first time round those are empty.
+      pics[i].rgba.resize(static_cast<size_t>(kGhostSize) * kGhostSize * 4);
+      pics[i].shown = draw_ghost_eye(pics[i].rgba.data(), views[i], hands, pics[i].pose, pics[i].size);
+    }
+    std::lock_guard lock{w.mutex};
+    std::swap(w.done, pics);
+    w.doneSeq = seq;
+  }
+}
+
+// This display frame's ghost hands; false when none are shown.
+bool update_ghost_hands() {
+  if (!g_ghost.on || g_ghost.failed)
+    return false;
+  auto& w = g_ghostWorker;
+  if (!g_ghost.ready) {
+    const bool srgb = B.swapFormat == VK_FORMAT_R8G8B8A8_SRGB;
+    for (int i = 0; i <= 4096; ++i) {
+      const float l = i / 4096.f;
+      const float c = !srgb ? l : l <= 0.0031308f ? l * 12.92f : 1.055f * std::pow(l, 1.f / 2.4f) - 0.055f;
+      g_ghost.encode[i] = static_cast<uint8_t>(std::lround(std::clamp(c, 0.f, 1.f) * 255.f));
+    }
+    if (!make_ghost_eye(g_ghost.eyes[0]) || !make_ghost_eye(g_ghost.eyes[1])) {
+      Log.warn("Recording: ghost hands unavailable");
+      g_ghost.failed = true;
+      return false;
+    }
+    g_ghost.ready = true;
+    w.thread = std::thread(ghost_worker);
+  }
+  // Each controller's model once, the first time that hand holds one.
+  static std::array<bool, 2> fetched{};
+  for (int h = 0; h < 2; ++h) {
+    if (fetched[h] || !B.controllerInHand[h])
+      continue;
+    fetched[h] = true;
+    auto glb = fetch_controller_model(h);
+    std::lock_guard lock{w.mutex};
+    w.models[h] = std::move(glb);
+  }
+  {
+    std::lock_guard viewLock{g_viewMutex};
+    if (!g_viewsValid)
+      return false;
+    std::lock_guard lock{w.mutex};
+    w.views = g_latestViews;
+    w.hands = G.hands;
+    ++w.inputSeq;
+  }
+  w.cv.notify_one();
+  bool any = false;
+  for (int i = 0; i < 2; ++i) {
+    GhostEye& e = g_ghost.eyes[i];
+    // The last copy still running: keep showing what it holds. Its staging
+    // buffer is still being read, so nothing new goes into it.
+    if (e.pending && vkGetFenceStatus(B.dev, e.fence) != VK_SUCCESS) {
+      any |= e.showing;
+      continue;
+    }
+    e.pending = false;
+    bool fresh = false;
+    {
+      std::lock_guard lock{w.mutex};
+      if (w.doneSeq != e.uploaded && !w.done[i].rgba.empty()) {
+        const auto& pic = w.done[i];
+        e.shown = pic.shown;
+        e.pose = pic.pose;
+        e.size = pic.size;
+        if (pic.shown)
+          std::memcpy(e.mapped, pic.rgba.data(), pic.rgba.size());
+        e.uploaded = w.doneSeq;
+        fresh = true;
+      }
+    }
+    if (fresh) {
+      e.showing = e.shown;
+      if (e.shown && !upload_ghost_eye(e)) {
+        g_ghost.failed = true;
+        e.showing = false;
+        return false;
+      }
+    }
+    any |= e.showing;
+  }
+  return any;
+}
+
 // Full VR stops passthrough outright (the cameras stop, not just the layer),
 // mixed reality starts it again.
 void sync_passthrough() {
@@ -2204,6 +3149,7 @@ void sync_boundary() {
 bool render_xr_frame() {
   XrFrameState fs{XR_TYPE_FRAME_STATE};
   XR_TRY(xrWaitFrame(B.session, nullptr, &fs));
+  free_finished_uploads();
   if (const int per = g_displayPerGameFrame; per > 0 && ++B.displayFrame % static_cast<uint64_t>(per) == 0) {
     {
       std::lock_guard lock{g_paceMutex};
@@ -2259,12 +3205,22 @@ bool render_xr_frame() {
                         });
   B.pointerMode = pointing || onScreen;
 
-  std::array<const XrCompositionLayerBaseHeader*, 3 + kMaxPlacingLayers + kMaxPointerLayers> layers{};
+  std::array<const XrCompositionLayerBaseHeader*, 4 + kMaxPlacingLayers + kMaxPointerLayers + 2> layers{};
   uint32_t layerCount = 0;
   XrCompositionLayerPassthroughFB ptLayer{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
   sync_passthrough();
   sync_boundary();
-  if (B.passthroughLayer && B.passthroughRunning && g_passthroughWanted) {
+  XrCompositionLayerQuad chromaQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+  if (g_chroma.on) {
+    // Recording: a flat colour fills the view instead of the room.
+    chromaQuad.space = g_chroma.viewSpace;
+    chromaQuad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    chromaQuad.subImage.swapchain = g_chroma.swapchain;
+    chromaQuad.subImage.imageRect = {{0, 0}, {4, 4}};
+    chromaQuad.pose = {{0.f, 0.f, 0.f, 1.f}, {0.f, 0.f, -50.f}};
+    chromaQuad.size = {1000.f, 1000.f};
+    layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&chromaQuad);
+  } else if (B.passthroughLayer && B.passthroughRunning && g_passthroughWanted) {
     ptLayer.flags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
     ptLayer.layerHandle = B.passthroughLayer;
     layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&ptLayer);
@@ -2308,7 +3264,7 @@ bool render_xr_frame() {
       hud_placement(hudQuad.pose, hudQuad.size);
       layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&hudQuad);
     }
-    if (placing > 0) {
+    if (placing > 0 && env_flag("AURORA_XR_PLACE_PICTURES", true)) {
       build_placing_layers(placingLayers, placing);
       for (uint32_t i = 0; i < placingLayers.count; ++i)
         layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&placingLayers.quads[i]);
@@ -2335,6 +3291,24 @@ bool render_xr_frame() {
       build_pointer_layers(pointers, true);
       for (uint32_t i = 0; i < pointers.count; ++i)
         layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&pointers.quads[i]);
+    }
+  }
+  std::array<XrCompositionLayerQuad, 2> ghostQuads{};
+  if (fs.shouldRender && update_ghost_hands()) {
+    for (int i = 0; i < 2; ++i) {
+      const GhostEye& e = g_ghost.eyes[i];
+      if (!e.showing)
+        continue;
+      auto& q = ghostQuads[i];
+      q = {XR_TYPE_COMPOSITION_LAYER_QUAD};
+      q.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+      q.space = B.space;
+      q.eyeVisibility = i == 0 ? XR_EYE_VISIBILITY_LEFT : XR_EYE_VISIBILITY_RIGHT;
+      q.subImage.swapchain = e.swapchain;
+      q.subImage.imageRect = {{0, 0}, {static_cast<int32_t>(kGhostSize), static_cast<int32_t>(kGhostSize)}};
+      q.pose = e.shownPose;
+      q.size = e.shownSize;
+      layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&q);
     }
   }
   XrFrameEndInfo fei{XR_TYPE_FRAME_END_INFO};
@@ -2365,6 +3339,21 @@ bool render_xr_frame() {
 }
 
 // Returns false when the thread should exit.
+// Which hands hold a controller: their current interaction profile is
+// Touch rather than a bare hand's (ghost hands and controllers).
+void update_hand_profiles() {
+  const XrPath touch = path("/interaction_profiles/oculus/touch_controller");
+  for (int h = 0; h < 2; ++h) {
+    XrInteractionProfileState st{XR_TYPE_INTERACTION_PROFILE_STATE};
+    const bool held = XR_SUCCEEDED(xrGetCurrentInteractionProfile(
+                          B.session, path(h == 0 ? "/user/hand/left" : "/user/hand/right"), &st)) &&
+                      st.interactionProfile == touch;
+    if (held != B.controllerInHand[h])
+      Log.info("{} hand: {}", h == 0 ? "Left" : "Right", held ? "controller" : "no controller");
+    B.controllerInHand[h] = held;
+  }
+}
+
 bool poll_events() {
   XrEventDataBuffer ev{XR_TYPE_EVENT_DATA_BUFFER};
   while (xrPollEvent(B.instance, &ev) == XR_SUCCESS) {
@@ -2395,6 +3384,8 @@ bool poll_events() {
       g_sessionRunning = B.running;
     } else if (ev.type == XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB) {
       update_pacing();
+    } else if (ev.type == XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED) {
+      update_hand_profiles();
     } else if (ev.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING) {
       return false;
 #ifdef XR_META_boundary_visibility
@@ -2422,6 +3413,7 @@ bool setup() {
     Log.warn("Laser pointers unavailable");
   if (!create_hand_trackers())
     Log.info("Hand tracking unavailable");
+  init_recording_aids();
   if (const char* dir = std::getenv("AURORA_XR_DUMP"); dir != nullptr && *dir != '\0')
     B.dumpDir = dir;
   // Not every exit path calls aurora::shutdown, so stop the XR thread from an
@@ -2439,11 +3431,18 @@ void teardown() {
   // would need every queue externally synchronized.
   if (B.queue)
     vkQueueWaitIdle(B.queue);
+  if (B.dev)
+    free_finished_uploads(true);
   if (B.dev) {
     for (auto& st : g_streams) {
       for (int i = 0; i < static_cast<int>(st.slots.size()); ++i)
         retire_slot(st, st.slots[i], i);
     }
+  }
+  for (auto& sp : B.gripSpace) {
+    if (sp)
+      xrDestroySpace(sp);
+    sp = XR_NULL_HANDLE;
   }
   for (auto& sp : B.aimSpace) {
     if (sp)
@@ -2460,6 +3459,7 @@ void teardown() {
       xrDestroySwapchain(*sc);
     *sc = XR_NULL_HANDLE;
   }
+  destroy_recording_aids();
   {
     std::lock_guard lock{g_placingMutex};
     for (auto& img : g_placingImages) {
