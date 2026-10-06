@@ -3254,8 +3254,10 @@ bool render_xr_frame() {
     proj.viewCount = 2;
     proj.views = projViews.data();
     layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj);
-    // The how-to cards take the HUD's place above the arena.
-    if (hud.haveImage && now - hud.lastRelease < std::chrono::milliseconds(250) && placing < 2) {
+    // The how-to cards take the HUD's place above the arena; recording
+    // (AURORA_XR_PLACE_PICTURES=0) keeps every hold clear of it.
+    const bool hudHeld = placing >= 2 || (placing > 0 && !env_flag("AURORA_XR_PLACE_PICTURES", true));
+    if (hud.haveImage && now - hud.lastRelease < std::chrono::milliseconds(250) && !hudHeld) {
       hudQuad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
       hudQuad.space = B.space;
       hudQuad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
