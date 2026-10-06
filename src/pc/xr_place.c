@@ -98,9 +98,10 @@ static void load_image(int which, const char* name) {
     }
 }
 
-/* place-clips.txt: one clip a line, "name frames cols frame_w frame_h fps
- * x y w h" (tools/xr_cards/make_cards.py); its atlas is
- * place-clip-<name>.jpg. */
+/* place-clips.txt: one clip a line, "set name frames cols frame_w frame_h
+ * fps x y w h" (tools/xr_cards/make_cards.py), set being controllers or
+ * hands, whose clips go in slots 0-2 and 3-5 in the order move, turn,
+ * scale; its atlas is place-clip-<set>-<name>.jpg. */
 static void load_clips(void) {
     size_t size = 0;
     char* text = load_file("place-clips.txt", &size);
@@ -111,23 +112,32 @@ static void load_clips(void) {
     memcpy(copy, text, size);
     copy[size] = '\0';
     SDL_free(text);
-    int which = 0;
-    for (char* line = strtok(copy, "\n"); line != NULL && which < 3; line = strtok(NULL, "\n")) {
-        char name[32];
+    static const char* const names[3] = {"move", "turn", "scale"};
+    for (char* line = strtok(copy, "\n"); line != NULL; line = strtok(NULL, "\n")) {
+        char set[16], name[32];
         int frames, cols, fw, fh, x, y, w, h;
         float fps;
-        if (sscanf(line, "%31s %d %d %d %d %f %d %d %d %d", name, &frames, &cols, &fw, &fh, &fps, &x, &y, &w, &h) != 10) {
+        if (sscanf(line, "%15s %31s %d %d %d %d %f %d %d %d %d", set, name, &frames, &cols, &fw, &fh, &fps, &x, &y,
+                   &w, &h) != 11) {
             continue;
         }
-        char file[64];
-        snprintf(file, sizeof file, "place-clip-%s.jpg", name);
+        int which = -1;
+        for (int i = 0; i < 3; i++) {
+            if (strcmp(name, names[i]) == 0) {
+                which = (strcmp(set, "hands") == 0 ? 3 : 0) + i;
+            }
+        }
+        if (which < 0) {
+            continue;
+        }
+        char file[80];
+        snprintf(file, sizeof file, "place-clip-%s-%s.jpg", set, name);
         int aw = 0, ah = 0;
         unsigned char* rgba = load_rgba(file, &aw, &ah);
         if (rgba != NULL) {
             aurora_xr_set_placing_clip(which, aw, ah, rgba, frames, cols, fw, fh, fps, x, y, w, h);
             stbi_image_free(rgba);
         }
-        which++;
     }
     free(copy);
 }

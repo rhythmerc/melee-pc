@@ -5,16 +5,17 @@ style, into resources/xr/:
 
   place-cards.png, place-legend.png              for Touch controllers
   place-cards-hands.png, place-legend-hands.png  for tracked hands
-  place-clip-<name>.jpg, place-clips.txt         the hands' looping clips
+  place-clip-<set>-<name>.jpg, place-clips.txt   their looping clips
 
-The controller cards use stills: shots/ holds left-eye captures of
-Battlefield from the desktop XR build (AURORA_XR_DUMP; premultiplied
-colour, alpha = coverage). The hand cards play clips cut from a headset
-recording made with the xr-recording branch (chroma green backdrop, ghost
-hands): footage/hands-<name>.mp4, trimmed and cropped. Each is keyed,
-composited over the cards' grid backdrop, played forward then back so it
-loops, and packed into a frame atlas; place-clips.txt says where each sits
-on the hand cards. Needs Pillow and ffmpeg.
+The gesture cards play clips cut from headset recordings made with the
+xr-recording branch (chroma green backdrop, ghost hands and controllers):
+footage/<set>-<name>.mp4, trimmed and cropped, <set> being controllers or
+hands. Each is keyed, composited over the cards' grid backdrop, played
+forward then back so it loops, and packed into a frame atlas;
+place-clips.txt says where each sits on its cards. The Ready card's still
+is a left-eye capture of Battlefield from the desktop XR build in shots/
+(AURORA_XR_DUMP; premultiplied colour, alpha = coverage), as are the
+fallbacks drawn when a clip's footage is missing. Needs Pillow and ffmpeg.
 Run from anywhere: python3 tools/xr_cards/make_cards.py
 """
 import math
@@ -281,14 +282,55 @@ CLIPS = ["move", "turn", "scale"]  # the hand cards' first three, in order
 CLIP_FPS = 12
 
 
-def keyed_frames(name, w, h):
+HUD_BAND = 280  # source rows that can hold the HUD, above the stage
+
+
+def strip_hud(im):
+    """Paints the HUD's leftovers green, before keying: the hand takes were
+    recorded before the xr-recording branch hid the HUD for every hold, so
+    the stock icons and bits of "Ready" float above the stage. In the top
+    band they're the small, roundish or tiny blobs; the stage's platforms
+    there are wide and thin, and lasers and hands join larger shapes."""
+    w, h = im.width, min(im.height, HUD_BAND)
+    px = im.load()
+    fg = bytearray(w * h)
+    for y in range(h):
+        for x in range(w):
+            r, g, b = px[x, y]
+            fg[y * w + x] = g - max(r, b) < 190  # coverage over about 0.25
+    seen = bytearray(w * h)
+    for start in range(w * h):
+        if not fg[start] or seen[start]:
+            continue
+        seen[start] = 1
+        stack, blob = [start], []
+        while stack:
+            i = stack.pop()
+            blob.append(i)
+            x, y = i % w, i // w
+            for j in (i - 1 if x else -1, i + 1 if x < w - 1 else -1, i - w, i + w):
+                if 0 <= j < w * h and fg[j] and not seen[j]:
+                    seen[j] = 1
+                    stack.append(j)
+        xs = [i % w for i in blob]
+        ys = [i // w for i in blob]
+        bw, bh = max(xs) - min(xs) + 1, max(ys) - min(ys) + 1
+        if max(ys) >= h - 1:
+            continue  # runs on below the band: part of the stage or a hand
+        if len(blob) < 60 or (bw <= 80 and bh <= 80 and bh >= 0.45 * bw):
+            for i in blob:
+                px[i % w, i // w] = (0, 255, 0)
+    return im
+
+
+def keyed_frames(clipset, name, w, h):
     """The clip's frames (1x pixels), keyed and over the grid backdrop.
 
     The take is lit against pure green (0, 255, 0) and nothing in it is
     green-dominant, so a pixel's coverage is a = 1 - (g - max(r, b)) / 255,
     and over a backdrop B it becomes (r, min(g, max(r, b)), b) + (1 - a) B.
     """
-    src = os.path.join(HERE, "footage", f"hands-{name}.mp4")
+    src = os.path.join(HERE, "footage", f"{clipset}-{name}.mp4")
     with tempfile.TemporaryDirectory() as tmp:
         subprocess.run(["ffmpeg", "-v", "error", "-i", src, "-vf", f"fps={CLIP_FPS}",
                         os.path.join(tmp, "f%03d.png")], check=True)
@@ -297,6 +339,8 @@ def keyed_frames(name, w, h):
         frames = []
         for f in files:
             im = Image.open(os.path.join(tmp, f)).convert("RGB")
+            if clipset == "hands":
+                im = strip_hud(im)
             # Fill the picture, cropping the take's longer side.
             k = max(w / im.width, h / im.height)
             im = im.resize((round(im.width * k), round(im.height * k)), Image.LANCZOS)
@@ -311,15 +355,15 @@ def keyed_frames(name, w, h):
     return frames
 
 
-def clip_atlas(name, w, h):
+def clip_atlas(clipset, name, w, h):
     """Packs the clip's frames into a grid; it plays them forward, then back."""
-    frames = keyed_frames(name, w, h)
+    frames = keyed_frames(clipset, name, w, h)
     cols = math.ceil(math.sqrt(len(frames) * h / w))
     rows = math.ceil(len(frames) / cols)
     atlas = Image.new("RGB", (cols * w, rows * h))
     for i, fr in enumerate(frames):
         atlas.paste(fr, ((i % cols) * w, (i // cols) * h))
-    path = os.path.join(OUT, f"place-clip-{name}.jpg")
+    path = os.path.join(OUT, f"place-clip-{clipset}-{name}.jpg")
     atlas.save(path, quality=88, optimize=True)
     print(f"{path}: {len(frames)} frames of {w}x{h}, {cols}x{rows}")
     return frames[0], len(frames), cols
@@ -346,12 +390,12 @@ def board(hands, firsts=None):
 
     def still(name, fallback):
         # The hand cards show their clip's first frame until it plays.
-        if hands and firsts:
+        if firsts and name in firsts:
             return lambda w, h: firsts[name].resize((w, h), Image.LANCZOS).convert("RGBA")
         return fallback
 
     grab = ["Point at the stage, pinch,"] if hands else ["Point, hold ", ("btn", "GRIP")]
-    both = ["Pinch with both hands"] if hands else ["Hold ", ("btn", "GRIP"), " on both"]
+    both = ["Pinch with both hands"] if hands else ["Hold ", ("btn", "GRIP"), "on both"]
     cards = [
         ("MOVE", still("move", picture_move), [grab, ["and drag, near or far."]]),
         ("TURN", still("turn", picture_turn), [both, ["and twist."]]),
@@ -395,19 +439,24 @@ if __name__ == "__main__":
     os.makedirs(OUT, exist_ok=True)
     pw, ph = picture_size()
     w1, h1 = pw // SS, ph // SS  # clip frames: the picture's size on the saved card
-    firsts, index = {}, []
-    for name in CLIPS:
-        first, frames, cols = clip_atlas(name, w1, h1)
-        firsts[name] = first
-        index.append((name, frames, cols))
-    save(board(False)[0], "place-cards.png")
-    hand_board, rects = board(True, firsts)
-    save(hand_board, "place-cards-hands.png")
-    save(legend(False), "place-legend.png")
-    save(legend(True), "place-legend-hands.png")
-    # name frames cols frame_w frame_h fps x y w h (the picture on the hand
-    # cards, 1x pixels); played forward, then back.
+    lines = []
+    for clipset, hands, cards, legend_name in (("controllers", False, "place-cards.png", "place-legend.png"),
+                                               ("hands", True, "place-cards-hands.png", "place-legend-hands.png")):
+        firsts, index = {}, []
+        for name in CLIPS:
+            if not os.path.exists(os.path.join(HERE, "footage", f"{clipset}-{name}.mp4")):
+                continue  # a still instead
+            first, frames, cols = clip_atlas(clipset, name, w1, h1)
+            firsts[name] = first
+            index.append((name, frames, cols))
+        img, rects = board(hands, firsts)
+        save(img, cards)
+        save(legend(hands), legend_name)
+        for name, frames, cols in index:
+            x, y, w, h = rects[CLIPS.index(name)]
+            lines.append(f"{clipset} {name} {frames} {cols} {w1} {h1} {CLIP_FPS} {x // SS} {y // SS} {w // SS} {h // SS}")
+    # set name frames cols frame_w frame_h fps x y w h (the picture on its
+    # set's cards, 1x pixels); played forward, then back.
     with open(os.path.join(OUT, "place-clips.txt"), "w") as f:
-        for (name, frames, cols), (x, y, w, h) in zip(index, rects):
-            f.write(f"{name} {frames} {cols} {w1} {h1} {CLIP_FPS} {x // SS} {y // SS} {w // SS} {h // SS}\n")
-    print(open(os.path.join(OUT, "place-clips.txt")).read(), end="")
+        f.write("\n".join(lines) + "\n")
+    print("\n".join(lines))

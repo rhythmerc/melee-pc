@@ -268,15 +268,16 @@ struct PlacingImage {
 std::mutex g_placingMutex;
 // The cards and the legend for Touch controllers, then for tracked hands.
 std::array<PlacingImage, 4> g_placingImages;
-// Looping clips shown over the hand cards' pictures
-// (aurora_xr_set_placing_clip): a grid of frames, played forward then back.
+// Looping clips shown over the cards' pictures (aurora_xr_set_placing_clip):
+// a grid of frames, played forward then back. 0-2 on the controllers'
+// cards, 3-5 on the hands'.
 struct PlacingClip {
   PlacingImage atlas;
   int frames = 0, cols = 0, frameW = 0, frameH = 0;
   float fps = 12.f;
-  int x = 0, y = 0, w = 0, h = 0; // on the hand cards, in their pixels
+  int x = 0, y = 0, w = 0, h = 0; // on its cards, in their pixels
 };
-std::array<PlacingClip, 3> g_placingClips;
+std::array<PlacingClip, 6> g_placingClips;
 
 // Set by the game (aurora_xr_set_passthrough): mixed reality shows the room,
 // full VR doesn't. The XR thread pauses or starts passthrough to match.
@@ -2205,11 +2206,12 @@ void build_placing_layers(PlacingLayers& out, int mode) {
     q.subImage.imageRect = {{0, 0}, {static_cast<int32_t>(img->width), static_cast<int32_t>(img->height)}};
     q.pose = {turn, pos};
     q.size = size;
-    if (which != 0 || img != &g_placingImages[2])
+    if (which != 0)
       continue;
-    // The clips, each over its card's picture, a hair in front of the board.
+    // The clips for these cards, each over its picture, a hair in front.
     const double t = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    for (size_t c = 0; c < g_placingClips.size(); ++c) {
+    const size_t first = img == &g_placingImages[2] ? 3 : 0;
+    for (size_t c = first; c < first + 3; ++c) {
       PlacingClip& clip = g_placingClips[c];
       if (clip.frames <= 0 || !ready(clip.atlas, "clip"))
         continue;

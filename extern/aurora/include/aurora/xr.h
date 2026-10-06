@@ -61,7 +61,8 @@ void aurora_xr_reset_stage(void);
  * RGBA8, copied before returning. Once each, before the first placing. */
 void aurora_xr_set_placing_image(int which, int width, int height, const unsigned char* rgba);
 
-/* A looping clip (0-2) shown over a picture on the hands' cards (image 2):
+/* A looping clip shown over a picture on the cards: 0-2 on the
+ * controllers' (image 0), 3-5 on the hands' (image 2).
  * `rgba` is a width x height atlas of `frames` frameW x frameH frames,
  * `cols` to a row, played at `fps` forward, then back. x, y, w, h: where it
  * goes on the cards, in their pixels. Opaque. Copied; once each. */

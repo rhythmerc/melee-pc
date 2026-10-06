@@ -633,23 +633,25 @@ presentation: it never touches the simulation, the wire, or tick timing.
 In netplay the stage starts at its default placement.
 
 Four cards: Move, Turn, Scale and Ready? (the buttons). There are two
-sets, and the hold shows the one for how you're holding things. For
-tracked hands (a controller put down), each gesture card plays a looping
-clip of ghost hands placing Battlefield, and the legend says PINCH. For
-Touch controllers, the cards show stills with drawn lasers and arrows,
-and the legend says GRIP.
+sets, and the hold shows the one for how you're holding things: tracked
+hands (a controller put down; the legend says PINCH) or Touch controllers
+(the legend says GRIP). Each set's gesture cards play looping clips of
+ghost hands, or ghost controllers, placing Battlefield.
 
 `tools/xr_cards/make_cards.py` draws them all in Melee's menu style into
-`resources/xr/`. The controller stills come from desktop captures in
-`tools/xr_cards/shots/` (`AURORA_XR_DUMP`, left eye). The hand clips are
-cut from a headset recording made on the `xr-recording` branch, which
-adds a chroma-green backdrop and ghost hands
-(`AURORA_XR_CHROMA=0,255,0`, `AURORA_XR_GHOST_HANDS=1`,
+`resources/xr/`. The clips are cut from headset recordings made on the `xr-recording`
+branch, which adds a chroma-green backdrop and ghost hands and
+controllers (`AURORA_XR_CHROMA=0,255,0`, `AURORA_XR_GHOST_HANDS=1`,
 `AURORA_XR_PLACE_PICTURES=0` in `melee-env.txt`). Trimmed and cropped,
-they're kept in `tools/xr_cards/footage/hands-<gesture>.mp4`. The script
-keys out the green, composites each clip over the cards' grid, and packs
-its frames into `place-clip-<gesture>.jpg`. `place-clips.txt` gives each
-clip's frame layout, its rate, and where it sits on the hand cards. The
+they're kept in `tools/xr_cards/footage/<set>-<gesture>.mp4`, where the
+set is `hands` or `controllers`. The script keys out the green (in the
+hand takes it first paints out the HUD's stock icons and "Ready"
+leftovers, which were recorded before that branch hid the HUD),
+composites each clip over the cards' grid, and packs its frames into
+`place-clip-<set>-<gesture>.jpg`. `place-clips.txt` gives each clip's
+frame layout, its rate, and where it sits on its set's cards. The Ready
+card's still comes from a desktop capture in `tools/xr_cards/shots/`
+(`AURORA_XR_DUMP`, left eye). The
 headset plays each clip forward and then back, so a clip needs to show
 only one direction of a gesture. Rerun the script after changing any of
 these.
