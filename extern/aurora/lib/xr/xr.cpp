@@ -889,13 +889,11 @@ bool create_input() {
                                  {B.grab[0], "/user/hand/left/input/squeeze/value"},
                                  {B.grab[1], "/user/hand/right/input/squeeze/value"},
                              });
-  // Minimal fallback for runtimes and simulators without Touch controllers
-  // (Monado's keyboard/mouse controllers): select is A, menu is Start.
+  // Pointing and grabbing only, no pad buttons: the Quest reports bare
+  // hands as this profile, select being a pinch, and a pinch must grab,
+  // not press A or B. (Monado's keyboard/mouse controllers come through it
+  // too; the desktop keyboard plays the pad there.)
   suggest("/interaction_profiles/khr/simple_controller", {
-                                                             {B.btnA, "/user/hand/right/input/select/click"},
-                                                             {B.btnB, "/user/hand/left/input/select/click"},
-                                                             {B.btnStart, "/user/hand/left/input/menu/click"},
-                                                             {B.btnStart, "/user/hand/right/input/menu/click"},
                                                              {B.aim[0], "/user/hand/left/input/aim/pose"},
                                                              {B.aim[1], "/user/hand/right/input/aim/pose"},
                                                              {B.grab[0], "/user/hand/left/input/select/click"},
