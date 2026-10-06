@@ -17,11 +17,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* PNG only, and private to this file: thp_jpeg.cpp has its own JPEG-only
- * copy. */
+/* PNG (the cards) and JPEG (the clips), private to this file:
+ * thp_jpeg.cpp has its own JPEG-only copy. */
 #define STB_IMAGE_STATIC
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
+#define STBI_ONLY_JPEG
 #define STBI_NO_STDIO
 #include "pc/stb_image.h"
 
@@ -53,32 +54,82 @@ static bool enabled(void) {
     return v == NULL || *v != '0';
 }
 
-/* resources/xr/<name>: next to the game, or in the APK's assets. */
-static void load_image(int which, const char* name) {
+/* resources/xr/<name>: next to the game, or in the APK's assets. SDL_free
+ * it; NULL (logged) when it isn't there. */
+static void* load_file(const char* name, size_t* size) {
     char path[512];
     snprintf(path, sizeof path, "resources/xr/%s", name);
-    size_t size = 0;
-    void* data = SDL_LoadFile(path, &size);
+    void* data = SDL_LoadFile(path, size);
     if (data == NULL) {
         const char* base = SDL_GetBasePath();
         if (base != NULL) {
             snprintf(path, sizeof path, "%sresources/xr/%s", base, name);
-            data = SDL_LoadFile(path, &size);
+            data = SDL_LoadFile(path, size);
         }
     }
     if (data == NULL) {
         pc_log_line("xr: placing picture %s not found", name);
-        return;
     }
-    int w = 0, h = 0, n = 0;
-    unsigned char* rgba = stbi_load_from_memory(data, (int)size, &w, &h, &n, 4);
+    return data;
+}
+
+/* RGBA8; stbi_image_free it. */
+static unsigned char* load_rgba(const char* name, int* w, int* h) {
+    size_t size = 0;
+    void* data = load_file(name, &size);
+    if (data == NULL) {
+        return NULL;
+    }
+    int n = 0;
+    unsigned char* rgba = stbi_load_from_memory(data, (int)size, w, h, &n, 4);
     SDL_free(data);
     if (rgba == NULL) {
         pc_log_line("xr: placing picture %s unreadable", name);
+    }
+    return rgba;
+}
+
+static void load_image(int which, const char* name) {
+    int w = 0, h = 0;
+    unsigned char* rgba = load_rgba(name, &w, &h);
+    if (rgba != NULL) {
+        aurora_xr_set_placing_image(which, w, h, rgba);
+        stbi_image_free(rgba);
+    }
+}
+
+/* place-clips.txt: one clip a line, "name frames cols frame_w frame_h fps
+ * x y w h" (tools/xr_cards/make_cards.py); its atlas is
+ * place-clip-<name>.jpg. */
+static void load_clips(void) {
+    size_t size = 0;
+    char* text = load_file("place-clips.txt", &size);
+    if (text == NULL) {
         return;
     }
-    aurora_xr_set_placing_image(which, w, h, rgba);
-    stbi_image_free(rgba);
+    char* copy = malloc(size + 1);
+    memcpy(copy, text, size);
+    copy[size] = '\0';
+    SDL_free(text);
+    int which = 0;
+    for (char* line = strtok(copy, "\n"); line != NULL && which < 3; line = strtok(NULL, "\n")) {
+        char name[32];
+        int frames, cols, fw, fh, x, y, w, h;
+        float fps;
+        if (sscanf(line, "%31s %d %d %d %d %f %d %d %d %d", name, &frames, &cols, &fw, &fh, &fps, &x, &y, &w, &h) != 10) {
+            continue;
+        }
+        char file[64];
+        snprintf(file, sizeof file, "place-clip-%s.jpg", name);
+        int aw = 0, ah = 0;
+        unsigned char* rgba = load_rgba(file, &aw, &ah);
+        if (rgba != NULL) {
+            aurora_xr_set_placing_clip(which, aw, ah, rgba, frames, cols, fw, fh, fps, x, y, w, h);
+            stbi_image_free(rgba);
+        }
+        which++;
+    }
+    free(copy);
 }
 
 /* The buttons held on any connected port in the newest queued pad sample. */
@@ -129,6 +180,9 @@ bool pc_xr_place_hold(void) {
             loaded = true;
             load_image(0, "place-cards.png");
             load_image(1, "place-legend.png");
+            load_image(2, "place-cards-hands.png");
+            load_image(3, "place-legend-hands.png");
+            load_clips();
         }
         s_holding = grkind;
         s_cards = !s_cards_seen;

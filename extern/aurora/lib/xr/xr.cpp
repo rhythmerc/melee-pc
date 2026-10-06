@@ -266,7 +266,17 @@ struct PlacingImage {
   XrSwapchain swapchain = XR_NULL_HANDLE;
 };
 std::mutex g_placingMutex;
-std::array<PlacingImage, 2> g_placingImages; // the cards, the legend
+// The cards and the legend for Touch controllers, then for tracked hands.
+std::array<PlacingImage, 4> g_placingImages;
+// Looping clips shown over the hand cards' pictures
+// (aurora_xr_set_placing_clip): a grid of frames, played forward then back.
+struct PlacingClip {
+  PlacingImage atlas;
+  int frames = 0, cols = 0, frameW = 0, frameH = 0;
+  float fps = 12.f;
+  int x = 0, y = 0, w = 0, h = 0; // on the hand cards, in their pixels
+};
+std::array<PlacingClip, 3> g_placingClips;
 
 // Set by the game (aurora_xr_set_passthrough): mixed reality shows the room,
 // full VR doesn't. The XR thread pauses or starts passthrough to match.
@@ -2137,7 +2147,7 @@ bool upload_placing_image(PlacingImage& img) {
   return create_static_swapchain(img.swapchain, img.width, img.height, px);
 }
 
-constexpr size_t kMaxPlacingLayers = 2;
+constexpr size_t kMaxPlacingLayers = 2 + 3; // the cards, the legend, the clips
 
 struct PlacingLayers {
   std::array<XrCompositionLayerQuad, kMaxPlacingLayers> quads;
@@ -2160,29 +2170,64 @@ void build_placing_layers(PlacingLayers& out, int mode) {
   };
   const std::array<Spot, 2> spots{{{"AURORA_XR_PLACE_CARDS", {0.f, 0.42f, -0.3f}, 0.85f},
                                     {"AURORA_XR_PLACE_LEGEND", {0.f, -0.17f, 0.12f}, 0.34f}}};
+  // Hands, if one is tracked (a controller put down), else controllers.
+  const bool hands = G.hands[0].tracked || G.hands[1].tracked;
   std::lock_guard lock{g_placingMutex};
-  for (int which = mode >= 2 ? 0 : 1; which < 2; ++which) {
-    PlacingImage& img = g_placingImages[which];
+  const auto ready = [](PlacingImage& img, const char* what) {
     if (img.width == 0)
-      continue;
+      return false;
     if (!img.swapchain && !upload_placing_image(img)) {
-      Log.warn("Placing picture {} unavailable", which);
+      Log.warn("Placing picture {} unavailable", what);
       img.width = 0;
-      continue;
+      return false;
     }
+    return true;
+  };
+  for (int which = mode >= 2 ? 0 : 1; which < 2; ++which) {
+    // The hands' version when there is one, else the controllers'.
+    PlacingImage* img = &g_placingImages[which];
+    if (hands && g_placingImages[which + 2].width > 0)
+      img = &g_placingImages[which + 2];
+    if (!ready(*img, which == 0 ? "cards" : "legend"))
+      continue;
     Spot spot = spots[which];
     if (const char* v = std::getenv(spot.env))
       std::sscanf(v, "%f,%f,%f,%f", &spot.offset.x, &spot.offset.y, &spot.offset.z, &spot.width);
     const XrVector3f pos = d.pos + spot.offset;
+    const XrQuaternionf turn = facing(pos, {0.f, 0.f, 0.f});
+    const XrExtent2Df size{spot.width, spot.width * static_cast<float>(img->height) / static_cast<float>(img->width)};
     auto& q = out.quads[out.count++];
     q = {XR_TYPE_COMPOSITION_LAYER_QUAD};
     q.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
     q.space = B.space;
     q.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-    q.subImage.swapchain = img.swapchain;
-    q.subImage.imageRect = {{0, 0}, {static_cast<int32_t>(img.width), static_cast<int32_t>(img.height)}};
-    q.pose = {facing(pos, {0.f, 0.f, 0.f}), pos};
-    q.size = {spot.width, spot.width * static_cast<float>(img.height) / static_cast<float>(img.width)};
+    q.subImage.swapchain = img->swapchain;
+    q.subImage.imageRect = {{0, 0}, {static_cast<int32_t>(img->width), static_cast<int32_t>(img->height)}};
+    q.pose = {turn, pos};
+    q.size = size;
+    if (which != 0 || img != &g_placingImages[2])
+      continue;
+    // The clips, each over its card's picture, a hair in front of the board.
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    for (size_t c = 0; c < g_placingClips.size(); ++c) {
+      PlacingClip& clip = g_placingClips[c];
+      if (clip.frames <= 0 || !ready(clip.atlas, "clip"))
+        continue;
+      const int period = std::max(1, 2 * (clip.frames - 1));
+      const int step = static_cast<int>(std::fmod(t * clip.fps, static_cast<double>(period)));
+      const int frame = step < clip.frames ? step : period - step;
+      const float u = (clip.x + clip.w * 0.5f) / static_cast<float>(img->width) - 0.5f;
+      const float v = 0.5f - (clip.y + clip.h * 0.5f) / static_cast<float>(img->height);
+      auto& cq = out.quads[out.count++];
+      cq = q;
+      cq.layerFlags = 0; // opaque
+      cq.subImage.swapchain = clip.atlas.swapchain;
+      cq.subImage.imageRect = {{(frame % clip.cols) * clip.frameW, (frame / clip.cols) * clip.frameH},
+                               {clip.frameW, clip.frameH}};
+      cq.pose.position = pos + qrot(turn, {u * size.width, v * size.height, 0.002f});
+      cq.size = {size.width * clip.w / static_cast<float>(img->width),
+                 size.height * clip.h / static_cast<float>(img->height)};
+    }
   }
 }
 
@@ -2495,6 +2540,11 @@ void teardown() {
   }
   {
     std::lock_guard lock{g_placingMutex};
+    for (auto& clip : g_placingClips) {
+      if (clip.atlas.swapchain)
+        xrDestroySwapchain(clip.atlas.swapchain);
+      clip.atlas.swapchain = XR_NULL_HANDLE;
+    }
     for (auto& img : g_placingImages) {
       if (img.swapchain)
         xrDestroySwapchain(img.swapchain);
@@ -3820,6 +3870,31 @@ extern "C" void aurora_xr_reset_stage(void) {
   g_stageArenas.erase(g_stage);
   g_arena = g_defaultArena;
   g_arena.scale *= g_stageScale;
+}
+
+extern "C" void aurora_xr_set_placing_clip(int which, int width, int height, const unsigned char* rgba, int frames,
+                                           int cols, int frameW, int frameH, float fps, int x, int y, int w, int h) {
+  using namespace aurora::xr;
+  if (which < 0 || which >= static_cast<int>(g_placingClips.size()) || width <= 0 || height <= 0 || !rgba ||
+      frames <= 0 || cols <= 0 || frameW <= 0 || frameH <= 0 || cols * frameW > width ||
+      (frames + cols - 1) / cols * frameH > height)
+    return;
+  std::lock_guard lock{g_placingMutex};
+  PlacingClip& clip = g_placingClips[which];
+  if (clip.atlas.swapchain)
+    return; // already shown; clips are given once
+  clip.atlas.width = static_cast<uint32_t>(width);
+  clip.atlas.height = static_cast<uint32_t>(height);
+  clip.atlas.rgba.assign(rgba, rgba + static_cast<size_t>(width) * height * 4);
+  clip.frames = frames;
+  clip.cols = cols;
+  clip.frameW = frameW;
+  clip.frameH = frameH;
+  clip.fps = fps > 0.f ? fps : 12.f;
+  clip.x = x;
+  clip.y = y;
+  clip.w = w;
+  clip.h = h;
 }
 
 extern "C" void aurora_xr_set_placing_image(int which, int width, int height, const unsigned char* rgba) {

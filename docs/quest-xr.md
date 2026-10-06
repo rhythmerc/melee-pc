@@ -632,10 +632,27 @@ agreed frame, whether it is this build, VR or not, so placement stays local
 presentation: it never touches the simulation, the wire, or tick timing.
 In netplay the stage starts at its default placement.
 
-The pictures are `resources/xr/place-cards.png` and `place-legend.png`,
-drawn in Melee's menu style by `tools/xr_cards/make_cards.py` from
-Battlefield captures in `tools/xr_cards/shots/` (desktop build,
-`AURORA_XR_DUMP`, left eye). Rerun the script after changing them.
+Four cards: Move, Turn, Scale and Ready? (the buttons). There are two
+sets, and the hold shows the one for how you're holding things. For
+tracked hands (a controller put down), each gesture card plays a looping
+clip of ghost hands placing Battlefield, and the legend says PINCH. For
+Touch controllers, the cards show stills with drawn lasers and arrows,
+and the legend says GRIP.
+
+`tools/xr_cards/make_cards.py` draws them all in Melee's menu style into
+`resources/xr/`. The controller stills come from desktop captures in
+`tools/xr_cards/shots/` (`AURORA_XR_DUMP`, left eye). The hand clips are
+cut from a headset recording made on the `xr-recording` branch, which
+adds a chroma-green backdrop and ghost hands
+(`AURORA_XR_CHROMA=0,255,0`, `AURORA_XR_GHOST_HANDS=1`,
+`AURORA_XR_PLACE_PICTURES=0` in `melee-env.txt`). Trimmed and cropped,
+they're kept in `tools/xr_cards/footage/hands-<gesture>.mp4`. The script
+keys out the green, composites each clip over the cards' grid, and packs
+its frames into `place-clip-<gesture>.jpg`. `place-clips.txt` gives each
+clip's frame layout, its rate, and where it sits on the hand cards. The
+headset plays each clip forward and then back, so a clip needs to show
+only one direction of a gesture. Rerun the script after changing any of
+these.
 
 ### Placing the screen
 

@@ -1,17 +1,28 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Draws the XR stage-placing pictures (src/pc/xr_place.c) in Melee's menu
-style: resources/xr/place-cards.png (the how-to cards) and
-resources/xr/place-legend.png (the button legend).
+style, into resources/xr/:
 
-The screenshots in shots/ are left-eye captures of Battlefield from the
-desktop XR build (AURORA_XR_DUMP; premultiplied colour, alpha = coverage).
-Needs Pillow. Run from anywhere: python3 tools/xr_cards/make_cards.py
+  place-cards.png, place-legend.png              for Touch controllers
+  place-cards-hands.png, place-legend-hands.png  for tracked hands
+  place-clip-<name>.jpg, place-clips.txt         the hands' looping clips
+
+The controller cards use stills: shots/ holds left-eye captures of
+Battlefield from the desktop XR build (AURORA_XR_DUMP; premultiplied
+colour, alpha = coverage). The hand cards play clips cut from a headset
+recording made with the xr-recording branch (chroma green backdrop, ghost
+hands): footage/hands-<name>.mp4, trimmed and cropped. Each is keyed,
+composited over the cards' grid backdrop, played forward then back so it
+loops, and packed into a frame atlas; place-clips.txt says where each sits
+on the hand cards. Needs Pillow and ffmpeg.
+Run from anywhere: python3 tools/xr_cards/make_cards.py
 """
 import math
 import os
+import subprocess
+import tempfile
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
@@ -39,6 +50,7 @@ BUTTONS = {
     "Y": ((214, 214, 220), (30, 30, 30), "pill"),
     "START": ((150, 152, 160), WHITE, "pill"),
     "GRIP": ((60, 64, 76), WHITE, "pill"),
+    "PINCH": ((60, 64, 76), WHITE, "pill"),
 }
 
 
@@ -181,19 +193,20 @@ def turn_arrow(img, center, radius, a0, a1, width=12):
 
 
 def card(w, h, title, picture, lines):
-    """One how-to card: gold rim, gold title pill, picture, caption."""
+    """One how-to card: gold rim, gold title pill, picture, caption.
+    Returns it and the picture's rectangle on it (x, y, w, h)."""
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     rim = s(6)
     d.rounded_rectangle((0, 0, w - 1, h - 1), radius=s(26), fill=PANEL + (238,), outline=GOLD, width=rim)
     # The title: a gold pill with black text, like Melee's selected item.
-    pill_h = s(62)
-    d.rounded_rectangle((s(18), s(18), w - s(18), s(18) + pill_h), radius=pill_h // 2, fill=GOLD)
-    d.rounded_rectangle((s(18), s(18) + pill_h - s(10), w - s(18), s(18) + pill_h), radius=s(5), fill=GOLD_DARK)
-    d.rounded_rectangle((s(18), s(18), w - s(18), s(18) + pill_h - s(6)), radius=pill_h // 2, fill=GOLD)
-    italic_text(img, (w // 2 - font(36).getlength(title) // 2, s(18) + pill_h * 0.72), title, 36, (16, 12, 4))
+    pill_h = s(56)
+    d.rounded_rectangle((s(16), s(16), w - s(16), s(16) + pill_h), radius=pill_h // 2, fill=GOLD)
+    d.rounded_rectangle((s(16), s(16) + pill_h - s(10), w - s(16), s(16) + pill_h), radius=s(5), fill=GOLD_DARK)
+    d.rounded_rectangle((s(16), s(16), w - s(16), s(16) + pill_h - s(6)), radius=pill_h // 2, fill=GOLD)
+    italic_text(img, (w // 2 - font(32).getlength(title) // 2, s(16) + pill_h * 0.72), title, 32, (16, 12, 4))
     # The picture.
-    px, py = s(22), s(18) + pill_h + s(16)
+    px, py = s(20), s(16) + pill_h + s(14)
     pw, ph = w - 2 * px, int((w - 2 * px) * 0.7)
     pic = picture(pw, ph)
     mask = Image.new("L", (pw, ph), 0)
@@ -201,11 +214,28 @@ def card(w, h, title, picture, lines):
     img.paste(pic, (px, py), mask)
     d.rounded_rectangle((px, py, px + pw - 1, py + ph - 1), radius=s(14), outline=(70, 70, 80), width=s(2))
     # The caption.
-    y = py + ph + s(44)
+    y = py + ph + s(40)
     for parts in lines:
-        rich_line(d, px + s(6), y, parts, 27)
-        y += s(44)
-    return img
+        rich_line(d, px + s(4), y, parts, 26)
+        y += s(40)
+    return img, (px, py, pw, ph)
+
+
+# The board's layout (supersampled pixels): four cards in a row.
+BOARD_W, BOARD_H = s(1680), s(640)
+BOARD_TOP = s(64)
+CARD_W, CARD_H = s(385), s(526)
+CARD_GAP = s(20)
+CARD_Y = BOARD_TOP + s(30)
+
+
+def card_x(i):
+    return s(40) + i * (CARD_W + CARD_GAP)
+
+
+def picture_size():
+    pw = CARD_W - 2 * s(20)
+    return pw, int(pw * 0.7)
 
 
 def picture_move(w, h):
@@ -220,9 +250,16 @@ def picture_turn(w, h):
     img = shot("turn", w, h)
     laser(img, (int(-w * 0.02), int(h * 1.05)), (int(w * 0.26), int(h * 0.70)))
     laser(img, (int(w * 1.02), int(h * 1.05)), (int(w * 0.80), int(h * 0.74)))
-    arrow(img, (int(w * 0.30), int(h * 0.50)), (int(w * 0.10), int(h * 0.40)))
-    arrow(img, (int(w * 0.72), int(h * 0.52)), (int(w * 0.92), int(h * 0.42)))
-    turn_arrow(img, (w // 2, int(h * 0.22)), int(w * 0.24), 200, 340)
+    turn_arrow(img, (w // 2, int(h * 0.22)), int(w * 0.3), 200, 340)
+    return img
+
+
+def picture_scale(w, h):
+    img = shot("turn", w, h)
+    laser(img, (int(-w * 0.02), int(h * 1.05)), (int(w * 0.26), int(h * 0.70)))
+    laser(img, (int(w * 1.02), int(h * 1.05)), (int(w * 0.80), int(h * 0.74)))
+    arrow(img, (int(w * 0.30), int(h * 0.50)), (int(w * 0.08), int(h * 0.38)))
+    arrow(img, (int(w * 0.72), int(h * 0.52)), (int(w * 0.94), int(h * 0.40)))
     return img
 
 
@@ -230,21 +267,74 @@ def picture_start(w, h):
     img = shot("front", w, h)
     d = ImageDraw.Draw(img)
     # A big A, as the pause screen shows its buttons.
-    r = s(46)
-    cx, cy = int(w * 0.84), int(h * 0.22)
+    r = s(40)
+    cx, cy = int(w * 0.82), int(h * 0.24)
     d.ellipse((cx - r - s(4), cy - r - s(4), cx + r + s(4), cy + r + s(4)), fill=(0, 0, 0))
     d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=BUTTONS["A"][0])
-    d.text((cx, cy), "A", font=font(52), fill=WHITE, anchor="mm")
+    d.text((cx, cy), "A", font=font(46), fill=WHITE, anchor="mm")
     return img
 
 
-def board():
-    W, H = s(1680), s(752)
+# ---------------------------------------------------------------- clips
+
+CLIPS = ["move", "turn", "scale"]  # the hand cards' first three, in order
+CLIP_FPS = 12
+
+
+def keyed_frames(name, w, h):
+    """The clip's frames (1x pixels), keyed and over the grid backdrop.
+
+    The take is lit against pure green (0, 255, 0) and nothing in it is
+    green-dominant, so a pixel's coverage is a = 1 - (g - max(r, b)) / 255,
+    and over a backdrop B it becomes (r, min(g, max(r, b)), b) + (1 - a) B.
+    """
+    src = os.path.join(HERE, "footage", f"hands-{name}.mp4")
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["ffmpeg", "-v", "error", "-i", src, "-vf", f"fps={CLIP_FPS}",
+                        os.path.join(tmp, "f%03d.png")], check=True)
+        files = sorted(f for f in os.listdir(tmp) if f.endswith(".png"))
+        backdrop = grid_backdrop(w * SS, h * SS).resize((w, h), Image.LANCZOS).convert("RGB")
+        frames = []
+        for f in files:
+            im = Image.open(os.path.join(tmp, f)).convert("RGB")
+            # Fill the picture, cropping the take's longer side.
+            k = max(w / im.width, h / im.height)
+            im = im.resize((round(im.width * k), round(im.height * k)), Image.LANCZOS)
+            x0, y0 = (im.width - w) // 2, (im.height - h) // 2
+            im = im.crop((x0, y0, x0 + w, y0 + h))
+            r, g, b = im.split()
+            rb = ImageChops.lighter(r, b)
+            green = ImageChops.subtract(g, rb)  # 255 (1 - a)
+            fg = Image.merge("RGB", (r, ImageChops.darker(g, rb), b))
+            behind = ImageChops.multiply(backdrop, Image.merge("RGB", (green, green, green)))
+            frames.append(ImageChops.add(fg, behind))
+    return frames
+
+
+def clip_atlas(name, w, h):
+    """Packs the clip's frames into a grid; it plays them forward, then back."""
+    frames = keyed_frames(name, w, h)
+    cols = math.ceil(math.sqrt(len(frames) * h / w))
+    rows = math.ceil(len(frames) / cols)
+    atlas = Image.new("RGB", (cols * w, rows * h))
+    for i, fr in enumerate(frames):
+        atlas.paste(fr, ((i % cols) * w, (i // cols) * h))
+    path = os.path.join(OUT, f"place-clip-{name}.jpg")
+    atlas.save(path, quality=88, optimize=True)
+    print(f"{path}: {len(frames)} frames of {w}x{h}, {cols}x{rows}")
+    return frames[0], len(frames), cols
+
+
+# ---------------------------------------------------------------- boards
+
+
+def board(hands, firsts=None):
+    W, H = BOARD_W, BOARD_H
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     # Melee's menu frame: a red-orange rounded border round a dark panel,
     # and a slanted title tab with hatching on its right.
-    top = s(64)
+    top = BOARD_TOP
     d.rounded_rectangle((s(6), top, W - s(6), H - s(6)), radius=s(46), fill=(0, 0, 0, 205), outline=FRAME_RED, width=s(12))
     d.rounded_rectangle((s(22), top + s(16), W - s(22), H - s(22)), radius=s(34), outline=FRAME_DARK, width=s(3))
     tab = [(s(40), top + s(6)), (s(70), s(6)), (s(760), s(6)), (s(730), top + s(6))]
@@ -254,35 +344,35 @@ def board():
         d.polygon([(x, top), (x + s(30), s(14)), (x + s(44), s(14)), (x + s(14), top)], fill=FRAME_RED)
     italic_text(img, (s(104), s(54)), "Place the Stage", 44, SILVER, outline=(40, 40, 46))
 
-    # The cards.
-    cw, ch = s(500), s(612)
-    gap = (W - s(40) * 2 - cw * 3) // 2
-    y = top + s(34)
+    def still(name, fallback):
+        # The hand cards show their clip's first frame until it plays.
+        if hands and firsts:
+            return lambda w, h: firsts[name].resize((w, h), Image.LANCZOS).convert("RGBA")
+        return fallback
+
+    grab = ["Point at the stage, pinch,"] if hands else ["Point, hold ", ("btn", "GRIP")]
+    both = ["Pinch with both hands"] if hands else ["Hold ", ("btn", "GRIP"), " on both"]
     cards = [
-        card(cw, ch, "MOVE", picture_move, [
-            ["Point at the stage and hold ", ("btn", "GRIP")],
-            ["(or pinch), then drag it. Or reach"],
-            ["in and grab it directly."],
-        ]),
-        card(cw, ch, "SCALE & TURN", picture_turn, [
-            ["Grab with both hands. Pull apart"],
-            ["to grow it, push together to"],
-            ["shrink it, and twist to turn it."],
-        ]),
-        card(cw, ch, "READY?", picture_start, [
-            [("btn", "A"), "or ", ("btn", "START"), "begin the fight"],
-            [("btn", "B"), "puts the stage back"],
-            [("btn", "Y"), "hides these tips"],
+        ("MOVE", still("move", picture_move), [grab, ["and drag, near or far."]]),
+        ("TURN", still("turn", picture_turn), [both, ["and twist."]]),
+        ("SCALE", still("scale", picture_scale), [both, ["and pull apart or together."]]),
+        ("READY?", picture_start, [
+            [("btn", "A"), "or ", ("btn", "START"), "Fight!"],
+            [("btn", "B"), "Reset the stage"],
+            [("btn", "Y"), "Hide these tips"],
         ]),
     ]
-    for i, c in enumerate(cards):
-        img.alpha_composite(c, (s(40) + i * (cw + gap), y))
+    rects = []
+    for i, (title, picture, lines) in enumerate(cards):
+        c, (px, py, pw, ph) = card(CARD_W, CARD_H, title, picture, lines)
+        img.alpha_composite(c, (card_x(i), CARD_Y))
+        rects.append((card_x(i) + px, CARD_Y + py, pw, ph))
+    return img, rects
 
-    return img
 
-
-def legend():
-    parts = [("btn", "A"), "Start   ", ("btn", "B"), "Reset   ", ("btn", "Y"), "Tips   ", ("btn", "GRIP"), " Move"]
+def legend(hands):
+    move = ("btn", "PINCH") if hands else ("btn", "GRIP")
+    parts = [("btn", "A"), "Start   ", ("btn", "B"), "Reset   ", ("btn", "Y"), "Tips   ", move, " Move"]
     size = 30
     w = rich_width(parts, size) + s(80)
     h = s(84)
@@ -302,5 +392,22 @@ def save(img, name):
 
 
 if __name__ == "__main__":
-    save(board(), "place-cards.png")
-    save(legend(), "place-legend.png")
+    os.makedirs(OUT, exist_ok=True)
+    pw, ph = picture_size()
+    w1, h1 = pw // SS, ph // SS  # clip frames: the picture's size on the saved card
+    firsts, index = {}, []
+    for name in CLIPS:
+        first, frames, cols = clip_atlas(name, w1, h1)
+        firsts[name] = first
+        index.append((name, frames, cols))
+    save(board(False)[0], "place-cards.png")
+    hand_board, rects = board(True, firsts)
+    save(hand_board, "place-cards-hands.png")
+    save(legend(False), "place-legend.png")
+    save(legend(True), "place-legend-hands.png")
+    # name frames cols frame_w frame_h fps x y w h (the picture on the hand
+    # cards, 1x pixels); played forward, then back.
+    with open(os.path.join(OUT, "place-clips.txt"), "w") as f:
+        for (name, frames, cols), (x, y, w, h) in zip(index, rects):
+            f.write(f"{name} {frames} {cols} {w1} {h1} {CLIP_FPS} {x // SS} {y // SS} {w // SS} {h // SS}\n")
+    print(open(os.path.join(OUT, "place-clips.txt")).read(), end="")
