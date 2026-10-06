@@ -340,6 +340,15 @@ struct Bridge {
   // Pointing and grabbing the arena while a fight is paused.
   std::array<XrAction, 2> aim{}, grab{};
   std::array<XrSpace, 2> aimSpace{};
+  // Uploads to static swapchains still on the GPU: freed once their fence
+  // signals (free_finished_uploads), never waited on mid-session.
+  struct Upload {
+    VkBuffer buf = VK_NULL_HANDLE;
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+  };
+  std::vector<Upload> uploads;
   bool pointerMode = false; // last frame: the grips grab (paused fight, or a laser on the screen) instead of pressing Z
   int reelHand = -1;        // last frame: the controller dragging the screen; its stick pushes and pulls it
   std::array<float, 2> stickY{}; // each controller's raw thumbstick Y (left: control stick, right: C-stick)
@@ -1870,6 +1879,20 @@ void write_dump_layout(const std::array<XrView, 2>& views) {
   }
 }
 
+// Static swapchain uploads whose copies have finished: free what they used.
+// `all`: wait for the rest too (teardown, after the queue is idle).
+void free_finished_uploads(bool all = false) {
+  std::erase_if(B.uploads, [all](const auto& u) {
+    if (!all && vkGetFenceStatus(B.dev, u.fence) != VK_SUCCESS)
+      return false;
+    vkDestroyFence(B.dev, u.fence, nullptr);
+    vkFreeCommandBuffers(B.dev, B.pool, 1, &u.cmd);
+    vkDestroyBuffer(B.dev, u.buf, nullptr);
+    vkFreeMemory(B.dev, u.mem, nullptr);
+    return true;
+  });
+}
+
 // Fill a one-image swapchain once; the runtime keeps showing it.
 bool create_static_swapchain(XrSwapchain& out, uint32_t w, uint32_t h, const std::vector<uint8_t>& rgba) {
   XrSwapchainCreateInfo ci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
@@ -1956,10 +1979,17 @@ bool create_static_swapchain(XrSwapchain& out, uint32_t w, uint32_t h, const std
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cmd;
+    // Not waited on: this queue also carries the stream releases, which
+    // wait on the render worker, which can wait on this thread. The staging
+    // buffer goes once the fence signals.
     VK_TRY(vkQueueSubmit(B.queue, 1, &si, fence));
-    VK_TRY(vkWaitForFences(B.dev, 1, &fence, VK_TRUE, UINT64_MAX));
     XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
     XR_TRY(xrReleaseSwapchainImage(out, &ri));
+    B.uploads.push_back({buf, mem, cmd, fence});
+    buf = VK_NULL_HANDLE;
+    mem = VK_NULL_HANDLE;
+    cmd = VK_NULL_HANDLE;
+    fence = VK_NULL_HANDLE;
     return true;
   };
   const bool ok = upload();
@@ -2204,6 +2234,7 @@ void sync_boundary() {
 bool render_xr_frame() {
   XrFrameState fs{XR_TYPE_FRAME_STATE};
   XR_TRY(xrWaitFrame(B.session, nullptr, &fs));
+  free_finished_uploads();
   if (const int per = g_displayPerGameFrame; per > 0 && ++B.displayFrame % static_cast<uint64_t>(per) == 0) {
     {
       std::lock_guard lock{g_paceMutex};
@@ -2439,6 +2470,8 @@ void teardown() {
   // would need every queue externally synchronized.
   if (B.queue)
     vkQueueWaitIdle(B.queue);
+  if (B.dev)
+    free_finished_uploads(true);
   if (B.dev) {
     for (auto& st : g_streams) {
       for (int i = 0; i < static_cast<int>(st.slots.size()); ++i)
