@@ -42,6 +42,25 @@ export function createDiscCache(file, { blockBytes = 512 * 1024, maxBytes = 32 *
     }
   }
 
+  // Read-ahead for streams. Streamed music reads a little at a time through
+  // consecutive blocks, and every miss suspends the wasm for a whole fetch:
+  // over a network that is a visible hitch every block. A read whose last
+  // block follows the last block of a recent read is treated as a stream,
+  // and the block after it is fetched in the background. Several recent ends
+  // are kept because other file reads interleave with a stream's.
+  const recentEnds = [];
+  function readAhead(last) {
+    const stream = recentEnds.includes(last - 1);
+    if (!recentEnds.includes(last)) {
+      recentEnds.push(last);
+      if (recentEnds.length > 8) recentEnds.shift();
+    }
+    const next = last + 1;
+    if (stream && next * blockBytes < file.size && !blocks.has(next) && !pending.has(next)) {
+      fetchBlock(next).catch(() => {}); // a real read of the block retries
+    }
+  }
+
   function read(offset, size) {
     if (!Number.isSafeInteger(offset) || !Number.isSafeInteger(size) || offset < 0 || size < 0 ||
         offset + size > file.size) {
@@ -75,6 +94,7 @@ export function createDiscCache(file, { blockBytes = 512 * 1024, maxBytes = 32 *
       });
       return result;
     };
+    readAhead(last); // after this read's own fetches, which come first
     return missing ? Promise.all(pieces).then(combine) : combine(pieces);
   }
 
