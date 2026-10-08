@@ -1,0 +1,315 @@
+--- a/platforms/browser/shell.mjs
++++ b/platforms/browser/shell.mjs
+@@ -5,13 +5,265 @@
+ 
+ const $ = (id) => document.getElementById(id);
+ const lines = [];
++// Phone test: every line is timestamped and shipped to the server's /log.
++let outbox = [];
++setInterval(() => {
++  if (!outbox.length) return;
++  const body = outbox.join('\n') + '\n';
++  outbox = [];
++  fetch('./log', { method: 'POST', body }).catch(() => {});
++}, 1000);
+ function log(text) {
++  text = `${performance.now().toFixed(0).padStart(7)} ${text}`;
++  outbox.push(text);
+   lines.push(String(text));
+   $('log').textContent = lines.slice(-80).join('\n');
+   console.log(text);
+ }
+ const status = (text) => { $('status').textContent = text; };
+ 
++// Phone test: ?disc=<url> streams the image from the server by HTTP Range
++// instead of a picked File. The object quacks like the Blob disc-cache wants.
++const discUrl = new URLSearchParams(location.search).get('disc');
++async function remoteDisc(url) {
++  const head = await fetch(url, { method: 'HEAD' });
++  const size = Number(head.headers.get('Content-Length'));
++  if (!head.ok || !size) throw Error(`Cannot reach disc at ${url}`);
++  let fetched = 0;
++  return {
++    size,
++    slice: (start, end) => ({
++      arrayBuffer: async () => {
++        const t0 = performance.now();
++        const r = await fetch(url, { headers: { Range: `bytes=${start}-${end - 1}` } });
++        if (r.status !== 206) throw Error(`Range read got ${r.status}`);
++        const b = await r.arrayBuffer();
++        fetched += b.byteLength;
++        log(`DISC block @${(start / 1048576).toFixed(1)} MiB (${(b.byteLength / 1024) | 0} KiB) took ${(performance.now() - t0).toFixed(1)} ms at frame ${frames.count}`);
++        window.meleeDiscFetched = fetched;
++        return b;
++      },
++    }),
++  };
++}
++
++// Phone test: shadow compiles. With ?shadow=1, every createRenderPipelineAsync
++// is compiled first on a worker's own device; only when that finishes does the
++// page's device get the request, which should then hit the system's compiled
++// Metal shader cache. The engine skips draws whose pipeline is not ready.
++const shadowOn = new URLSearchParams(location.search).get('shadow') === '1';
++const shadow = { adapterOptions: undefined, deviceDescriptor: undefined, worker: null, ready: null,
++  next: 0, waiting: new Map(), stats: { n: 0, workerMs: 0, mainMs: 0, slowMain: 0, errors: 0 } };
++{
++  const sources = new WeakMap(); // GPUShaderModule -> WGSL
++  const bindLayouts = new WeakMap(); // GPUBindGroupLayout -> descriptor
++  const pipeLayouts = new WeakMap(); // GPUPipelineLayout -> [descriptor]
++  const requestAdapter = GPU.prototype.requestAdapter;
++  GPU.prototype.requestAdapter = function (options) {
++    shadow.adapterOptions = options;
++    return requestAdapter.call(this, options);
++  };
++  const requestDevice = GPUAdapter.prototype.requestDevice;
++  GPUAdapter.prototype.requestDevice = function (descriptor) {
++    shadow.deviceDescriptor = descriptor;
++    return requestDevice.call(this, descriptor);
++  };
++  const createShaderModule = GPUDevice.prototype.createShaderModule;
++  GPUDevice.prototype.createShaderModule = function (descriptor) {
++    const module = createShaderModule.call(this, descriptor);
++    sources.set(module, descriptor.code);
++    return module;
++  };
++  const createBindGroupLayout = GPUDevice.prototype.createBindGroupLayout;
++  GPUDevice.prototype.createBindGroupLayout = function (descriptor) {
++    const layout = createBindGroupLayout.call(this, descriptor);
++    bindLayouts.set(layout, { entries: descriptor.entries });
++    return layout;
++  };
++  const createPipelineLayout = GPUDevice.prototype.createPipelineLayout;
++  GPUDevice.prototype.createPipelineLayout = function (descriptor) {
++    const layout = createPipelineLayout.call(this, descriptor);
++    pipeLayouts.set(layout, descriptor.bindGroupLayouts.map((l) => bindLayouts.get(l)));
++    return layout;
++  };
++
++  function startWorker() {
++    shadow.worker = new Worker('./shadow-worker.js');
++    shadow.ready = new Promise((resolve) => {
++      shadow.worker.onmessage = ({ data: m }) => {
++        if (m.type === 'ready') { log('SHADOW worker device ready'); resolve(true); }
++        else if (m.type === 'failed') { log(`SHADOW worker failed: ${m.message}; compiling directly`); resolve(false); }
++        else if (m.type === 'lost') log(`SHADOW worker device lost: ${m.message}`);
++        else if (m.type === 'done') {
++          const finish = shadow.waiting.get(m.id);
++          shadow.waiting.delete(m.id);
++          if (m.error) { shadow.stats.errors++; log(`SHADOW worker compile error: ${m.error}`); }
++          finish?.(m.ms);
++        }
++      };
++    });
++    shadow.worker.postMessage({ type: 'init', adapterOptions: shadow.adapterOptions,
++      deviceDescriptor: shadow.deviceDescriptor });
++  }
++
++  function serialize(d) {
++    const layout = d.layout === 'auto' ? 'auto' : pipeLayouts.get(d.layout);
++    const vertex = sources.get(d.vertex.module);
++    const fragment = d.fragment && sources.get(d.fragment.module);
++    if (!layout || !vertex || (d.fragment && !fragment)) return null;
++    return { ...d, layout, vertex: { ...d.vertex, module: vertex },
++      fragment: d.fragment && { ...d.fragment, module: fragment } };
++  }
++
++  const createAsync = GPUDevice.prototype.createRenderPipelineAsync;
++  GPUDevice.prototype.createRenderPipelineAsync = function (descriptor) {
++    if (!shadowOn) return createAsync.call(this, descriptor);
++    if (!shadow.worker) startWorker();
++    const serial = serialize(descriptor);
++    const device = this;
++    const t0 = performance.now();
++    return shadow.ready.then((ok) => {
++      if (!ok || !serial) return 0;
++      const id = shadow.next++;
++      return new Promise((resolve) => {
++        shadow.waiting.set(id, resolve);
++        try { shadow.worker.postMessage({ type: 'compile', id, descriptor: serial }); }
++        catch (error) { shadow.waiting.delete(id); log(`SHADOW cannot send descriptor: ${error}`); resolve(0); }
++      });
++    }).then((workerMs) => {
++      const t1 = performance.now();
++      return createAsync.call(device, descriptor).then((pipeline) => {
++        const mainMs = performance.now() - t1;
++        const st = shadow.stats;
++        st.n++; st.workerMs += workerMs; st.mainMs += mainMs;
++        if (mainMs > 20) { st.slowMain++; log(`SHADOW slow main compile ${mainMs.toFixed(0)} ms after worker ${workerMs.toFixed(0)} ms`); }
++        if (st.n % 25 === 0) log(`SHADOW ${st.n} pipelines: worker avg ${(st.workerMs / st.n).toFixed(0)} ms, main avg ${(st.mainMs / st.n).toFixed(1)} ms, ${st.slowMain} slow on main, ${st.errors} errors; last took ${(performance.now() - t0).toFixed(0)} ms end to end`);
++        return pipeline;
++      });
++    });
++  };
++}
++
++// Phone test: hold presentation while pipelines compile. With ?hold=1, while
++// any createRenderPipelineAsync is pending, getCurrentTexture returns an
++// off-screen texture, so the canvas gets no new frame and Safari has nothing
++// to present behind the GPU process's compile. The game keeps running.
++const holdPresent = new URLSearchParams(location.search).get('hold') === '1';
++const hold = { pending: 0, config: null, scratch: null, since: 0, frames: 0 };
++{
++  const create = GPUDevice.prototype.createRenderPipelineAsync;
++  GPUDevice.prototype.createRenderPipelineAsync = function (...args) {
++    hold.pending++;
++    const done = () => { hold.pending--; };
++    const promise = create.apply(this, args);
++    promise.then(done, done);
++    return promise;
++  };
++  const configure = GPUCanvasContext.prototype.configure;
++  GPUCanvasContext.prototype.configure = function (config) {
++    hold.config = config;
++    hold.scratch?.destroy();
++    hold.scratch = null;
++    return configure.call(this, config);
++  };
++  const current = GPUCanvasContext.prototype.getCurrentTexture;
++  GPUCanvasContext.prototype.getCurrentTexture = function () {
++    if (holdPresent && hold.pending > 0 && hold.config) {
++      const { width, height } = this.canvas;
++      if (!hold.scratch || hold.scratch.width !== width || hold.scratch.height !== height) {
++        hold.scratch?.destroy();
++        hold.scratch = hold.config.device.createTexture({
++          size: [width, height], format: hold.config.format,
++          usage: hold.config.usage ?? GPUTextureUsage.RENDER_ATTACHMENT,
++        });
++      }
++      if (!hold.since) hold.since = performance.now();
++      hold.frames++;
++      return hold.scratch;
++    }
++    if (hold.since) {
++      log(`HOLD presented nothing for ${hold.frames} frames over ${(performance.now() - hold.since).toFixed(0)} ms`);
++      hold.since = 0;
++      hold.frames = 0;
++    }
++    return current.call(this);
++  };
++}
++
++// Phone test: time every WebGPU call on the main thread and log slow ones,
++// and a 10 ms timer that logs when the main thread was blocked outright.
++// Render pass encoder methods are skipped: per-draw, and pure recording.
++for (const name of ['GPUDevice', 'GPUQueue', 'GPUCanvasContext', 'GPUCommandEncoder', 'GPUBuffer', 'GPUAdapter', 'GPU',
++    'GPURenderPassEncoder', 'GPUComputePassEncoder', 'GPUTexture', 'GPUShaderModule', 'GPURenderPipeline',
++    'GPURenderBundleEncoder', 'GPUQuerySet']) {
++  const proto = window[name]?.prototype;
++  if (!proto) continue;
++  for (const key of Object.getOwnPropertyNames(proto)) {
++    const desc = Object.getOwnPropertyDescriptor(proto, key);
++    if (key === 'constructor' || typeof desc.value !== 'function') continue;
++    const original = desc.value;
++    proto[key] = function (...args) {
++      const t0 = performance.now();
++      const result = original.apply(this, args);
++      const dt = performance.now() - t0;
++      if (dt > 5) log(`SLOWCALL ${name}.${key} ${dt.toFixed(1)} ms at frame ${frames.count}`);
++      return result;
++    };
++  }
++}
++// Every task the engine runs comes through setTimeout (emscripten_sleep) or
++// rAF. A late start with a short run means the thread was busy outside our
++// JS; a long run means the time went inside wasm or a WebGPU call.
++for (const which of ['setTimeout', 'requestAnimationFrame']) {
++  const original = window[which].bind(window);
++  window[which] = (fn, ...rest) => {
++    const queued = performance.now();
++    return original((...a) => {
++      const start = performance.now();
++      try { return fn(...a); } finally {
++        const ran = performance.now() - start;
++        if (ran > 40) log(`LONGTASK ${which} callback ran ${ran.toFixed(0)} ms (started ${(start - queued).toFixed(0)} ms after queueing) at frame ${frames.count}`);
++      }
++    }, ...rest);
++  };
++}
++{
++  let expected = performance.now() + 10;
++  setInterval(() => {
++    const now = performance.now();
++    if (now - expected > 40) log(`BLOCKED main thread ~${(now - expected).toFixed(0)} ms (timer late) at frame ${frames.count}`);
++    expected = now + 10;
++  }, 10);
++}
++
++// Phone test: every wasm suspend and resume goes through Asyncify.handleSleep.
++// WASMRUN: the wasm ran that long (with its synchronous JS calls) between two
++// suspensions. SUSPEND: a suspension took that long to be woken. A yield
++// that waits long means the main thread was busy outside the engine.
++function hookAsyncify() {
++  const A = window.Asyncify;
++  if (!A || A.__pt) return;
++  A.__pt = true;
++  const original = A.handleSleep.bind(A);
++  let resumedAt = 0;
++  A.handleSleep = (startAsync) => {
++    if (A.state !== A.State.Normal) return original(startAsync);
++    const suspendAt = performance.now();
++    const where = (new Error().stack || '').split('\n').map((l) => l.trim().split('@')[0])
++      .filter((n) => n && !/handleSleep|handleAsync|hookAsyncify|^wasm-function|^\d+$/.test(n)).slice(0, 2).join(' < ');
++    if (resumedAt && suspendAt - resumedAt > 40) {
++      log(`WASMRUN ${(suspendAt - resumedAt).toFixed(0)} ms, then suspended in ${where} at frame ${frames.count}`);
++    }
++    return original((wakeUp) => startAsync((value) => {
++      const waited = performance.now() - suspendAt;
++      if (waited > 40) log(`SUSPEND in ${where} waited ${waited.toFixed(0)} ms at frame ${frames.count}`);
++      resumedAt = performance.now();
++      wakeUp(value);
++    }));
++  };
++  log('PT asyncify hook installed');
++}
++
+ // Rolling frame statistics; also read by tests/browser/shell-e2e.mjs.
+ const frames = { count: 0, last: 0, samples: [] };
+ window.meleeFrames = frames;
+@@ -19,14 +271,19 @@
+   const now = performance.now();
+   if (frames.last) {
+     frames.samples.push(now - frames.last);
++    if (now - frames.last > 25) log(`HITCH ${(now - frames.last).toFixed(1)} ms at frame ${frames.count}`);
+     if (frames.samples.length > 7200) frames.samples.shift(); // two minutes
+   }
+   frames.last = now;
++  const heap = window.HEAPU8 ? HEAPU8.buffer.byteLength : (Module.HEAPU8 ? Module.HEAPU8.buffer.byteLength : 0);
++  if (heap && heap !== frames.heap) { if (frames.heap) log(`HEAP grew to ${(heap / 1048576) | 0} MiB at frame ${frames.count}`); frames.heap = heap; }
+   if (++frames.count % 30 === 0 && frames.samples.length > 60) {
+     const recent = frames.samples.slice(-120);
+     const sorted = [...recent].sort((a, b) => a - b);
+     const fps = 1000 * recent.length / recent.reduce((a, b) => a + b, 0);
+-    $('stats').textContent = `${fps.toFixed(1)} fps · p99 ${sorted[Math.floor(sorted.length * 0.99)].toFixed(1)} ms`;
++    if (frames.count % 600 === 0) log(`STATS ${fps.toFixed(1)} fps p99 ${sorted[Math.floor(sorted.length * 0.99)].toFixed(1)} ms disc ${((window.meleeDiscFetched || 0) / 1048576).toFixed(0)} MiB`);
++    $('stats').textContent = `${fps.toFixed(1)} fps · p99 ${sorted[Math.floor(sorted.length * 0.99)].toFixed(1)} ms` +
++      (window.meleeDiscFetched ? ` · disc ${(window.meleeDiscFetched / 1048576).toFixed(0)} MiB` : '');
+   }
+ }
+ 
+@@ -53,14 +310,14 @@
+   onAbort: (reason) => status(`Engine stopped: ${reason}`),
+   onGraphicsPreparation: (done, total) =>
+     status(done === total ? 'Starting…' : `Preparing graphics… ${Math.floor(done * 100 / total)}%`),
+-  onRuntimeInitialized: () => { ready = true; status('Choose a GALE01 disc image (.iso or .gcm).'); updateStart(); },
++  onRuntimeInitialized: () => { hookAsyncify(); ready = true; status('Choose a GALE01 disc image (.iso or .gcm).'); updateStart(); },
+ };
+ 
+ // Not `typeof Module.callMain`: that exists as soon as the script runs, while
+ // the wasm is still compiling, and a disc picked by then started a dead runtime.
+ let ready = false;
+ function updateStart() {
+-  $('start').disabled = !(ready && $('disc').files.length);
++  $('start').disabled = !(ready && (discUrl || $('disc').files.length));
+ }
+ $('disc').addEventListener('change', updateStart);
+ 
+@@ -71,7 +328,7 @@
+     // The engine reports adapter and device failures itself (onAbort); this
+     // only catches the common case early, before anything is mounted.
+     if (!navigator.gpu) throw Error('This browser has no WebGPU. Try a current Chrome or Edge.');
+-    Module.discFile = $('disc').files[0];
++    Module.discFile = discUrl ? await remoteDisc(discUrl) : $('disc').files[0];
+     Module.readDisc = createDiscCache(Module.discFile).read;
+     for (const dir of ['/saves', '/cache']) {
+       Module.FS.mkdirTree(dir);

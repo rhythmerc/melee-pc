@@ -114,5 +114,6 @@ scene they asked for, so holding 60 fps on the wrong screen cannot pass.
 
 Known limitations: SDL's Emscripten audio backend uses the deprecated
 `ScriptProcessorNode`;
-Safari and mobile browsers are untested here; the first launch on a machine
-compiles shaders for a few seconds behind the loading status.
+the first launch on a machine compiles shaders for a few seconds behind the
+loading status. An iPhone (iOS 26 Safari) holds 60 fps but stalls on every
+shader it has not compiled before; see `docs/browser-mobile-findings.md`.
