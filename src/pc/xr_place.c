@@ -26,28 +26,15 @@
 #define STBI_NO_STDIO
 #include "pc/stb_image.h"
 
-/* Stages (grkind) placed this session. */
-static uint8_t s_placed[32];
 /* The stage to offer next pass (-1: none) and the one held (-1: none). */
 static int s_pending = -1;
 static int s_holding = -1;
-/* The how-to cards: showing now, and shown once this session already. */
+/* The how-to cards are showing (they open with every hold; Y toggles). */
 static bool s_cards;
-static bool s_cards_seen;
 /* Buttons down in the newest pad sample last pass, and the ones that went
  * down during the hold (a release only counts for a press seen here). */
 static uint32_t s_prev;
 static uint32_t s_down;
-
-static bool placed(int grkind) {
-    return grkind >= 0 && grkind < 256 && (s_placed[grkind / 8] & (1u << (grkind % 8))) != 0;
-}
-
-static void mark_placed(int grkind) {
-    if (grkind >= 0 && grkind < 256) {
-        s_placed[grkind / 8] |= (uint8_t)(1u << (grkind % 8));
-    }
-}
 
 static bool enabled(void) {
     const char* v = getenv("MELEE_XR_PLACE");
@@ -161,12 +148,11 @@ static uint32_t newest_buttons(void) {
 
 static void end_hold(void) {
     aurora_xr_set_placing(0);
-    mark_placed(s_holding);
     s_holding = -1;
 }
 
 void pc_xr_place_stage_ready(int grkind) {
-    if (s_holding < 0 && !placed(grkind)) {
+    if (s_holding < 0) {
         s_pending = grkind;
     }
 }
@@ -182,7 +168,7 @@ bool pc_xr_place_hold(void) {
          * (no runtime, no session yet) never waits for one. Netplay: the
          * peer starts the match on the agreed frame whatever this side
          * shows, so the stage keeps its default placement. */
-        if (!enabled() || !aurora_xr_active() || pc_net_active() || placed(grkind)) {
+        if (!enabled() || !aurora_xr_active() || pc_net_active()) {
             return false;
         }
         static bool loaded;
@@ -195,8 +181,7 @@ bool pc_xr_place_hold(void) {
             load_clips();
         }
         s_holding = grkind;
-        s_cards = !s_cards_seen;
-        s_cards_seen = true;
+        s_cards = true;
         s_prev = newest_buttons(); /* held coming in: not a press */
         s_down = 0;
         aurora_xr_set_placing(s_cards ? 2 : 1);

@@ -1,5 +1,9 @@
 #include "ground.h"
 
+#ifdef TARGET_PC
+#include "pc/xr_scene.h"
+#endif
+
 #include <Runtime/platform.h>
 
 #include <math.h>
@@ -464,6 +468,9 @@ void Ground_801C0754(StageIdPair* pair)
     s32 arg3;
     Ground_801BFFB0();
     stage_info.grkind = pair->grkind;
+#ifdef TARGET_PC
+    pc_xr_stage_load();
+#endif
     stage = stage_datas[pair->grkind];
     arg3 = (pair->stkind == St_Kind_Heal) ? 0 : 1;
     grDatFiles_801C6038(stage->data1, 0, arg3);

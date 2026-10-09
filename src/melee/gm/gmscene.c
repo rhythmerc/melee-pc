@@ -423,8 +423,8 @@ void gm_801A4D34(void (*on_frame)(void), GameSceneInfo* info)
 #endif
 
 #ifdef TARGET_PC
-        /* XR: a stage's first fight of the session waits here, drawn but
-         * not ticked, while the player places it (src/pc/xr_place.h). */
+        /* XR: every fight waits here before it starts, drawn but
+         * not ticked, while the player places the stage (src/pc/xr_place.h). */
         if (pc_xr_place_hold()) {
             pad_queue_count = 0;
         }

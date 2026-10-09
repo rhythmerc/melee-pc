@@ -32,6 +32,11 @@ void pc_xr_stage_part_end(bool hidden);
  * MELEE_XR_MODE is not "vr". A full-VR mode renders the stage whole; only
  * per-stage centering applies there. */
 bool pc_xr_mixed_reality(void);
+/* A stage is loading for a fight (gr/ground.c): once its floors are in, it
+ * is offered for placing again (xr_place.h), the same stage or not. */
+void pc_xr_stage_load(void);
+/* An XR session is presenting the game, in either mode. */
+bool pc_xr_presenting(void);
 /* Switches between mixed reality and full VR (passthrough off, stage whole);
  * the gamepad's Select does this in XR. False, doing nothing, when no XR
  * session is presenting. */
@@ -54,7 +59,20 @@ void pc_xr_jobj_end(int changed);
  * particles out of the 3D view under mixed reality. `pos` is its position. */
 bool pc_xr_particle_begin(int bank, int id, const float pos[3]);
 void pc_xr_particle_end(bool hidden);
+/* Around the draw of a fighter the flat camera can't see (ft/ftdrawcommon.c),
+ * which the game skips: true when the 3D view draws it anyway, pulsing
+ * translucent; then call pc_xr_fighter_offscreen_end after it. Its logic
+ * and the off-screen damage are the game's own (MELEE_XR_OFFSCREEN=0: the
+ * game's way). */
+bool pc_xr_fighter_offscreen_begin(void);
+void pc_xr_fighter_offscreen_end(void);
+/* Around the magnifier bubble's draw (if/ifmagnify.c): true when it is kept
+ * to the flat frame, off the XR HUD; then call pc_xr_magnify_end. */
+bool pc_xr_magnify_begin(void);
+void pc_xr_magnify_end(void);
 #else
+static inline bool pc_xr_presenting(void) { return false; }
+static inline void pc_xr_stage_load(void) {}
 static inline void pc_xr_world_camera(const float view[3][4]) { (void)view; }
 static inline void pc_xr_hud_camera(void) {}
 static inline void pc_xr_mono_camera(void) {}

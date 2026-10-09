@@ -2171,6 +2171,34 @@ void build_placing_layers(PlacingLayers& out, int mode) {
   };
   const std::array<Spot, 2> spots{{{"AURORA_XR_PLACE_CARDS", {0.f, 0.42f, -0.3f}, 0.85f},
                                     {"AURORA_XR_PLACE_LEGEND", {0.f, -0.17f, 0.12f}, 0.34f}}};
+  // Soft head lock, sideways only: the layout turns about where the head
+  // stood when the hold began, lagging behind once the head has turned past
+  // a dead zone, and settles when it catches up. Height and pitch stay put.
+  static auto last = std::chrono::steady_clock::time_point{};
+  static float yaw = 0.f;
+  static bool following = false;
+  static XrVector3f pivot{};
+  const auto now = std::chrono::steady_clock::now();
+  const float dt = std::chrono::duration<float>(now - last).count();
+  last = now;
+  const XrVector3f fwd = qrot(B.headOrientation, {0.f, 0.f, -1.f});
+  const float headYaw = std::atan2(-fwd.x, -fwd.z); // rot_y's sense
+  if (dt > 0.25f) { // a new hold: start where the head looks
+    yaw = headYaw;
+    following = false;
+    pivot = {B.head.x, 0.f, B.head.z};
+  } else {
+    constexpr float kPi = 3.14159265f;
+    float diff = headYaw - yaw;
+    diff -= 2.f * kPi * std::floor((diff + kPi) / (2.f * kPi));
+    if (std::fabs(diff) > 20.f * kPi / 180.f)
+      following = true;
+    if (following) {
+      yaw += diff * std::min(1.f, dt * 4.f);
+      if (std::fabs(diff) < 1.f * kPi / 180.f)
+        following = false;
+    }
+  }
   // Hands, if one is tracked (a controller put down), else controllers.
   const bool hands = G.hands[0].tracked || G.hands[1].tracked;
   std::lock_guard lock{g_placingMutex};
@@ -2194,8 +2222,8 @@ void build_placing_layers(PlacingLayers& out, int mode) {
     Spot spot = spots[which];
     if (const char* v = std::getenv(spot.env))
       std::sscanf(v, "%f,%f,%f,%f", &spot.offset.x, &spot.offset.y, &spot.offset.z, &spot.width);
-    const XrVector3f pos = d.pos + spot.offset;
-    const XrQuaternionf turn = facing(pos, {0.f, 0.f, 0.f});
+    const XrVector3f pos = pivot + rot_y(d.pos + spot.offset, yaw);
+    const XrQuaternionf turn = facing(pos, pivot);
     const XrExtent2Df size{spot.width, spot.width * static_cast<float>(img->height) / static_cast<float>(img->width)};
     auto& q = out.quads[out.count++];
     q = {XR_TYPE_COMPOSITION_LAYER_QUAD};
@@ -2375,17 +2403,27 @@ bool render_xr_frame() {
     proj.space = B.space;
     proj.viewCount = 2;
     proj.views = projViews.data();
-    layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj);
-    // The how-to cards take the HUD's place above the arena.
-    if (hud.haveImage && now - hud.lastRelease < std::chrono::milliseconds(250) && placing < 2) {
+    // No HUD while the stage is held for placing, cards open or not.
+    const bool showHud = hud.haveImage && now - hud.lastRelease < std::chrono::milliseconds(250) && placing == 0;
+    if (showHud) {
       hudQuad.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
       hudQuad.space = B.space;
       hudQuad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
       hudQuad.subImage.swapchain = hud.swapchain;
       hudQuad.subImage.imageRect = {{0, 0}, {static_cast<int32_t>(hud.width), static_cast<int32_t>(hud.height)}};
       hud_placement(hudQuad.pose, hudQuad.size);
-      layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&hudQuad);
     }
+    // Mixed reality: the HUD goes under the 3D view, which is see-through
+    // wherever nothing drew, so fighters passing over it hide it. Nothing
+    // of the stage reaches it (it sits above the highest floor). Full VR
+    // draws the whole stage and its sky, so the HUD stays on top there.
+    // AURORA_XR_HUD_ON_TOP=1 keeps it on top in mixed reality too.
+    const bool hudUnder = g_passthroughWanted && !env_flag("AURORA_XR_HUD_ON_TOP", false);
+    if (showHud && hudUnder)
+      layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&hudQuad);
+    layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj);
+    if (showHud && !hudUnder)
+      layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&hudQuad);
     if (placing > 0) {
       build_placing_layers(placingLayers, placing);
       for (uint32_t i = 0; i < placingLayers.count; ++i)

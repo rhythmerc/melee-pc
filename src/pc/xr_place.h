@@ -1,11 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* Placing a stage before its first fight of the session (XR build).
+/* Placing the stage before every fight (XR build).
  *
- * The first time a stage's fight starts in a session, the game is held on
- * that first frame, still drawing, while the player moves, turns and scales
- * the stage with their hands; A or Start begins the fight, B puts the stage
- * back where it started, Y shows or hides the how-to cards (shown on the
- * session's first hold).
+ * As a fight starts, the game is held on its first frame, still drawing,
+ * while the player moves, turns and scales the stage with their hands; A or
+ * Start begins the fight, B puts the stage back at its default placement, Y
+ * shows or hides the how-to cards (open at the start of every hold).
  *
  * The hold runs no simulation ticks at all: no game state changes, nothing
  * is consumed and no frame passes, so a replay or a recording can't tell.
@@ -28,7 +27,7 @@ extern "C" {
  * run no ticks this pass, only draw; the pads that came in are dropped. */
 bool pc_xr_place_hold(void);
 /* A stage's fight geometry is ready in the 3D view (xr_scene.c): offer the
- * hold for it next pass unless it was placed already this session. */
+ * hold for it next pass. */
 void pc_xr_place_stage_ready(int grkind);
 #else
 static inline bool pc_xr_place_hold(void) { return false; }

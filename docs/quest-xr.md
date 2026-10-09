@@ -56,8 +56,21 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     holograms.
 - **HUD.** HUD draws are replayed onto their own plane above the arena.
   Bright text and icons are opaque, and black areas are see-through.
-  - **Height per stage.** A quad layer draws over the 3D view whatever its
-    depth, so the HUD's bottom edge, where the damage meters are, sits about
+  - **Under the fighters.** In mixed reality the HUD's quad layer goes
+    under the 3D view, which is see-through wherever nothing drew, so
+    fighters, items and effects passing over the HUD hide it. That works
+    because no stage scenery reaches the HUD's height (below). Full VR
+    draws the whole stage and its sky, so there the HUD stays on top.
+    `AURORA_XR_HUD_ON_TOP=1` keeps it on top in mixed reality too.
+  - **Off-screen fighters.** Past the flat camera's view, the game stops
+    drawing a fighter and shows it in a magnifier bubble at the screen's
+    edge. The 3D view sees the whole arena, so in XR the fighter keeps
+    drawing, pulsing between 30% and 85% opacity (dithered, 1.5 times a
+    second), and the bubble stays out of the HUD plane (flat frame only).
+    The game's own test still runs and sets its flags, and the bubble's
+    logic is untouched, so the off-screen damage tick is the same.
+    `MELEE_XR_OFFSCREEN=0` keeps the game's behavior.
+  - **Height per stage.** The HUD's bottom edge, where the damage meters are, sits about
     a fighter's height (`AURORA_XR_HUD_CLEARANCE`, 40 units) above the
     stage's highest floor. That's taken from the collision lines inside the
     blast zones on the fight's first frame (`aurora_xr_set_stage_top`).
@@ -631,17 +644,23 @@ stage N placed at x,y,z, yaw, scale`, the scale without the stage's own),
 which is handy for tuning every stage's default with `AURORA_XR_ARENA_POS`
 and `AURORA_XR_ARENA_SCALE` in `melee-env.txt`.
 
-#### Before the first fight
+#### Before every fight
 
-The first time a stage's fight starts in a session, the game waits on that
-first frame so you can place the stage before "Ready... GO!"
+Every fight in XR starts with the game waiting on its first frame, so you
+can place the stage before "Ready... GO!"
 (`src/pc/xr_place.c`). The hands grab the arena the same way as in a pause.
-A or Start begins the fight, B puts the stage back where it started, and Y
+A or Start begins the fight, B puts the stage back at its default placement, and Y
 shows or hides the how-to cards. The cards float above where the arena
-starts, in the HUD's place; the button legend sits just below its front
-edge. The cards show on the session's first hold, and later holds show
-only the legend. Each stage is held once per session, and only when the
-headset is already presenting as the fight opens: a build without XR, or
+starts; the button legend sits just below its front edge. The cards open
+with every hold. The HUD is hidden for the whole hold, cards open or not.
+Cards and legend are softly locked to the head, sideways only: once the
+head turns more than 20° away from them they swing around after it (about
+where the head stood when the hold began) and settle when they catch up;
+their height doesn't follow. The stage starts where you last left it this
+session, so A at once keeps that. Every fight is held, the same stage twice
+in a row included (`pc_xr_stage_load`, from the stage's load in
+`gr/ground.c`), but only when the headset is already presenting as the
+fight opens: a build without XR, or
 an XR build playing on the flat window, never waits (the hook compiles to
 `false` without `AURORA_ENABLE_OPENXR`). `MELEE_XR_PLACE=0` turns the hold
 off.
@@ -944,7 +963,7 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `MELEE_XR_CLIP_LOG` | unset | Log the first 40 stage part begins (stage, part, layer) |
 | `MELEE_XR_PTCL` | unset | Hide more stage particles: `grkind:bank:id,...` (id -1 is the whole bank) |
 | `MELEE_XR_PTCL_LOG` | unset | Log each stage particle drawn once (bank, id, position) |
-| `MELEE_XR_PLACE` | 1 | `0`: never hold a stage's first fight for placing it |
+| `MELEE_XR_PLACE` | 1 | `0`: never hold a fight for placing its stage |
 | `AURORA_XR_PLACE_CARDS` | `0,0.42,-0.3,0.85` | How-to cards: `dx,dy,dz,width` (meters) from where the arena starts |
 | `AURORA_XR_PLACE_LEGEND` | `0,-0.17,0.12,0.34` | Button legend while placing, the same way |
 | `AURORA_XR_DUMP_AFTER` | 300 | Stream frames to wait before `AURORA_XR_DUMP` writes |

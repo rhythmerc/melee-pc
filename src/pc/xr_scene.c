@@ -724,6 +724,8 @@ void pc_xr_poll_control(void) {
  * file isn't built to read on every platform (clang on Android). */
 static int s_top_grkind = -1;
 
+void pc_xr_stage_load(void) { s_top_grkind = -1; }
+
 static float stage_top(void) {
     float top, min_x, max_x;
     if (!mpLib_FloorExtent(Stage_GetBlastZoneLeftOffset(), Stage_GetBlastZoneRightOffset(),
@@ -763,7 +765,7 @@ bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {
         s_top_grkind = -1;
     }
     if (grkind != s_top_grkind) {
-        /* Until the stage's collision is in (then once per stage). */
+        /* Until the stage's collision is in (then once per fight). */
         const float top = stage_top();
         aurora_xr_set_stage_top(top);
         if (!isnan(top)) {
