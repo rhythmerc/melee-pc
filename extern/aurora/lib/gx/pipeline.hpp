@@ -26,6 +26,10 @@ struct DrawData {
   // because the FIFO is processed on a worker thread, so reading a global at
   // render time attributes draws to whatever the game thread did last.
   uint32_t tag;
+  // XR multiview replay only: the triangles drawn in the eyes when a clip
+  // leaves some out (count 0: all of them, as idxRange/indexCount).
+  gfx::Range xrIdxRange{};
+  uint32_t xrIndexCount = 0;
 };
 
 #ifdef __EMSCRIPTEN__

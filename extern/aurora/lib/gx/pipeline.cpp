@@ -148,7 +148,13 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
   if (data.bindGroups.textureBindGroup) {
     pass.SetBindGroup(2, gfx::find_bind_group(data.bindGroups.textureBindGroup));
   }
-  pass.SetIndexBuffer(resources.indexBuffer, wgpu::IndexFormat::Uint16, data.idxRange.offset, data.idxRange.size);
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+  const bool xrCulled = gfx::xr_multiview_replay() && data.xrIndexCount != 0;
+#else
+  constexpr bool xrCulled = false;
+#endif
+  const gfx::Range& idxRange = xrCulled ? data.xrIdxRange : data.idxRange;
+  pass.SetIndexBuffer(resources.indexBuffer, wgpu::IndexFormat::Uint16, idxRange.offset, idxRange.size);
   if (data.posRange.size != 0) {
     pass.SetVertexBuffer(0, resources.storageBuffer, data.posRange.offset, data.posRange.size);
   }
@@ -156,7 +162,9 @@ void render(const DrawData& data, const wgpu::RenderPassEncoder& pass) {
     const wgpu::Color color{0.f, 0.f, 0.f, data.dstAlpha / 255.f};
     pass.SetBlendConstant(&color);
   }
-  if (data.indexCount == 0) {
+  if (xrCulled) {
+    pass.DrawIndexed(data.xrIndexCount, data.instanceCount);
+  } else if (data.indexCount == 0) {
     pass.Draw(data.vtxCount, data.instanceCount);
   } else {
     pass.DrawIndexed(data.indexCount, data.instanceCount);

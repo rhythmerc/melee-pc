@@ -268,6 +268,21 @@ and the investigation behind it are in docs/xr-3d-plan.md.
   pipelines that write clip distances. Only clipped draws use the discarding
   pipeline variant (`RenderTargetLayout::xrSoftClip`), because discard costs
   early depth.
+  - **Per draw, then per triangle.** Each clipped draw is classified on the
+    CPU: wholly inside the solid region, it takes the normal pipeline;
+    wholly past one plane, it's dropped from the eyes. A straddling draw gets
+    its own eye index list without the triangles wholly past one plane (the
+    flat frame keeps them all; straddling draws don't merge). This runs
+    while a part dissolves too. On the Quest the discard cost far more than
+    the pixels: Brinstar's acid runs the length of the cave, 95% of it past
+    the clip, and as long strips it all went through the discarding
+    pipeline. With the acid up the eye pass took 10.0 ms (5.5 unclipped);
+    with the triangles culled, 6.5. With dynamic resolution, 4-CPU Brinstar
+    went from about 1.0 to 1.30 through the acid.
+  - **Sweep, 2026-10-09** (four CPUs, mixed reality, 60 s each): Kongo
+    Jungle, Jungle Japes, Great Bay, Yoshi's Story, Fountain of Dreams, Mute
+    City, Big Blue, Onett, Mushroom Kingdom I and II and Rainbow Cruise all
+    hold scale 1.30 at 59.6 to 60 game fps, frame GPU 8.3 to 9.3 ms.
 - **Soft clips.** A plane with a fade (`aurora_xr_world_clip_soft`, or a
   `ClipRule` fade above 0) dissolves geometry across a band inside the plane
   with a 4x4 ordered dither instead of cutting it. Passthrough shows through
@@ -511,9 +526,10 @@ practice](https://martinfullerblog.wordpress.com/2023/10/11/dynamic-resolution-s
   never lets more than half of the frame scale with pixels. Before these,
   a first fight on Temple sat at low resolution until those early entries
   faded.
-- **Panic:** two missed swapchain images within a second mark the step
-  dearer than measured and drop a step. A lone miss comes at the same rate
-  at any scale, so it's only counted.
+- **Panic:** two missed swapchain images within a second, with the frame
+  within 2.5 ms of the target, mark the step dearer than measured and drop
+  a step. A lone miss comes at the same rate at any scale, and misses with
+  the GPU well under the target are the CPU's, so those are only counted.
 
 The old controller (one target, a single learned pixel slope that never
 learned) gave Brinstar's resolution away for nothing: its acid adds 0.5 ms,

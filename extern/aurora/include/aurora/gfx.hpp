@@ -8,7 +8,7 @@
 
 namespace aurora::gfx {
 
-inline constexpr size_t InlineDrawPayloadSize = 144; // gx::DrawData with its XR multiview twin pipeline
+inline constexpr size_t InlineDrawPayloadSize = 160; // gx::DrawData with its XR multiview twin pipeline and eye index list
 inline constexpr size_t MaxColorAttachments = 8;
 inline constexpr uint32_t SceneColorAttachmentIndex = 0;
 

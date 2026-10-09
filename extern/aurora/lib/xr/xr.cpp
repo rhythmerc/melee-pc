@@ -3636,10 +3636,11 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
 // 9.6 of 11 ms), so a fixed model either gives resolution away for nothing
 // or overshoots. Down past target + band at once, to the best step that
 // fits; up one step at a time after a dwell, only to a step that fits. A
-// run of missed swapchain images (two within a second) is a panic: the step
-// is marked dearer than measured and the scale drops a step. Single misses
-// come at the same rate at any scale (Brinstar: about one in 13 s), so they
-// are only counted. Images the headset held long (g_stereoLate) are only
+// run of missed swapchain images (two within a second) with the GPU near the
+// target is a panic: the step is marked dearer than measured and the scale
+// drops a step. Single misses come at the same rate at any scale (Brinstar:
+// about one in 13 s), and with the GPU well under the target they are the
+// CPU's, so those are only counted. Images the headset held long (g_stereoLate) are only
 // logged.
 namespace {
 constexpr double kDynresFullSamples = 30;  // samples for full trust in a step
@@ -3761,7 +3762,9 @@ void update_dynamic_resolution(bool missed) {
       int recent = 0;
       for (uint64_t f : dr.recentMisses)
         recent += f != 0 && dr.frameCount - f < 60 ? 1 : 0;
-      panic = recent >= 2;
+      // With the GPU well under the target the misses are the CPU's, and
+      // less resolution can't help (Mushroom Kingdom II at 8.3 ms).
+      panic = recent >= 2 && (dr.emaNs == 0 || dr.emaNs > dr.targetNs - 2.5e6);
       if (!panic)
         ++dr.loneMisses;
     }

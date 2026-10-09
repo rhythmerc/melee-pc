@@ -526,21 +526,31 @@ static gfx::Range push_decoded_vertices(const ShaderConfig& config, const u8* ra
 
 #if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
 enum class XrClipClass : u8 { Inside, Straddle, Outside };
+// Margins (game units) cover float differences from the GPU's transform.
+constexpr float kXrClipEps = 1e-2f;
 
 // Where a clipped world draw lies against the current clip, from its
 // vertices' distances to each plane (linear across a triangle, so the
 // vertices bound every fragment). Inside: past every fade band, drawn
 // solid without discard (keeps early depth). Outside: wholly cut by one
-// plane, dropped from the eyes. Straddle: needs the dithering pipeline.
-static XrClipClass classify_xr_clip(const ShaderConfig& config, const u8* raw, u16 vtxCount) noexcept {
+// plane, dropped from the eyes. Straddle: needs the dithering pipeline. A
+// draw dissolving as a whole (opacity under 1) is never Inside.
+// `outside`, when given (vtxCount entries): each vertex's planes it is past
+// (bit per plane), for culling a straddling draw's triangles; set only when
+// the vertices were read (`*masked`).
+static XrClipClass classify_xr_clip(const ShaderConfig& config, const u8* raw, u16 vtxCount, u8* outside = nullptr,
+                                    bool* masked = nullptr) noexcept {
   static const bool enabled = [] {
     const char* v = std::getenv("AURORA_XR_CLIP_CLASSIFY");
     return v == nullptr || *v != '0';
   }();
+  if (masked != nullptr)
+    *masked = false;
   const auto* clip = gfx::xr_clip_camera();
-  if (!enabled || clip == nullptr || clip->opacity < 1.f || config.lineMode != 0) {
+  if (!enabled || clip == nullptr || config.lineMode != 0) {
     return XrClipClass::Straddle;
   }
+  const bool dissolving = clip->opacity < 1.f;
   const auto& pos = config.attrs[GX_VA_POS];
   const auto& idx = config.attrs[GX_VA_PNMTXIDX];
   if (pos.attrType == GX_NONE || (idx.attrType != GX_NONE && idx.attrType != GX_DIRECT)) {
@@ -555,7 +565,7 @@ static XrClipClass classify_xr_clip(const ShaderConfig& config, const u8* raw, u
     }
   }
   if (planeCount == 0) {
-    return XrClipClass::Inside;
+    return dissolving ? XrClipClass::Straddle : XrClipClass::Inside;
   }
   // Each plane in a position matrix's model space, made when first used.
   float model[MaxPnMtx][gfx::XrMaxClipPlanes][4];
@@ -587,21 +597,25 @@ static XrClipClass classify_xr_clip(const ShaderConfig& config, const u8* raw, u
     float p[3] = {0.f, 0.f, 0.f};
     for (u32 c = 0; c < comps; ++c)
       p[c] = decode_component(src + c * compSize, pos.compType, pos.frac, le);
+    u8 past = 0;
     for (int n = 0; n < planeCount; ++n) {
       const float* q = model[mtx][n];
       const float d = q[0] * p[0] + q[1] * p[1] + q[2] * p[2] + q[3];
       lo[n] = std::min(lo[n], d);
       hi[n] = std::max(hi[n], d);
+      past |= d < -kXrClipEps ? u8(1u << n) : u8(0);
     }
+    if (outside != nullptr)
+      outside[v] = past;
   }
-  // Margins (game units) cover float differences from the GPU's transform.
-  constexpr float eps = 1e-2f;
-  bool inside = true;
+  if (masked != nullptr)
+    *masked = outside != nullptr;
+  bool inside = !dissolving;
   for (int n = 0; n < planeCount; ++n) {
-    if (hi[n] < -eps) {
+    if (hi[n] < -kXrClipEps) {
       return XrClipClass::Outside;
     }
-    inside &= lo[n] > clip->fades[planes[n]] + eps;
+    inside &= lo[n] > clip->fades[planes[n]] + kXrClipEps;
   }
   return inside ? XrClipClass::Inside : XrClipClass::Straddle;
 }
@@ -633,7 +647,14 @@ static gfx::PipelineRef xr_soft_twin(const gfx::RenderTargetLayout& mv) noexcept
 }
 
 // The eye pipeline for a world draw's vertices (0: not drawn in the eyes).
-static gfx::PipelineRef xr_world_pipeline(const u8* raw, u16 vtxCount) noexcept {
+// `cls`, when given: how the draw lies against the clip (Inside without
+// one); `outside`/`masked` as for classify_xr_clip.
+static gfx::PipelineRef xr_world_pipeline(const u8* raw, u16 vtxCount, XrClipClass* clsOut = nullptr,
+                                          u8* outside = nullptr, bool* masked = nullptr) noexcept {
+  if (clsOut != nullptr)
+    *clsOut = XrClipClass::Inside;
+  if (masked != nullptr)
+    *masked = false;
   if (!gfx::xr_recording_world()) {
     return 0;
   }
@@ -643,7 +664,9 @@ static gfx::PipelineRef xr_world_pipeline(const u8* raw, u16 vtxCount) noexcept 
   }
   auto& cache = sDrawCache;
   if (gfx::xr_soft_clip_active()) {
-    const auto cls = classify_xr_clip(cache.config.shaderConfig, raw, vtxCount);
+    const auto cls = classify_xr_clip(cache.config.shaderConfig, raw, vtxCount, outside, masked);
+    if (clsOut != nullptr)
+      *clsOut = cls;
     // AURORA_XR_CLIP_STATS=1: how clipped draws were classed, every 20000.
     static const bool stats = std::getenv("AURORA_XR_CLIP_STATS") != nullptr;
     if (stats) {
@@ -834,10 +857,43 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
   const gfx::Range posRange =
       sc.decodedPos || sc.decodedAll ? push_decoded_vertices(sc, raw, vtxCount, 4) : gfx::Range{};
   gfx::PipelineRef xrPipeline = 0;
+  gfx::Range xrIdxRange{};
+  u32 xrIndexCount = 0;
 #if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
   // Clipped stage parts: only draws that straddle a clip use the dithering
   // variant; the rest keep early depth (no discard) or are dropped.
-  xrPipeline = xr_world_pipeline(raw, vtxCount);
+  {
+    static std::vector<u8> outside;
+    outside.resize(vtxCount);
+    XrClipClass cls;
+    bool masked;
+    xrPipeline = xr_world_pipeline(raw, vtxCount, &cls, outside.data(), &masked);
+    // A straddling draw's triangles wholly past one plane are left out of
+    // the eyes (their own index list; the flat frame keeps every one). On
+    // the Quest the dithering pipeline's discard costs early depth for the
+    // whole draw, so a long strip mostly outside the clip (Brinstar's acid
+    // runs the length of the cave) cost ~5 ms of eye pass.
+    if (xrPipeline != 0 && cls == XrClipClass::Straddle && masked &&
+        (prim == GX_TRIANGLES || prim == GX_TRIANGLESTRIP || prim == GX_TRIANGLEFAN || prim == GX_QUADS)) {
+      static ByteBuffer all;
+      static std::vector<u16> kept;
+      const u32 n = prepare_idx_buffer(all, prim, 0, vtxCount);
+      const u16* tri = reinterpret_cast<const u16*>(all.data());
+      kept.clear();
+      for (u32 i = 0; i + 2 < n; i += 3) {
+        if ((outside[tri[i]] & outside[tri[i + 1]] & outside[tri[i + 2]]) == 0) {
+          kept.insert(kept.end(), {tri[i], tri[i + 1], tri[i + 2]});
+        }
+      }
+      all.clear();
+      if (kept.empty()) {
+        xrPipeline = 0;
+      } else if (kept.size() < n) {
+        xrIdxRange = gfx::push_indices(reinterpret_cast<const u8*>(kept.data()), kept.size() * sizeof(u16), 4);
+        xrIndexCount = static_cast<u32>(kept.size());
+      }
+    }
+  }
 #endif
   gfx::push_draw_command(DrawData{
       .pipeline = cache.pipelineRef,
@@ -856,6 +912,8 @@ static void push_gx_draw(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, gfx::Rang
       .bindGroups = cache.bindGroups,
       .dstAlpha = state.dstAlpha,
       .tag = sMarkerTag,
+      .xrIdxRange = xrIdxRange,
+      .xrIndexCount = xrIndexCount,
   });
 }
 
@@ -903,8 +961,11 @@ static void draw_prim(GXPrimitive prim, GXVtxFmt fmt, u16 vtxCount, ByteReader& 
   // Clipped world draws merge only with draws of their own class (inside,
   // straddling, outside), so a merged draw never needs the dithering
   // pipeline just because some of it straddles.
+  // Straddling draws don't merge: each keeps its own eye index list.
   if (canMerge && gfx::xr_soft_clip_active()) {
-    canMerge = xr_world_pipeline(vertexData.data(), vtxCount) == lastDraw->xrPipeline;
+    XrClipClass cls;
+    canMerge = xr_world_pipeline(vertexData.data(), vtxCount, &cls) == lastDraw->xrPipeline &&
+               cls != XrClipClass::Straddle && lastDraw->xrIndexCount == 0;
   }
 #endif
   // AURORA_LOG_QUADPOS=1: log the vertex POSITIONS of untextured 4-vertex
