@@ -92,8 +92,8 @@ and the investigation behind it are in docs/xr-3d-plan.md.
       Dream Land, Yoshi's Island 64, Battlefield, Final Destination.
   - **Open questions** (left as they are):
     - Kongo Jungle: the waterfall shares a part with the plateau.
-    - Mushroom Kingdom and Mushroom Kingdom II: the sky and hills are mixed
-      into the stage meshes.
+    - Mushroom Kingdom II: the sky and hills are mixed into the stage
+      meshes.
     - Rainbow Cruise and Icicle Mountain: scrolling stages.
     - Flat Zone: the Game & Watch frame.
     - Mute City and Big Blue: left for their own treatment.
@@ -185,6 +185,11 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     the table, at 0.8 like Onett. The crane (part 1) has collision and
     stays. The helicopter (part 3) and the UFO (part 5, a platform) are
     left as they are: both come in close above the buildings.
+  - **Mushroom Kingdom (2026-10-09):** everything is in part 3. The sky
+    and hills are their own joint (46) and are hidden. The ground's deep
+    blocks are cut at y −40 with a 15-unit fade, leaving a slab under the
+    floor. The castle walls, pipes (joint 2), and the mushroom poles and
+    clouds just behind the stage (joint 32) stay. Scale 0.9.
   - **To revisit: Fountain of Dreams.** It runs badly on the Quest even
     without the reflection render. Profile it, then build a proper 3D
     reflection: mirror the world draws about the water plane per eye,
@@ -577,8 +582,8 @@ Peach's Castle's roof), and its size against the default arena scale.
 Sizes meet halfway between the game's proportions and making every stage's
 floors as wide as Final Destination's, `sqrt(171 / floor width)` rounded
 (Fountain of Dreams at 1.15), except Temple, tuned down to 0.55 to fit in
-view. Moving stages and stages still being surveyed (both Mushroom
-Kingdoms) aren't listed and sit at the world origin at scale 1.
+view. Moving stages and stages still being surveyed (Mushroom Kingdom
+II) aren't listed and sit at the world origin at scale 1.
 
 Pause the fight to move the arena. Put a controller down and that hand is
 tracked instead (`XR_EXT_hand_tracking`), and a pinch does what the grip

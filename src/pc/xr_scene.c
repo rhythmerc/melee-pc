@@ -136,6 +136,10 @@ static const PartRule s_builtin_rules[] = {
     /* Fourside: the city (part 6 joint 2) around the three buildings you
      * fight on (joints 11, 24 and 31 of the same part). */
     {0x15, 6, 2, -1, false},
+    /* Mushroom Kingdom: everything is in part 3. Hidden: the sky and hills
+     * (joint 46). The mushroom poles and clouds just behind (32) stay; the
+     * ground's deep blocks are cut (s_clips). */
+    {0x18, 3, 46, -1, false},
 };
 
 /* Joints moved in the 3D view only: the joint and everything under it are
@@ -215,6 +219,7 @@ static const ClipRule s_clips[] = {
     CLIP_RIGHT(0x14, 5, 150.f, 6.f),
     CLIP_BEHIND(0x14, 5, -70.f, 6.f),
     CLIP_FRONT(0x14, 5, 70.f, 6.f),
+    CLIP_BELOW(0x18, 3, -40.f, 15.f), /* Mushroom Kingdom: the ground's deep blocks */
     /* Brinstar: only the stretch of the acid's river around the stage (it
      * runs the length of the cave). LevelRule hides it while it is low. */
     CLIP_LEFT(0x08, 8, -120.f, 12.f),
@@ -257,6 +262,7 @@ static const StagePlacement s_placements[] = {
     {0x10, 0.f, 0.f, 0.f, 1.f},      /* Pokemon Stadium */
     {0x14, 0.f, 0.f, 0.f, 0.8f},     /* Onett */
     {0x15, 0.f, 0.f, 0.f, 0.8f},     /* Fourside */
+    {0x18, 0.f, 0.f, 0.f, 0.9f},     /* Mushroom Kingdom */
     {0x1B, 0.f, 0.f, 0.f, 1.1f},     /* Flat Zone */
     {0x1C, 0.f, 0.f, 0.f, 1.05f},    /* Dream Land */
     {0x1D, 0.f, 0.f, 0.f, 1.f},      /* Yoshi's Island 64 */
