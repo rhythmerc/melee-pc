@@ -8,6 +8,8 @@
 #include "pc/xr_place.h"
 
 #include <aurora/xr.h>
+#include <dolphin/pad.h>
+#include <SDL3/SDL_gamepad.h>
 #include <melee/gm/gmscene.h>
 #include <melee/gr/ground.h>
 #include <melee/gr/stage.h>
@@ -602,7 +604,49 @@ bool pc_xr_toggle_mode(void) {
     return true;
 }
 
+/* One player wears the headset, and netplay sends port 1, so an external
+ * gamepad plays as player one in XR: the newest one connected takes the
+ * port, and when port 1 has none (a pad paired before the session began, or
+ * port 1's pad unplugged), the lowest-port pad moves there. The headset's
+ * own controllers merge into port 1's virtual pad (keyboard.c) either way.
+ * Only pads aurora tracks count: SDL also lists devices aurora skips (Quest's
+ * own input shows up as a gamepad and still holds SDL's first player slot). */
+static void xr_gamepad_to_port1(s32 index) {
+    /* Through PAD so controller_ports.dat agrees and aurora's saved
+     * preferences don't move it back on the next hotplug. */
+    PADSetPortForIndex((u32)index, 0);
+    pc_log_line("xr: gamepad '%s' on port 1", PADGetName(0));
+}
+
+void pc_xr_gamepad_added(int instance) {
+    if (!aurora_xr_active() || instance < 0) {
+        return;
+    }
+    SDL_Gamepad* pad = SDL_GetGamepadFromID((SDL_JoystickID)instance);
+    const int port = pad != NULL ? SDL_GetGamepadPlayerIndex(pad) : 0;
+    if (port > 0 && port < PAD_CHANMAX) {
+        const s32 index = PADGetIndexForPort((u32)port);
+        if (index >= 0) {
+            xr_gamepad_to_port1(index);
+        }
+    }
+}
+
+static void xr_gamepad_fill_port1(void) {
+    if (!aurora_xr_active() || PADGetIndexForPort(0) >= 0) {
+        return;
+    }
+    for (u32 port = 1; port < PAD_CHANMAX; port++) {
+        const s32 index = PADGetIndexForPort(port);
+        if (index >= 0) {
+            xr_gamepad_to_port1(index);
+            return;
+        }
+    }
+}
+
 void pc_xr_poll_control(void) {
+    xr_gamepad_fill_port1();
     static const char* path;
     static int frames;
     static char last[16];

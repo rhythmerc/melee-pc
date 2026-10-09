@@ -342,6 +342,15 @@ SDL_JoystickID add_controller(SDL_JoystickID which) noexcept {
       SDL_CloseGamepad(ctrl);
       return -1;
     }
+#ifdef __ANDROID__
+    if (controller.m_vid == 0x2833 /* Meta (Oculus) */) {
+      // Quest's own input shows up as a gamepad and would take port 1 ahead of
+      // a real one; the headset's controllers come through OpenXR instead.
+      Log.info("Ignoring Meta input device '{}'", SDL_GetGamepadName(ctrl) != nullptr ? SDL_GetGamepadName(ctrl) : "unknown");
+      SDL_CloseGamepad(ctrl);
+      return -1;
+    }
+#endif
     controller.m_isGameCube = controller.m_vid == 0x057E && controller.m_pid == 0x0337;
     if (controller.m_isGameCube ||
         (SDL_GetGamepadType(ctrl) == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO && controller.m_pid == 0x2073)) {

@@ -202,6 +202,8 @@ void pc_frame_boundary(void) {
     while (event != NULL && event->type != AURORA_NONE) {
         if (event->type == AURORA_EXIT) {
             pc_exit_requested = true;
+        } else if (event->type == AURORA_CONTROLLER_ADDED) {
+            pc_xr_gamepad_added(event->controller);
         } else if (event->type == AURORA_SDL_EVENT) {
             if (event->sdl.type == SDL_EVENT_KEY_DOWN &&
                 event->sdl.key.scancode == SDL_SCANCODE_F1 && !event->sdl.key.repeat)

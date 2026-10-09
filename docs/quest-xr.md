@@ -862,8 +862,10 @@ AURORA_XR=1 build/linux-xr-fork/melee disc.rvz
 While a stage waits before its first fight, A or Start begins it, B resets
 the stage's placement, and Y shows or hides the how-to cards.
 
-An external gamepad plays as usual. Its Select switches mixed reality and
-full VR instead of opening the port menu.
+An external gamepad plays as player one, alongside the headset's
+controllers, so it can also play netplay: the newest one connected takes
+port 1, and when port 1 has none, the first connected moves there. Its
+Select switches mixed reality and full VR instead of opening the port menu.
 
 ## Knobs
 

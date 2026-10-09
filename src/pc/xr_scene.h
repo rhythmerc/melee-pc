@@ -40,6 +40,8 @@ bool pc_xr_toggle_mode(void);
  * "vr") picks the mode when it changes, so an unattended run can switch
  * without a gamepad. */
 void pc_xr_poll_control(void);
+/* AURORA_CONTROLLER_ADDED: in XR, the new gamepad takes port 1. */
+void pc_xr_gamepad_added(int instance);
 /* Around one joint's geometry (HSD_JObjDisp): leaves joints a part rule
  * hides out of the 3D view, and places joints a rule moves. Returns what
  * it changed; hand that to pc_xr_jobj_end. Cheap when no stage part with
@@ -68,6 +70,7 @@ static inline void pc_xr_stage_part_end(bool hidden) { (void)hidden; }
 static inline bool pc_xr_mixed_reality(void) { return false; }
 static inline bool pc_xr_toggle_mode(void) { return false; }
 static inline void pc_xr_poll_control(void) {}
+static inline void pc_xr_gamepad_added(int instance) { (void)instance; }
 static inline int pc_xr_jobj_begin(struct HSD_JObj* jobj) {
     (void)jobj;
     return 0;
