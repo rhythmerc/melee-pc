@@ -189,11 +189,12 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     floor. The castle walls, pipes (joint 2), and the mushroom poles and
     clouds just behind the stage (joint 32) stay. Scale 0.9.
   - **Mushroom Kingdom II (2026-10-09):** everything is in part 2. The
-    clouds and trees behind (joint 8) are hidden. The side cliffs (joints 3
-    and 5) are floor at y 21 from x ±52 out to ±304, well past the blast
-    zones (±150), so they stay, boxed by clip planes at x ±150 and cut
-    below y −50, which also cuts the waterfall and the pillars under the
-    bridge. Scale 0.8, for the cliffs' width.
+    side cliffs (joints 3 and 5) are floor at y 21 from x ±52 out to ±304,
+    well past the blast zones (±150), so they stay, boxed by clip planes at
+    x ±150 and cut below y −50, which also cuts the waterfall and the
+    pillars under the bridge. The trees and clouds behind (joint 8) stay at
+    full size, cut by the same box; shrunk to fit it, the trees came out
+    smaller than the hedges on the cliffs. Scale 0.8, for the cliffs' width.
   - **To revisit: Fountain of Dreams.** It runs badly on the Quest even
     without the reflection render. Profile it, then build a proper 3D
     reflection: mirror the world draws about the water plane per eye,
