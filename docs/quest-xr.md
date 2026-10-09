@@ -657,6 +657,19 @@ utilization, and app GPU time. It also includes our own `display fps` and
 `build/quest-perf/`. The script writes the game's knobs to `melee-env.txt`
 and takes the disc from the launcher's `launcher.cfg`.
 
+- **The stage in view.** Nobody wears the headset, so it lies wherever it
+  was put down, and its tracking origin may be far from where it now
+  looks. A run once measured an empty eye (7.3 ms of eye pass for nothing
+  drawn). The script sets `AURORA_XR_ARENA_AT_HEAD=1`, which places each
+  stage's arena by the default offset from the headset's current pose
+  instead. It also dumps one eye image in the warmup and prints how much
+  of it the 3D view covers (`view: ... covers N%`), with a warning under
+  2%; `--no-view-check` skips that.
+- **Before running:** pause Guardian (`adb shell setprop
+  debug.oculus.guardian_pause 1`), or the session stops a few seconds in.
+  Afterwards, delete `melee-env.txt` (it boots straight into a match) and
+  hand the headset back: `guardian_pause 0`, `settings put system
+  screen_off_timeout 60000`, and the `automation_disable` broadcast.
 - `MELEE_XR_CONTROL=<file>`: once a second, the game reads `mr` or `vr`
   from the file and switches when it changes (`quest_perf.py mode vr`).
 - `AURORA_XR_HANDS=0`: leaves `XR_EXT_hand_tracking` off.

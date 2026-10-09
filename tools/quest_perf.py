@@ -5,7 +5,9 @@
                     [--warmup S] [--label NAME]
       Boots a four-CPU match on stage N (StKind, gr/forward.h; 31 is
       Battlefield), then holds each phase (mode:seconds) in turn in the same
-      session and prints the runtime's frame stats for each one. Logs go to
+      session and prints the runtime's frame stats for each one. The arena is
+      placed in front of wherever the headset lies (AURORA_XR_ARENA_AT_HEAD),
+      and one eye image dumped in the warmup checks the stage is in view. Logs go to
       build/quest-perf/<label>-<phase>.log.
   quest_perf.py mode mr|vr      switch the running game (MELEE_XR_CONTROL)
   quest_perf.py summarize LOG   summarize a saved logcat
@@ -124,6 +126,25 @@ def summarize(text):
     return "\n".join(out)
 
 
+DUMP_DIR = f"{FILES}/dump"
+
+
+def view_coverage():
+    """How much of the left eye the 3D view drew (its alpha), from the dump."""
+    raw = subprocess.run(["adb", "exec-out", "cat", f"{DUMP_DIR}/xr_3d_alpha.pgm"], capture_output=True).stdout
+    adb("shell", "rm", "-rf", DUMP_DIR, check=False)
+    parts = raw.split(maxsplit=4)
+    if len(parts) < 5 or parts[0] != b"P5":
+        return "  view: no eye dump (WARNING: can't tell whether the stage is in view)"
+    w, h = int(parts[1]), int(parts[2])
+    data = parts[4]
+    # Multiview dumps stack the eyes vertically; the left eye is the top half.
+    eye = data[: w * (h // 2)] if h > w else data
+    covered = sum(1 for i in range(0, len(eye), 97) if eye[i] > 0) / max(len(range(0, len(eye), 97)), 1)
+    warn = "  WARNING: stage barely in view; the GPU numbers are meaningless" if covered < 0.02 else ""
+    return f"  view: the 3D view covers {covered * 100:.1f}% of the left eye{warn}"
+
+
 def run(args):
     phases = []
     for p in args.phases.split(","):
@@ -138,11 +159,22 @@ def run(args):
         "AURORA_XR_TIMING": "1",
         "MELEE_XR_MODE": phases[0][0],
         "MELEE_XR_CONTROL": CTL_FILE,
+        # Nobody wears the headset: place the arena from wherever it lies
+        # and looks, or the stage can be out of view and the GPU numbers
+        # meaningless (seen 2026-10-09: an empty eye at 7 ms).
+        "AURORA_XR_ARENA_AT_HEAD": "1",
     }
+    if args.view_check:
+        # One eye image during the warmup, after the fight starts and before
+        # measuring, to check the stage is in view.
+        env["AURORA_XR_DUMP"] = DUMP_DIR
+        env["AURORA_XR_DUMP_AFTER"] = str(max(args.warmup - 15, 5) * 60)
     for kv in args.env:
         k, _, v = kv.partition("=")
         env[k] = v
     disc = disc_uri()
+    if "AURORA_XR_DUMP" in env:
+        adb("shell", "mkdir", "-p", env["AURORA_XR_DUMP"])
     shell_write(ENV_FILE, "".join(f"{k}={v}\n" for k, v in env.items()))
     shell_write(CTL_FILE, phases[0][0] + "\n")
     # Wake the headset if it went to sleep, and keep the display running with
@@ -158,6 +190,8 @@ def run(args):
     os.makedirs(OUT_DIR, exist_ok=True)
     with open(os.path.join(OUT_DIR, f"{args.label}-warmup.log"), "w") as f:
         f.write(adb("logcat", "-d", "-v", "time"))
+    if args.view_check:
+        print(view_coverage())
     for i, (mode, secs) in enumerate(phases):
         if i > 0:
             shell_write(CTL_FILE, mode + "\n")
@@ -184,6 +218,8 @@ def main():
     r.add_argument("--warmup", type=int, default=50, help="seconds from launch to the first phase")
     r.add_argument("--settle", type=int, default=12, help="seconds after a mode switch before measuring")
     r.add_argument("--label", default="run")
+    r.add_argument("--no-view-check", dest="view_check", action="store_false",
+                   help="skip dumping an eye image to check the stage is in view")
     r.add_argument("--keep", action="store_true", help="leave the game running afterwards")
     m = sub.add_parser("mode")
     m.add_argument("mode", choices=["mr", "vr"])

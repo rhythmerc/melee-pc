@@ -183,6 +183,7 @@ struct DynamicResolution {
   uint64_t seenSeq = 0;     // R.timing.frameSeq last read
   int settle = 0;           // frames measured since the last scale change
   int sinceStep = 0;        // frames since the last step up
+  int spikeRun = 0;         // readings in a row taken for spikes
   uint32_t pipelinesSeen = 0; // gfx::pipelines_created() last frame
   int compileQuiet = 0;       // frames since a pipeline was last created
   std::array<uint64_t, 4> recentMisses{};
@@ -192,6 +193,7 @@ struct DynamicResolution {
   // Logged every 10 s.
   double scaleSum = 0, nsSum = 0;
   uint32_t frames = 0, nsFrames = 0, panics = 0, loneMisses = 0, lateImages = 0;
+  uint32_t readings = 0, skipSettle = 0, skipCompile = 0, skipSpike = 0; // GPU timings, and why some were left out
   uint32_t lateSeen = 0;
   float lowest = 99.f, highest = 0.f;
   std::chrono::steady_clock::time_point lastLog{};
@@ -247,6 +249,11 @@ struct ArenaPose {
   float scale = 0.0035f;
 };
 std::mutex g_arenaMutex;
+// AURORA_XR_ARENA_AT_HEAD=1 (unattended perf runs): each stage's arena is
+// placed by the default offset from wherever the headset is and looks when
+// the stage is set, not from the tracking origin, so a headset left lying
+// anywhere still has the stage in view. Applied by the XR thread.
+std::atomic<bool> g_arenaToHead{false};
 // The current stage's arena (aurora_xr_set_stage).
 ArenaPose g_arena;
 // Where every stage starts (AURORA_XR_ARENA_POS, _YAW, _SCALE), before its
@@ -2559,6 +2566,15 @@ bool render_xr_frame() {
   }
   update_input();
   publish_views(fs.predictedDisplayTime);
+  if (B.focused && g_arenaToHead.exchange(false)) {
+    const XrVector3f fwd = qrot(B.headOrientation, {0.f, 0.f, -1.f});
+    const float yaw = std::atan2(-fwd.x, -fwd.z); // rot_y's sense
+    std::lock_guard lock{g_arenaMutex};
+    g_arena.yaw = g_defaultArena.yaw + yaw;
+    g_arena.pos = XrVector3f{B.head.x, B.head.y, B.head.z} + rot_y(g_defaultArena.pos, yaw);
+    Log.info("Arena placed at the head: {:.2f},{:.2f},{:.2f}, yaw {:.0f} deg", g_arena.pos.x, g_arena.pos.y,
+             g_arena.pos.z, g_arena.yaw * 57.2958f);
+  }
   XR_TRY(xrBeginFrame(B.session, nullptr));
 
   const auto now = std::chrono::steady_clock::now();
@@ -3738,10 +3754,26 @@ void update_dynamic_resolution(bool missed) {
     if (t.frameSeq != dr.seenSeq && t.lastFrameNs > 0) {
       dr.seenSeq = t.frameSeq;
       // Readbacks lag a few frames: give a new scale time to show. A spike
-      // half again over this visit's average (a hitch elsewhere) is left out.
+      // half again over this visit's average (a hitch elsewhere) is left out,
+      // but five in a row are the scene getting dearer: the average starts
+      // over from them. (A bogus low reading, under 2 ms, once seeded the
+      // average and every real frame after it looked like a spike.)
       const double ns = t.lastFrameNs;
-      const bool spike = dr.emaNs > 0 && ns > dr.emaNs * 1.5;
-      if (++dr.settle > 4 && !compiling && !spike) {
+      bool spike = dr.emaNs > 0 && ns > dr.emaNs * 1.5;
+      if (spike && ++dr.spikeRun >= 5) {
+        dr.emaNs = 0;
+        spike = false;
+      }
+      if (!spike)
+        dr.spikeRun = 0;
+      ++dr.readings;
+      if (++dr.settle <= 4) {
+        ++dr.skipSettle;
+      } else if (compiling) {
+        ++dr.skipCompile;
+      } else if (spike || ns < 2.0e6) {
+        ++dr.skipSpike;
+      } else {
         dr.emaNs = dr.emaNs == 0 ? ns : dr.emaNs * 0.85 + ns * 0.15;
         dr.nsSum += ns;
         ++dr.nsFrames;
@@ -3827,12 +3859,15 @@ void update_dynamic_resolution(bool missed) {
             table += fmt::format(" {:.3f}:{:.1f}", dynres_scale(i), costs[i].ns / 1.0e6);
       }
       Log.info("Dynamic resolution: scale {:.2f} average ({:.2f}-{:.2f}); frame GPU {:.1f} ms average; {} panics, "
-               "{} lone misses; {} images held long; costs{}",
+               "{} lone misses; {} images held long; {} timings ({} settling, {} compiling, {} spikes or bogus left out); "
+               "costs{}",
                dr.scaleSum / dr.frames, dr.lowest, dr.highest, dr.nsFrames ? dr.nsSum / dr.nsFrames / 1.0e6 : 0.0,
-               dr.panics, dr.loneMisses, dr.lateImages, table);
+               dr.panics, dr.loneMisses, dr.lateImages, dr.readings, dr.skipSettle, dr.skipCompile, dr.skipSpike,
+               table);
     }
     dr.scaleSum = dr.nsSum = 0;
     dr.frames = dr.nsFrames = dr.panics = dr.loneMisses = dr.lateImages = 0;
+    dr.readings = dr.skipSettle = dr.skipCompile = dr.skipSpike = 0;
     dr.lowest = 99.f;
     dr.highest = 0.f;
     dr.lastLog = now;
@@ -4346,6 +4381,9 @@ extern "C" void aurora_xr_set_stage(int stage, float x, float y, float z, float 
     g_arena = g_defaultArena;
     g_arena.scale *= g_stageScale;
   }
+  static const bool atHead = env_flag("AURORA_XR_ARENA_AT_HEAD", false);
+  if (atHead)
+    g_arenaToHead = true;
 }
 
 extern "C" bool aurora_xr_pace(void) {
