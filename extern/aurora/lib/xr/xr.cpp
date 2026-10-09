@@ -3158,8 +3158,10 @@ struct GpuTiming {
 
 // The multiview shader's XrEye: one matrix per eye, the enabled flags (y:
 // 1 - the clipped draws' opacity, as float bits), then the clip planes in
-// game camera space (aurora_xr_world_clip).
-constexpr uint64_t kMultiviewEyeSize = 2 * 64 + 16 + 4 * 16 + 16; // ... 4 clip planes, fade bands
+// game camera space (aurora_xr_world_clip) and their fade bands, four to a
+// vec4.
+static_assert(gfx::XrMaxClipPlanes == AURORA_XR_MAX_CLIPS && gfx::XrMaxClipPlanes % 4 == 0);
+constexpr uint64_t kMultiviewEyeSize = 2 * 64 + 16 + gfx::XrMaxClipPlanes * 16 + gfx::XrMaxClipPlanes * 4;
 
 struct Renderer3D {
   uint64_t layoutKey = 0;
@@ -3728,8 +3730,8 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
   struct {
     std::array<Mat4, 2> m;
     uint32_t enabled[4];
-    float clip[4][4];
-    float fade[4]; // bands (game units)
+    float clip[gfx::XrMaxClipPlanes][4];
+    float fade[gfx::XrMaxClipPlanes]; // bands (game units)
   } mv[gfx::XrMaxTransforms]{};
   static_assert(sizeof(mv[0]) == kMultiviewEyeSize);
   for (int eye = 0; eye < 2; ++eye) {
@@ -3738,14 +3740,14 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
       Mat4 world = cameraToWorld;
       // Clip plane, game world -> game camera space (the shader clips the
       // camera-space position): plane_cam = plane_world · V_game⁻¹.
-      std::array<std::array<float, 4>, 4> clipCam{};
+      std::array<std::array<float, 4>, gfx::XrMaxClipPlanes> clipCam{};
       for (auto& c : clipCam)
         c = {0.f, 0.f, 0.f, 1.f};
       if (t > 0) {
         const auto& m = frame.xrTransforms[t - 1];
         world = mul(Mat4{m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], 0.f, 0.f, 0.f, 1.f},
                     cameraToWorld);
-        for (int k = 0; k < 4; ++k)
+        for (int k = 0; k < gfx::XrMaxClipPlanes; ++k)
           for (int j = 0; j < 4; ++j) {
             clipCam[k][j] = 0.f;
             for (int i = 0; i < 4; ++i)
@@ -3761,10 +3763,12 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
         mv[t].m[eye] = u.m;
         mv[t].enabled[0] = 1;
         // The clipped geometry's dissolve, as 1 - opacity (0: solid).
-        mv[t].enabled[1] = std::bit_cast<uint32_t>(t > 0 ? 1.f - frame.xrTransforms[t - 1][32] : 0.f);
-        for (int k = 0; k < 4; ++k) {
+        // The entry's layout: move 3x4, planes, fades, opacity.
+        constexpr int kFades = 12 + gfx::XrMaxClipPlanes * 4, kOpacity = kFades + gfx::XrMaxClipPlanes;
+        mv[t].enabled[1] = std::bit_cast<uint32_t>(t > 0 ? 1.f - frame.xrTransforms[t - 1][kOpacity] : 0.f);
+        for (int k = 0; k < gfx::XrMaxClipPlanes; ++k) {
           std::copy(clipCam[k].begin(), clipCam[k].end(), mv[t].clip[k]);
-          mv[t].fade[k] = t > 0 ? frame.xrTransforms[t - 1][28 + k] : 0.f;
+          mv[t].fade[k] = t > 0 ? frame.xrTransforms[t - 1][kFades + k] : 0.f;
         }
       } else {
         webgpu::g_queue.WriteBuffer(R.eyeUniforms[eye][t], 0, &u, sizeof(u));

@@ -546,9 +546,9 @@ static XrClipClass classify_xr_clip(const ShaderConfig& config, const u8* raw, u
   if (pos.attrType == GX_NONE || (idx.attrType != GX_NONE && idx.attrType != GX_DIRECT)) {
     return XrClipClass::Straddle;
   }
-  int planes[4];
+  int planes[gfx::XrMaxClipPlanes];
   int planeCount = 0;
-  for (int k = 0; k < 4; ++k) {
+  for (int k = 0; k < gfx::XrMaxClipPlanes; ++k) {
     const auto& pl = clip->planes[k];
     if (pl[0] != 0.f || pl[1] != 0.f || pl[2] != 0.f || pl[3] < 0.f) {
       planes[planeCount++] = k;
@@ -558,11 +558,11 @@ static XrClipClass classify_xr_clip(const ShaderConfig& config, const u8* raw, u
     return XrClipClass::Inside;
   }
   // Each plane in a position matrix's model space, made when first used.
-  float model[MaxPnMtx][4][4];
+  float model[MaxPnMtx][gfx::XrMaxClipPlanes][4];
   u16 made = 0;
-  float lo[4], hi[4];
-  std::fill_n(lo, 4, INFINITY);
-  std::fill_n(hi, 4, -INFINITY);
+  float lo[gfx::XrMaxClipPlanes], hi[gfx::XrMaxClipPlanes];
+  std::fill_n(lo, gfx::XrMaxClipPlanes, INFINITY);
+  std::fill_n(hi, gfx::XrMaxClipPlanes, -INFINITY);
   const u32 compSize = comp_type_size(GX_VA_POS, static_cast<GXCompType>(pos.compType));
   const u32 comps = std::min<u32>(pos.cnt, 3);
   for (u32 v = 0; v < vtxCount; ++v) {
@@ -1140,10 +1140,10 @@ void handle_aurora(ByteReader& reader) noexcept {
     }
     if (category == 3) { // aurora_xr_world_transform
       gfx::xr_set_world_transform(hasView ? view.data() : nullptr);
-    } else if (category == 4) { // aurora_xr_world_clips4: planes 1-2 (clears 3-4)
+    } else if (category == 4) { // aurora_xr_world_clips4: planes 1-2 (clears the rest)
       gfx::xr_set_world_clip(hasView ? view.data() : nullptr);
-    } else if (category == 5) { // planes 3-4
-      gfx::xr_set_world_clip_more(view.data());
+    } else if (category == 5 || category == 7 || category == 8) { // planes 3-4, 5-6, 7-8
+      gfx::xr_set_world_clip_more(category == 5 ? 1 : category - 5, view.data());
     } else {
       const auto cat = category <= 2 ? static_cast<gfx::XrCategory>(category)
                        : category == 6 ? gfx::XrCategory::Hidden // AURORA_XR_HIDDEN

@@ -2164,7 +2164,7 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}{11}
     const std::string anchor = "var<uniform> ubuf: Uniform;";
     if (auto at = shaderSource.find(anchor); at != std::string::npos) {
       shaderSource.insert(at + anchor.size(),
-                          multiview ? fmt::format("\nstruct XrEye {{ m: array<mat4x4f, {}>, enabled: vec4u, clip: array<vec4f, 4>, fade: vec4f }};"
+                          multiview ? fmt::format("\nstruct XrEye {{ m: array<mat4x4f, {}>, enabled: vec4u, clip: array<vec4f, 8>, fade: array<vec4f, 2> }};"
                                                   "\n@group(3) @binding(0)\nvar<uniform> xr: XrEye;"
                                                   "\nvar<private> xr_view: u32;"
                                                   "\nvar<private> xr_cam: vec3f;"
@@ -2209,20 +2209,25 @@ fn fs_main(in: VertexOutput) -> {10} {{{6}{5}{11}
           for (size_t at = shaderSource.find("@location(", v0); at != std::string::npos && at < v1;
                at = shaderSource.find("@location(", at + 1))
             loc = std::max(loc, std::atoi(shaderSource.c_str() + at + 10));
-          shaderSource.insert(fsBody + 1, "\n    if (xr_bayer(in.pos.xy) >= clamp(min(min(in.xr_fade.x, in.xr_fade.y), min(in.xr_fade.z, in.xr_fade.w)), 0.0, 1.0) * in.xr_opacity) { discard; }");
+          // Eight planes' distances, four to a vec4 (the inter-stage
+          // budget: GX shaders can use 14 of the 16 slots). The opacity is
+          // read straight from the uniform, which the fragment stage sees.
+          shaderSource.insert(fsBody + 1, "\n    let xr_d = min(in.xr_fade_a, in.xr_fade_b);"
+                                          "\n    if (xr_bayer(in.pos.xy) >= clamp(min(min(xr_d.x, xr_d.y), min(xr_d.z, xr_d.w)), 0.0, 1.0) * (1.0 - bitcast<f32>(xr.enabled.y))) { discard; }");
           // The distance to the plane in fade bands, interpolated (it is
           // linear, so exact) and clamped per fragment. A per-vertex 0/1 would
           // blend across triangles that span the plane. Fade band 0 is a hard
           // cut: a huge scale makes the ramp sub-pixel.
           // The draw's opacity (aurora_xr_world_clips4_fade) scales the
           // dither threshold: the whole draw dissolves.
-          shaderSource.insert(retAt, "out.xr_fade = vec4f(xr_clip_d(0u), xr_clip_d(1u), xr_clip_d(2u), xr_clip_d(3u));\n    "
-                                     "out.xr_opacity = 1.0 - bitcast<f32>(xr.enabled.y);\n    ");
-          shaderSource.insert(v1, fmt::format("    @location({}) xr_fade: vec4f,\n    @location({}) @interpolate(flat) xr_opacity: f32,\n",
+          shaderSource.insert(retAt, "out.xr_fade_a = vec4f(xr_clip_d(0u), xr_clip_d(1u), xr_clip_d(2u), xr_clip_d(3u));\n    "
+                                     "out.xr_fade_b = vec4f(xr_clip_d(4u), xr_clip_d(5u), xr_clip_d(6u), xr_clip_d(7u));\n    ");
+          shaderSource.insert(v1, fmt::format("    @location({}) xr_fade_a: vec4f,\n    @location({}) xr_fade_b: vec4f,\n",
                                               loc + 1, loc + 2));
           shaderSource.insert(v0, "fn xr_clip_d(i: u32) -> f32 {\n"
+                                  "    let band = xr.fade[i / 4u][i % 4u];\n"
                                   "    return dot(xr.clip[i], vec4f(xr_cam, 1.0)) * "
-                                  "select(1.0e6, 1.0 / xr.fade[i], xr.fade[i] > 0.0);\n}\n"
+                                  "select(1.0e6, 1.0 / band, band > 0.0);\n}\n"
                                   // 4x4 Bayer by bit interleave (no indexed array:
                                   // Adreno spills those to scratch memory).
                                   "fn xr_bayer(p: vec2f) -> f32 {\n"

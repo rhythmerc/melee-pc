@@ -118,8 +118,10 @@ void aurora_xr_world_clip(const float plane[4]);
 void aurora_xr_world_clip_soft(const float plane[4], float fade);
 /* Two planes at once (both must pass); plane2 may be NULL. */
 void aurora_xr_world_clips(const float plane1[4], float fade1, const float plane2[4], float fade2);
-/* Up to four planes (all must pass), each with its fade band; count 0 =
- * none. */
+/* Up to AURORA_XR_MAX_CLIPS planes (all must pass), each with its fade
+ * band; count 0 = none, past the maximum = the first ones. (Named for its
+ * first limit, four.) */
+enum { AURORA_XR_MAX_CLIPS = 8 };
 void aurora_xr_world_clips4(const float planes[][4], const float fades[], int count);
 /* The same, with the clipped geometry also dissolved as a whole: opacity 1
  * is solid, lower values dither more of it away (0: none left). With count

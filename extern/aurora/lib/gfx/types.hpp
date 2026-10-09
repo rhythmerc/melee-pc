@@ -29,6 +29,11 @@ enum class XrCategory : uint8_t {
 // World draws can carry an extra placement in the 3D view
 // (aurora_xr_world_transform): index 0 is none, 1.. index the frame's list.
 constexpr uint32_t XrMaxTransforms = 8;
+// Clip planes a world draw can carry (aurora_xr_world_clips4_fade). Their
+// distances ride to the fragment shader four to a vec4.
+constexpr int XrMaxClipPlanes = 8;
+// A clip's floats: the planes, their fade bands, then the draw's opacity.
+constexpr int XrClipFloats = XrMaxClipPlanes * 5 + 1;
 
 using BindGroupRef = HashType;
 using PipelineRef = HashType;

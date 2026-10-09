@@ -66,8 +66,9 @@ void aurora_xr_world_clips(const float plane1[4], float fade1, const float plane
   aurora_xr_world_clips4(planes, fades, 2);
 }
 
-// Two markers: planes 1-2 (category 4; also clears 3-4) then planes 3-4
-// (category 5). Rows: plane, plane, fades. 0,0,0,1 always passes.
+// A marker per two planes: planes 1-2 (category 4; also clears the rest),
+// then 3-4, 5-6 and 7-8 (categories 5, 7 and 8; 6 is AURORA_XR_HIDDEN), as
+// many as `count` needs. Rows: plane, plane, fades. 0,0,0,1 always passes.
 void aurora_xr_world_clips4(const float planes[][4], const float fades[], int count) {
   aurora_xr_world_clips4_fade(planes, fades, count, 1.f);
 }
@@ -80,7 +81,10 @@ void aurora_xr_world_clips4_fade(const float planes[][4], const float fades[], i
   }
   if (planes == nullptr)
     count = 0;
-  for (int half = 0; half < 2 && (half == 0 || half * 2 < count); ++half) {
+  if (count > AURORA_XR_MAX_CLIPS)
+    count = AURORA_XR_MAX_CLIPS;
+  constexpr int kCategory[] = {4, 5, 7, 8};
+  for (int half = 0; half < AURORA_XR_MAX_CLIPS / 2 && (half == 0 || half * 2 < count); ++half) {
     float m[3][4] = {{0.f, 0.f, 0.f, 1.f}, {0.f, 0.f, 0.f, 1.f}, {}};
     for (int k = 0; k < 2; ++k) {
       const int i = half * 2 + k;
@@ -92,7 +96,7 @@ void aurora_xr_world_clips4_fade(const float planes[][4], const float fades[], i
     }
     if (half == 0)
       m[2][2] = opacity;
-    aurora_xr_camera(4 + half, m);
+    aurora_xr_camera(kCategory[half], m);
   }
 }
 #endif

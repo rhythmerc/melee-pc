@@ -724,7 +724,8 @@ void initialize() noexcept {
   {
     const wgpu::BindGroupLayoutEntry entry{
         .binding = 0,
-        .visibility = wgpu::ShaderStage::Vertex,
+        // The fragment stage reads a clipped draw's opacity from it.
+        .visibility = wgpu::ShaderStage::Vertex | wgpu::ShaderStage::Fragment,
         .buffer = {.type = wgpu::BufferBindingType::Uniform, .minBindingSize = XrEyeUniformSize},
     };
     const wgpu::BindGroupLayoutDescriptor layoutDesc{

@@ -240,8 +240,11 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     opening the port menu. That's handy for comparing a pruned stage with
     the original. `MELEE_XR_MODE=vr` starts in full VR.
 - **Clip planes.** `aurora_xr_world_clips4` cuts the following world draws
-  in the 3D view, keeping what's on the inside of up to four game-space
-  planes. `xr_scene.c` sets them around a stage part (every `ClipRule` that
+  in the 3D view, keeping what's on the inside of up to eight game-space
+  planes (`AURORA_XR_MAX_CLIPS`; four until 2026-10-09). Their distances
+  reach the fragment shader four to a vec4, two vec4s in all, and the
+  draw's opacity comes from the eye uniform, so a clipped GX shader still
+  fits WebGPU's 16 inter-stage slots. `xr_scene.c` sets them around a stage part (every `ClipRule` that
   names it), so fighters and items are never clipped. The cut is a fragment
   discard, not clip distances, because Adreno 740 fails to create multiview
   pipelines that write clip distances. Only clipped draws use the discarding

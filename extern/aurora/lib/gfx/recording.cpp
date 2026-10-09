@@ -39,8 +39,18 @@ using namespace detail;
 namespace {
 // Current placement and clip for world draws (FIFO thread).
 std::optional<std::array<float, 12>> g_xrMove;
-// Planes 1-4 (16 floats), then their fade bands (4).
-std::optional<std::array<float, 21>> g_xrClip; // planes, fades, opacity
+// The planes (4 floats each), then their fade bands, then the opacity.
+std::optional<std::array<float, XrClipFloats>> g_xrClip;
+constexpr int kClipFades = XrMaxClipPlanes * 4;
+constexpr int kClipOpacity = XrMaxClipPlanes * 5;
+// A clip whose planes all pass, solid.
+std::array<float, XrClipFloats> passing_clip() {
+  std::array<float, XrClipFloats> c{};
+  for (int p = 0; p < XrMaxClipPlanes; ++p)
+    c[p * 4 + 3] = 1.f;
+  c[kClipOpacity] = 1.f;
+  return c;
+}
 constexpr Module Log{"aurora::gfx"};
 
 struct FrameRecorder {
@@ -1274,7 +1284,7 @@ const XrClipCamera* xr_clip_camera() noexcept {
     return nullptr;
   }
   static XrClipCamera out;
-  static std::array<float, 21> forClip{};
+  static std::array<float, XrClipFloats> forClip{};
   static std::array<float, 12> forView{};
   const auto& v = g_recorder.frame().xrWorldView;
   if (*g_xrClip == forClip && v == forView) {
@@ -1299,16 +1309,16 @@ const XrClipCamera* xr_clip_camera() noexcept {
     m[i][3] = -(r[i][0] * v[3] + r[i][1] * v[7] + r[i][2] * v[11]);
   }
   m[3][3] = 1.f;
-  for (int p = 0; p < 4; ++p) {
+  for (int p = 0; p < XrMaxClipPlanes; ++p) {
     for (int j = 0; j < 4; ++j) {
       float s = 0.f;
       for (int i = 0; i < 4; ++i)
         s += (*g_xrClip)[p * 4 + i] * m[i][j];
       out.planes[p][j] = s;
     }
-    out.fades[p] = (*g_xrClip)[16 + p];
+    out.fades[p] = (*g_xrClip)[kClipFades + p];
   }
-  out.opacity = (*g_xrClip)[20];
+  out.opacity = (*g_xrClip)[kClipOpacity];
   return &out;
 }
 
@@ -1335,12 +1345,11 @@ namespace {
 void update_xr_transform() {
   uint8_t index = 0;
   if (g_xrMove || g_xrClip) {
-    std::array<float, 33> entry{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
-                                0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1};
+    std::array<float, 12 + XrClipFloats> entry{1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0};
     if (g_xrMove)
       std::copy_n(g_xrMove->begin(), 12, entry.begin());
-    if (g_xrClip)
-      std::copy_n(g_xrClip->begin(), 21, entry.begin() + 12);
+    const auto clip = g_xrClip ? *g_xrClip : passing_clip();
+    std::copy_n(clip.begin(), XrClipFloats, entry.begin() + 12);
     auto& list = g_recorder.frame().xrTransforms;
     const auto it = std::find(list.begin(), list.end(), entry);
     if (it != list.end()) {
@@ -1378,25 +1387,25 @@ void xr_set_world_clip(const float* plane) {
   }
   if (plane != nullptr) {
     // The marker's rows: plane 1, plane 2, then fades 1-2 and the opacity.
-    // Planes 3-4 pass.
-    g_xrClip.emplace(std::array<float, 21>{0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1});
+    // The other planes pass until xr_set_world_clip_more sets them.
+    g_xrClip.emplace(passing_clip());
     std::copy_n(plane, 8, g_xrClip->begin());
-    (*g_xrClip)[16] = plane[8];
-    (*g_xrClip)[17] = plane[9];
-    (*g_xrClip)[20] = plane[10] > 0.f && plane[10] < 1.f ? plane[10] : 1.f;
+    (*g_xrClip)[kClipFades] = plane[8];
+    (*g_xrClip)[kClipFades + 1] = plane[9];
+    (*g_xrClip)[kClipOpacity] = plane[10] > 0.f && plane[10] < 1.f ? plane[10] : 1.f;
   } else {
     g_xrClip.reset();
   }
   update_xr_transform();
 }
 
-void xr_set_world_clip_more(const float* planes) {
-  if (!g_recorder.active() || !g_xrClip) {
+void xr_set_world_clip_more(int pair, const float* planes) {
+  if (!g_recorder.active() || !g_xrClip || pair < 1 || pair * 2 >= XrMaxClipPlanes) {
     return;
   }
-  std::copy_n(planes, 8, g_xrClip->begin() + 8);
-  (*g_xrClip)[18] = planes[8];
-  (*g_xrClip)[19] = planes[9];
+  std::copy_n(planes, 8, g_xrClip->begin() + pair * 8);
+  (*g_xrClip)[kClipFades + pair * 2] = planes[8];
+  (*g_xrClip)[kClipFades + pair * 2 + 1] = planes[9];
   update_xr_transform();
 }
 

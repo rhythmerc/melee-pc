@@ -123,8 +123,9 @@ void xr_set_world_transform(const float* m3x4);
 // Clip plane (game world, 4 floats) then its fade band (game units, 0 = hard)
 // for the following world draws; null = none.
 void xr_set_world_clip(const float* plane);
-// Planes 3 and 4 for the current clip (same 12-float layout).
-void xr_set_world_clip_more(const float* planes);
+// Planes 2 * pair + 1 and 2 * pair + 2 for the current clip (pair 1 to 3;
+// same 12-float layout).
+void xr_set_world_clip_more(int pair, const float* planes);
 // FIFO thread: the current draw is tagged World.
 bool xr_recording_world() noexcept;
 // FIFO thread: a world clip is set (its draws need the clipping pipelines).
@@ -134,8 +135,8 @@ bool xr_soft_clip_active() noexcept;
 // each plane's fade band (game units, 0 = hard) and the draw's opacity. Unused
 // planes are (0, 0, 0, 1). Null when no clip is set.
 struct XrClipCamera {
-  float planes[4][4];
-  float fades[4];
+  float planes[XrMaxClipPlanes][4];
+  float fades[XrMaxClipPlanes];
   float opacity;
 };
 const XrClipCamera* xr_clip_camera() noexcept;
