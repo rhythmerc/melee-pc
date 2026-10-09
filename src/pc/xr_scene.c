@@ -150,6 +150,12 @@ static const PartRule s_builtin_rules[] = {
      * (s_clips). */
     {0x13, 2, -1, -1, false},
     {0x13, 31, -1, -1, false},
+    /* Mute City: the city floor far below (part 30, joint 4, mesh 12, and the
+     * haze over it, 14) and the sky dome (13). The track, towers and cars
+     * are boxed into a diorama (s_clips). */
+    {0x12, 30, 4, 12, false},
+    {0x12, 30, 4, 13, false},
+    {0x12, 30, 4, 14, false},
 };
 
 /* Joints moved in the 3D view only: the joint and everything under it are
@@ -249,6 +255,19 @@ static const ClipRule s_clips[] = {
     /* ...and above the action, where other stretches of it sweep overhead. */
     {0x13, 34, {0.f, -1.f, 0.f, 150.f}, 40.f},
     {0x13, 36, {0.f, -1.f, 0.f, 150.f}, 40.f},
+    /* Mute City: like Big Blue, the action stays put while the city streams
+     * past, but its track runs toward the player (the fighters fight across
+     * it). A diorama: a block of the city (part 30), solid out past the blast
+     * zones (x +-210), 90 units either side of the fight in z, and from 30
+     * below its floors to about the top blast zone (200), dissolving past
+     * that, so track, gates and towers stream in and out of it. Its traffic
+     * (part 2) gets the same box. */
+#define MC_BOX(part)                                                                                       \
+    CLIP_LEFT(0x12, part, -280.f, 70.f), CLIP_RIGHT(0x12, part, 280.f, 70.f), CLIP_BEHIND(0x12, part, -150.f, 60.f), \
+        CLIP_FRONT(0x12, part, 150.f, 60.f), CLIP_BELOW(0x12, part, -60.f, 30.f),                            \
+        {0x12, part, {0.f, -1.f, 0.f, 260.f}, 60.f}
+    MC_BOX(30), MC_BOX(2),
+#undef MC_BOX
     /* Brinstar: only the stretch of the acid's river around the stage (it
      * runs the length of the cave). LevelRule hides it while it is low. */
     CLIP_LEFT(0x08, 8, -120.f, 12.f),
@@ -292,6 +311,7 @@ static const StagePlacement s_placements[] = {
     {0x14, 0.f, 0.f, 0.f, 0.8f},     /* Onett */
     {0x15, 0.f, 0.f, 0.f, 0.8f},     /* Fourside */
     {0x13, 0.f, 0.f, 0.f, 0.85f},    /* Big Blue */
+    {0x12, 0.f, 0.f, 0.f, 0.8f},     /* Mute City: its box is wider than the blast zones */
     {0x18, 0.f, 0.f, 0.f, 0.9f},     /* Mushroom Kingdom */
     {0x19, 0.f, 0.f, 0.f, 0.8f},     /* Mushroom Kingdom II: its cliffs reach the blast zones */
     {0x1B, 0.f, 0.f, 0.f, 1.1f},     /* Flat Zone */
@@ -783,8 +803,10 @@ static float stage_top(void) {
                            Stage_GetBlastZoneBottomOffset(), Stage_GetBlastZoneTopOffset(), &top, &min_x, &max_x)) {
         return NAN;
     }
-    pc_log_line("xr: stage %d top floor at y %.1f; floors from x %.1f to %.1f", stage_info.grkind, top, min_x,
-                max_x);
+    pc_log_line("xr: stage %d top floor at y %.1f; floors from x %.1f to %.1f; blast zones x %.0f to %.0f, y %.0f "
+                "to %.0f",
+                stage_info.grkind, top, min_x, max_x, Stage_GetBlastZoneLeftOffset(), Stage_GetBlastZoneRightOffset(),
+                Stage_GetBlastZoneBottomOffset(), Stage_GetBlastZoneTopOffset());
     return top;
 }
 
