@@ -172,28 +172,43 @@ struct DynamicResolution {
   float minScale = 0.8f, maxScale = 1.3f;
   float scale = 1.f;
   uint32_t recWidth = 0, recHeight = 0; // recommended eye size (times AURORA_XR_EYE_SCALE)
-  // Controller (update_dynamic_resolution): the frame's GPU time modeled as
-  // fixed + perPixel * scale^2, the scale chosen to fit the target.
-  double targetNs = 12.0e6; // per game frame, compositor preemptions included
-  double loadNs = 9.0e6;    // below this a miss is taken for the CPU's
-  double emaNs = 0;         // frame GPU time at the current scale
-  double perPixelNs = 0;    // d(frame ns) / d(scale^2), learned from settled scale changes
+  // Controller (update_dynamic_resolution): a live cost table. The scale
+  // moves in steps of kDynresStep; each step keeps the frame GPU time
+  // measured there, trusted less the longer ago it was measured, and steps
+  // not measured lately are predicted from the ones that were.
+  double targetNs = 13.0e6; // per game frame, compositor preemptions included
+  double bandNs = 0.5e6;    // hysteresis: down only past target + band, up to the target
+  double emaNs = 0;         // frame GPU time at the current step, this visit
+  int level = 0;            // the current step: scale = minScale + level * kDynresStep
   uint64_t seenSeq = 0;     // R.timing.frameSeq last read
   int settle = 0;           // frames measured since the last scale change
-  float settledScale = 0;   // the last settled point, for learning perPixelNs
-  double settledNs = 0;
   int sinceStep = 0;        // frames since the last step up
+  uint32_t pipelinesSeen = 0; // gfx::pipelines_created() last frame
+  int compileQuiet = 0;       // frames since a pipeline was last created
   std::array<uint64_t, 4> recentMisses{};
   uint32_t recentIndex = 0;
   uint64_t frameCount = 0;
   std::chrono::steady_clock::time_point lastFrame{};
   // Logged every 10 s.
   double scaleSum = 0, nsSum = 0;
-  uint32_t frames = 0, nsFrames = 0, panics = 0, cpuMisses = 0, lateImages = 0;
+  uint32_t frames = 0, nsFrames = 0, panics = 0, loneMisses = 0, lateImages = 0;
   uint32_t lateSeen = 0;
   float lowest = 99.f, highest = 0.f;
   std::chrono::steady_clock::time_point lastLog{};
 } g_dynres;
+
+// One step of the cost table: the frame GPU time measured at that scale and
+// how much of it there is, which fades with time since the last visit.
+constexpr float kDynresStep = 0.025f;
+constexpr int kDynresLevels = 64;
+struct DynresCost {
+  double ns = 0;          // running average (0: never measured)
+  double samples = 0;     // weight behind it, decaying
+  uint64_t lastFrame = 0; // frameCount of the last sample
+};
+// Per stage and mode (mixed reality or VR): costs differ a lot between them.
+// Kept for the session. Render worker only.
+std::unordered_map<int, std::array<DynresCost, kDynresLevels>> g_dynresCosts;
 // The game framebuffer's format and sample count, read by begin_frame before
 // the XR thread starts: when they allow it, both eyes render straight into
 // the 3D swapchain image, which then has to be in the framebuffer's format.
@@ -427,6 +442,15 @@ float env_float(const char* name, float def) {
   char* end = nullptr;
   const float f = std::strtof(v, &end);
   return end != v ? f : def;
+}
+
+// How often the GPU timing and dynamic resolution lines are logged:
+// AURORA_XR_LOG_PERIOD seconds, 10 by default (1 lines them up with what
+// is on screen when profiling a stage).
+std::chrono::steady_clock::duration log_period() {
+  static const auto period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+      std::chrono::duration<float>(std::clamp(env_float("AURORA_XR_LOG_PERIOD", 10.f), 0.25f, 600.f)));
+  return period;
 }
 
 template <typename F>
@@ -718,18 +742,23 @@ bool size_stereo_stream() {
   if (dr.on) {
     dr.minScale = std::clamp(env_float("AURORA_XR_DYNRES_MIN", 0.8f), 0.5f, 1.f);
     dr.maxScale = std::clamp(env_float("AURORA_XR_DYNRES_MAX", 1.3f), 1.f, 1.6f);
-    // 13.5 filled the GPU enough for the XR thread to miss submits.
-    dr.targetNs = std::clamp(env_float("AURORA_XR_DYNRES_TARGET_MS", 12.f), 3.f, 16.f) * 1.0e6;
-    dr.loadNs = std::clamp(env_float("AURORA_XR_DYNRES_LOAD_MS", 9.f), 0.f, 16.f) * 1.0e6;
+    // A frame averaging 13.5 ms filled the GPU enough for the XR thread to
+    // miss submits; Brinstar at a fixed 1.0 averaged 12.5 (13.3 at worst)
+    // with no more misses than at 0.8. So aim at 13 and only cut past 13.5:
+    // a single 12 ms target answered Brinstar's acid (0.5 ms) by sliding to
+    // the lowest scale, which saves almost nothing there.
+    dr.targetNs = std::clamp(env_float("AURORA_XR_DYNRES_TARGET_MS", 13.f), 3.f, 16.f) * 1.0e6;
+    dr.bandNs = std::clamp(env_float("AURORA_XR_DYNRES_BAND_MS", 0.5f), 0.f, 4.f) * 1.0e6;
     dr.random = env_flag("AURORA_XR_DYNRES_RANDOM", false);
-    dr.scale = 1.f;
+    dr.level = std::max(static_cast<int>((1.f - dr.minScale) / kDynresStep + 0.5f), 0); // start at 1.0
+    dr.scale = std::min(dr.minScale + kDynresStep * static_cast<float>(dr.level), dr.maxScale);
   }
   const float alloc = dr.on ? dr.maxScale : 1.f;
   const uint32_t eyeW = even(static_cast<float>(dr.recWidth) * alloc);
   const uint32_t eyeH = even(static_cast<float>(dr.recHeight) * alloc);
   if (dr.on)
-    Log.info("Dynamic resolution: {:.2f}-{:.2f} of {}x{} per eye, frame GPU target {:.1f} ms", dr.minScale,
-             dr.maxScale, dr.recWidth, dr.recHeight, dr.targetNs / 1.0e6);
+    Log.info("Dynamic resolution: {:.2f}-{:.2f} of {}x{} per eye, frame GPU target {:.1f} +- {:.1f} ms",
+             dr.minScale, dr.maxScale, dr.recWidth, dr.recHeight, dr.targetNs / 1.0e6, dr.bandNs / 1.0e6);
   g_streams[kStereo].width = g_multiview ? eyeW : eyeW * 2;
   g_streams[kStereo].height = eyeH;
   g_streams[kStereo].layers = g_multiview ? 2 : 1;
@@ -3289,7 +3318,7 @@ void map_timing() {
         }
         rb.busy = false;
         const auto now = std::chrono::steady_clock::now();
-        if (now - t.lastLog >= std::chrono::seconds(10) && t.frames > 0) {
+        if (now - t.lastLog >= log_period() && t.frames > 0) {
           std::string line;
           double total = 0;
           for (uint32_t z = 0; z < kZoneCount; ++z) {
@@ -3594,14 +3623,89 @@ void compose(const wgpu::CommandEncoder& cmd, const wgpu::Texture& dst, std::ini
 void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame);
 
 // Dynamic resolution's controller, once per 3D frame (render worker), after
-// docs on dynamic resolution practice: steer by the whole frame's GPU time
-// (timestamps from the first flat pass to the last XR pass, compositor
-// preemptions included, so the jumbotron's grab or anything else in the frame
-// counts), model it as fixed + perPixel * scale^2, and pick the largest scale
-// predicted to fit the target. Down at once and far enough; up quickly, a
-// little each frame. A missed swapchain image is a panic: 10% down, unless
-// the GPU was lightly loaded (then the CPU missed, and only a run of misses
-// counts). Images the headset held long (g_stereoLate) are only logged.
+// Martin Fuller's DRS practice (a live cost table): steer by the whole
+// frame's GPU time (timestamps from the first flat pass to the last XR pass,
+// compositor preemptions included, so the jumbotron's grab or anything else
+// in the frame counts), record it per scale step for the stage and mode, and
+// pick from what each step actually cost. Steps not measured lately are
+// predicted from a fit of cost against pixels over the ones that were,
+// blended with their own history by how much there is of it and how fresh.
+// The fit is only trusted across a spread of scales; until then a quarter
+// of the frame is taken to scale with pixels.
+// Much of a frame's cost doesn't scale with pixels at all (Brinstar: about
+// 9.6 of 11 ms), so a fixed model either gives resolution away for nothing
+// or overshoots. Down past target + band at once, to the best step that
+// fits; up one step at a time after a dwell, only to a step that fits. A
+// run of missed swapchain images (two within a second) is a panic: the step
+// is marked dearer than measured and the scale drops a step. Single misses
+// come at the same rate at any scale (Brinstar: about one in 13 s), so they
+// are only counted. Images the headset held long (g_stereoLate) are only
+// logged.
+namespace {
+constexpr double kDynresFullSamples = 30;  // samples for full trust in a step
+constexpr double kDynresForget = 1200;     // frames for a step's trust to fall to 1/e (20 s)
+constexpr int kDynresUpDwell = 30;         // frames between steps up
+
+double dynres_trust(const DynresCost& c, uint64_t frame) {
+  if (c.samples <= 0)
+    return 0;
+  return std::min(c.samples / kDynresFullSamples, 1.0) *
+         std::exp(-static_cast<double>(frame - c.lastFrame) / kDynresForget);
+}
+
+float dynres_scale(int level) { return g_dynres.minScale + kDynresStep * static_cast<float>(level); }
+
+int dynres_levels() {
+  const auto& dr = g_dynres;
+  return std::clamp(static_cast<int>((dr.maxScale - dr.minScale) / kDynresStep + 0.5f) + 1, 1, kDynresLevels);
+}
+
+// Each step's predicted frame GPU time: its own history where trusted,
+// otherwise a weighted fit ns = a + b * scale^2 over the trusted steps (b at
+// least 0); with a single measured point, half of it is taken to scale with
+// pixels until more are in.
+void dynres_predict(const std::array<DynresCost, kDynresLevels>& costs, uint64_t frame, int levels,
+                    std::array<double, kDynresLevels>& out) {
+  double sw = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (int i = 0; i < levels; ++i) {
+    const double w = dynres_trust(costs[i], frame);
+    if (w <= 0)
+      continue;
+    const double x = static_cast<double>(dynres_scale(i)) * dynres_scale(i);
+    sw += w;
+    sx += w * x;
+    sy += w * costs[i].ns;
+    sxx += w * x * x;
+    sxy += w * x * costs[i].ns;
+  }
+  double a = 0, b = 0;
+  if (sw > 0) {
+    const double mx = sx / sw, my = sy / sw;
+    const double var = sxx / sw - mx * mx;
+    // A fit across a narrow spread of scales mostly measures how the scene
+    // changed between visits: until the steps span enough, assume a quarter
+    // of the frame scales with pixels (Brinstar measured about a tenth).
+    double lo = 1e9, hi = 0;
+    for (int i = 0; i < levels; ++i)
+      if (dynres_trust(costs[i], frame) > 0) {
+        const double x = static_cast<double>(dynres_scale(i)) * dynres_scale(i);
+        lo = std::min(lo, x);
+        hi = std::max(hi, x);
+      }
+    // At most half of the frame scales with pixels: a fit that says more is
+    // reading a scene change as a resolution cost.
+    b = hi - lo >= 0.1 && var > 1e-6 ? std::clamp((sxy / sw - mx * my) / var, 0.0, 0.5 * my / mx) : 0.25 * my / mx;
+    a = my - b * mx;
+  }
+  for (int i = 0; i < levels; ++i) {
+    const double x = static_cast<double>(dynres_scale(i)) * dynres_scale(i);
+    const double w = dynres_trust(costs[i], frame);
+    const double fit = sw > 0 ? a + b * x : 0;
+    out[i] = sw > 0 ? w * costs[i].ns + (1 - w) * fit : 0;
+  }
+}
+} // namespace
+
 void update_dynamic_resolution(bool missed) {
   auto& dr = g_dynres;
   const auto now = std::chrono::steady_clock::now();
@@ -3610,66 +3714,91 @@ void update_dynamic_resolution(bool missed) {
     // Exercise every size: resolution-dependent bugs show up as flicker.
     dr.scale = dr.minScale + (dr.maxScale - dr.minScale) * static_cast<float>(std::rand() % 1000) / 999.f;
   } else {
+    int stage;
+    {
+      std::lock_guard lock{g_arenaMutex};
+      stage = g_stage;
+    }
+    auto& costs = g_dynresCosts[stage * 2 + (g_passthroughWanted ? 1 : 0)];
+    const int levels = dynres_levels();
+    dr.level = std::clamp(dr.level, 0, levels - 1);
+    // Shaders compiling (a stage's first fight of the session) stall the
+    // frame on the CPU and inflate its span; less resolution can't help, and
+    // those frames would make every step look dear for a long while. They're
+    // left out of the costs and don't cut the scale (a panic still does).
+    if (const uint32_t created = gfx::pipelines_created(); created != dr.pipelinesSeen) {
+      dr.pipelinesSeen = created;
+      dr.compileQuiet = 0;
+    } else {
+      ++dr.compileQuiet;
+    }
+    const bool compiling = dr.compileQuiet < 30;
     const auto& t = R.timing;
     if (t.frameSeq != dr.seenSeq && t.lastFrameNs > 0) {
       dr.seenSeq = t.frameSeq;
-      // Readbacks lag a few frames: give a new scale time to show.
-      if (++dr.settle > 4) {
-        dr.emaNs = dr.emaNs == 0 ? t.lastFrameNs : dr.emaNs * 0.85 + t.lastFrameNs * 0.15;
-        dr.nsSum += t.lastFrameNs;
+      // Readbacks lag a few frames: give a new scale time to show. A spike
+      // half again over this visit's average (a hitch elsewhere) is left out.
+      const double ns = t.lastFrameNs;
+      const bool spike = dr.emaNs > 0 && ns > dr.emaNs * 1.5;
+      if (++dr.settle > 4 && !compiling && !spike) {
+        dr.emaNs = dr.emaNs == 0 ? ns : dr.emaNs * 0.85 + ns * 0.15;
+        dr.nsSum += ns;
         ++dr.nsFrames;
-      }
-      // Settled at a scale for a while: a point for the per-pixel slope.
-      if (dr.settle == 40) {
-        const double s2 = static_cast<double>(dr.scale) * dr.scale;
-        const double p2 = static_cast<double>(dr.settledScale) * dr.settledScale;
-        if (dr.settledScale > 0 && std::abs(s2 - p2) > 0.05) {
-          const double slope = std::clamp((dr.emaNs - dr.settledNs) / (s2 - p2), 0.0, dr.emaNs / s2);
-          dr.perPixelNs = dr.perPixelNs == 0 ? slope : dr.perPixelNs * 0.7 + slope * 0.3;
-        }
-        dr.settledScale = dr.scale;
-        dr.settledNs = dr.emaNs;
+        auto& c = costs[dr.level];
+        // What is left of the old history, then this sample on top.
+        c.samples *= std::exp(-static_cast<double>(dr.frameCount - c.lastFrame) / kDynresForget);
+        c.ns = c.samples <= 0 ? ns : c.ns + (ns - c.ns) / std::min(c.samples + 1, kDynresFullSamples);
+        c.samples = std::min(c.samples + 1, kDynresFullSamples);
+        c.lastFrame = dr.frameCount;
       }
     }
-    // Until a slope is learned, assume half the frame scales with pixels.
-    const double s2 = static_cast<double>(dr.scale) * dr.scale;
-    const double b = dr.perPixelNs > 0 ? dr.perPixelNs : 0.5 * dr.emaNs / s2;
-    // A missed 3D image with the GPU under load is the GPU's; otherwise only
-    // a run of three within a second counts. (The render worker's own cadence
-    // jitters, so a long gap between 3D frames is no signal.)
-    bool panic = missed;
-    if (panic) {
+    // A run of missed 3D images (two within a second) is a panic; a lone
+    // miss comes at the same rate at any scale. (The render worker's own
+    // cadence jitters, so a long gap between 3D frames is no signal.)
+    bool panic = false;
+    if (missed) {
       dr.recentMisses[dr.recentIndex++ % dr.recentMisses.size()] = dr.frameCount;
-      if (dr.emaNs > 0 && dr.emaNs < dr.loadNs) {
-        int recent = 0;
-        for (uint64_t f : dr.recentMisses)
-          recent += f != 0 && dr.frameCount - f < 60 ? 1 : 0;
-        if (recent < 3) {
-          panic = false;
-          ++dr.cpuMisses;
-        }
+      int recent = 0;
+      for (uint64_t f : dr.recentMisses)
+        recent += f != 0 && dr.frameCount - f < 60 ? 1 : 0;
+      panic = recent >= 2;
+      if (!panic)
+        ++dr.loneMisses;
+    }
+    int next = dr.level;
+    if (panic) {
+      // This step is dearer than it measured: remembered past the band.
+      auto& c = costs[dr.level];
+      c.ns = std::max(c.ns, dr.targetNs + dr.bandNs) + 0.5e6;
+      c.samples = std::max(c.samples, kDynresFullSamples / 2);
+      c.lastFrame = dr.frameCount;
+      std::fill(dr.recentMisses.begin(), dr.recentMisses.end(), 0);
+      next = dr.level - 1;
+      ++dr.panics;
+    } else if (dr.emaNs > 0 && dr.settle > 4) {
+      std::array<double, kDynresLevels> predicted{};
+      dynres_predict(costs, dr.frameCount, levels, predicted);
+      if (dr.emaNs > dr.targetNs + dr.bandNs && !compiling) {
+        // Down at once to the best step predicted to fit, at least one.
+        next = 0;
+        for (int i = dr.level - 1; i > 0; --i)
+          if (predicted[i] <= dr.targetNs) {
+            next = i;
+            break;
+          }
+      } else if (++dr.sinceStep >= kDynresUpDwell && dr.level + 1 < levels &&
+                 predicted[dr.level + 1] <= dr.targetNs) {
+        next = dr.level + 1;
       }
     }
-    float next = dr.scale;
-    if (panic) {
-      next = dr.scale * 0.9f;
-      ++dr.panics;
-    } else if (dr.emaNs > 0 && b > 0 && dr.settle > 4) {
-      const double want2 = s2 + (dr.targetNs - dr.emaNs) / b;
-      const float want = static_cast<float>(std::sqrt(std::max(want2, 0.0)));
-      if (want < dr.scale - 0.005f)
-        next = want; // all the way down at once
-      else if (want > dr.scale + 0.005f && ++dr.sinceStep >= 3)
-        next = std::min(want, dr.scale + 0.01f); // up a little every few frames
-    }
-    next = std::clamp(next, dr.minScale, dr.maxScale);
-    if (std::abs(next - dr.scale) > 0.001f) {
-      if (dr.emaNs > 0)
-        dr.emaNs += b * (static_cast<double>(next) * next - s2); // the model's guess until measured
-      dr.scale = next;
+    next = std::clamp(next, 0, levels - 1);
+    if (next != dr.level) {
+      dr.level = next;
+      dr.emaNs = 0;
       dr.settle = 0;
       dr.sinceStep = 0;
     }
+    dr.scale = dynres_scale(dr.level);
   }
   dr.lastFrame = now;
   const uint32_t late = g_stereoLate.load();
@@ -3679,14 +3808,28 @@ void update_dynamic_resolution(bool missed) {
   ++dr.frames;
   dr.lowest = std::min(dr.lowest, dr.scale);
   dr.highest = std::max(dr.highest, dr.scale);
-  if (now - dr.lastLog >= std::chrono::seconds(10)) {
-    if (dr.lastLog.time_since_epoch().count() != 0 && dr.frames > 0)
-      Log.info("Dynamic resolution: scale {:.2f} average ({:.2f}-{:.2f}); frame GPU {:.1f} ms average, {:.2f} ms "
-               "per scale^2; {} panics, {} misses taken for the CPU; {} images held long",
+  if (now - dr.lastLog >= log_period()) {
+    if (dr.lastLog.time_since_epoch().count() != 0 && dr.frames > 0) {
+      // The stage's cost table: each step measured lately, as scale:ms.
+      std::string table;
+      if (!dr.random) {
+        int stage;
+        {
+          std::lock_guard lock{g_arenaMutex};
+          stage = g_stage;
+        }
+        const auto& costs = g_dynresCosts[stage * 2 + (g_passthroughWanted ? 1 : 0)];
+        for (int i = 0; i < dynres_levels(); ++i)
+          if (dynres_trust(costs[i], dr.frameCount) > 0.1)
+            table += fmt::format(" {:.3f}:{:.1f}", dynres_scale(i), costs[i].ns / 1.0e6);
+      }
+      Log.info("Dynamic resolution: scale {:.2f} average ({:.2f}-{:.2f}); frame GPU {:.1f} ms average; {} panics, "
+               "{} lone misses; {} images held long; costs{}",
                dr.scaleSum / dr.frames, dr.lowest, dr.highest, dr.nsFrames ? dr.nsSum / dr.nsFrames / 1.0e6 : 0.0,
-               dr.perPixelNs / 1.0e6, dr.panics, dr.cpuMisses, dr.lateImages);
+               dr.panics, dr.loneMisses, dr.lateImages, table);
+    }
     dr.scaleSum = dr.nsSum = 0;
-    dr.frames = dr.nsFrames = dr.panics = dr.cpuMisses = dr.lateImages = 0;
+    dr.frames = dr.nsFrames = dr.panics = dr.loneMisses = dr.lateImages = 0;
     dr.lowest = 99.f;
     dr.highest = 0.f;
     dr.lastLog = now;

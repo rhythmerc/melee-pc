@@ -36,5 +36,9 @@ bool get_pipeline(PipelineRef ref, wgpu::RenderPipeline& pipeline);
 /* Blocks up to maxWaitMs while queued pipelines compile; returns how many are
  * still pending (queued or mid-compile). */
 uint32_t wait_pipelines(uint32_t maxWaitMs);
+// Pipelines created so far; any thread. A count still climbing means shaders
+// are compiling, which stalls the frame on the CPU (XR dynamic resolution
+// leaves such frames out of its costs).
+uint32_t pipelines_created() noexcept;
 
 } // namespace aurora::gfx

@@ -472,20 +472,51 @@ lets a partial render area survive attachments that are cleared and
 discarded (the transient MSAA color and depth), and the stereo image is
 begun as initialized, so Dawn doesn't fall back to the full area.
 
-The controller follows common dynamic resolution practice:
+The controller is a live cost table, after Martin Fuller's [DRS best
+practice](https://martinfullerblog.wordpress.com/2023/10/11/dynamic-resolution-scaling-drs-implementation-best-practice/)
+(rebuilt 2026-10-09):
 
 - **Signal:** the whole frame's GPU time, from the first flat pass to the
   last XR pass (timestamps, compositor preemptions included), so the
   jumbotron's grab or anything else in the frame counts. Timing the 3D pass
   alone read differently per stage.
-- **Model:** frame time = fixed + perPixel × scale², and the largest scale
-  predicted to fit `AURORA_XR_DYNRES_TARGET_MS` (12 ms per game frame; 13.5
-  filled the GPU enough for the XR thread to miss submits).
-- **Steps:** down at once, up 0.01 every three frames.
-- **Panic:** a missed swapchain image cuts 10%, unless the frame's GPU time
-  was under `AURORA_XR_DYNRES_LOAD_MS` (9 ms). Then the CPU missed, and
-  only three within a second count.
+- **Cost table:** the scale moves in steps of 0.025. Each step keeps the
+  frame time measured there, per stage and per mode (mixed reality or VR),
+  for the session. It's trusted by how many samples it has (30 for full
+  trust) and how fresh they are (trust falls to 1/e in 20 s).
+- **Prediction:** a step's cost blends its own history, by that trust,
+  with a fit of cost against pixels (`a + b * scale²`) over the trusted
+  steps. The fit is used only once the steps span enough range (scale²
+  0.1 apart); until then a quarter of the frame is taken to scale with
+  pixels. Much of a frame doesn't scale at all: Brinstar's eye pass is
+  about 9.6 of its 11 ms at any scale.
+- **Target and band:** aim at `AURORA_XR_DYNRES_TARGET_MS` (13 ms per game
+  frame), and cut only past target + `AURORA_XR_DYNRES_BAND_MS` (0.5).
+  A frame averaging 13.5 ms filled the GPU enough for the XR thread to miss
+  submits; Brinstar at a fixed 1.0 averaged 12.5 with no more misses than at
+  0.8.
+- **Steps:** down at once to the best step predicted to fit; up one step
+  after half a second, only to a step predicted to fit.
+- **Clean costs:** while shaders are compiling (a stage's first fight of
+  the session; `gfx::pipelines_created()` still climbing, and half a second
+  after), frames stall on the CPU and look dear at any scale. They're left
+  out of the table and don't cut the scale. A sample half again over the
+  step's running average (a hitch elsewhere) is left out too, and the fit
+  never lets more than half of the frame scale with pixels. Before these,
+  a first fight on Temple sat at low resolution until those early entries
+  faded.
+- **Panic:** two missed swapchain images within a second mark the step
+  dearer than measured and drop a step. A lone miss comes at the same rate
+  at any scale, so it's only counted.
+
+The old controller (one target, a single learned pixel slope that never
+learned) gave Brinstar's resolution away for nothing: its acid adds 0.5 ms,
+which pushed the frame past 12 ms, and the scale slid to 0.8, which saves
+0.5 ms. Measured 2026-10-09, four CPUs in mixed reality: Brinstar 0.82 →
+1.03 average scale (59.3 game fps), Fountain of Dreams 1.29 (59.7).
 - **Testing:** `AURORA_XR_DYNRES_RANDOM=1` picks a random scale every frame.
+  `AURORA_XR_LOG_PERIOD=1` logs the scale, frame time and the stage's cost
+  table every second instead of every 10.
 
 Quest 3, mixed reality, 4x MSAA, game fps: Battlefield with two CPUs 60.0
 at 1.30 throughout; Fountain of Dreams with four 59.6 at 0.83-0.90;
@@ -986,6 +1017,9 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_FIGHT_SCREEN` | 0 | Keep presenting the flat screen during fights (debugging) |
 | `AURORA_XR_HUD_SCALE` | 0.5 | HUD texture resolution, relative to the screen |
 | `AURORA_XR_TIMING` | 1 | Log GPU pass times every 10 s |
+| `AURORA_XR_LOG_PERIOD` | 10 | Seconds between the GPU timing and dynamic resolution log lines |
+| `AURORA_XR_DYNRES_TARGET_MS` | 13 | Dynamic resolution's frame GPU aim (Android) |
+| `AURORA_XR_DYNRES_BAND_MS` | 0.5 | How far past the aim a frame goes before the scale is cut |
 | `AURORA_PIPELINE_INLINE` | 0 | Compile pipelines on the render thread instead of the compile thread |
 | `AURORA_XR_ARENA_SCALE` | 0.0035 | Starting meters per game unit, times each stage's own size (grab with two hands to change) |
 | `AURORA_XR_ARENA_YAW` | 0 | Starting arena turn in degrees (counter-clockwise from above) |

@@ -448,6 +448,8 @@ static wgpu::RenderPipeline create_timed(const NewPipelineCallback& create) {
   return pipeline;
 }
 
+uint32_t pipelines_created() noexcept { return g_statCreated.load(std::memory_order_relaxed); }
+
 static void log_pipeline_stats() {
   size_t demanded;
   {
