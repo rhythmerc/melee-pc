@@ -106,6 +106,10 @@ static inline bool pc_xr_particle_begin(int bank, int id, const float pos[3]) {
     return false;
 }
 static inline void pc_xr_particle_end(bool hidden) { (void)hidden; }
+static inline bool pc_xr_fighter_offscreen_begin(void) { return false; }
+static inline void pc_xr_fighter_offscreen_end(void) {}
+static inline bool pc_xr_magnify_begin(void) { return false; }
+static inline void pc_xr_magnify_end(void) {}
 #endif
 
 #ifdef __cplusplus

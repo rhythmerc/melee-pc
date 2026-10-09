@@ -24,6 +24,7 @@
 #include <sysdolphin/baselib/state.h>
 #ifdef TARGET_PC
 #include "pc/net.h"
+#include "pc/xr_scene.h"
 #endif
 
 static U8Vec4 ftDrawCommon_804D3A88 = { 0xFF, 0xFF, 0xFF, 0x80 };
@@ -395,8 +396,21 @@ static inline void ftDrawCommon_80080E18_inline2(HSD_GObj* gobj, Fighter* old)
 void ftDrawCommon_80080E18(HSD_GObj* gobj, intptr_t arg1)
 {
     Fighter* fp = gobj->user_data;
+    bool offscreen_xr = false;
 
-    if (!fp->is_sleeping && ftLib_UpdateScreenVisibility(gobj)) {
+    if (fp->is_sleeping) {
+        return;
+    }
+    if (!ftLib_UpdateScreenVisibility(gobj)) {
+#ifdef TARGET_PC
+        /* Off the flat camera: the 3D view still shows it (pc/xr_scene.c). */
+        offscreen_xr = pc_xr_fighter_offscreen_begin();
+#endif
+        if (!offscreen_xr) {
+            return;
+        }
+    }
+    {
         switch (Camera_80031060()) {
         case 1:
             if (fp->x2220_b7) {
@@ -414,6 +428,11 @@ void ftDrawCommon_80080E18(HSD_GObj* gobj, intptr_t arg1)
                                   fp->x5AC.xC[4] != NULL ? false : true);
         }
     }
+#ifdef TARGET_PC
+    if (offscreen_xr) {
+        pc_xr_fighter_offscreen_end();
+    }
+#endif
 }
 
 void ftDrawCommon_80081118(void)

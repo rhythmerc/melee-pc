@@ -33,6 +33,7 @@
 #ifdef TARGET_PC
 #include "pc/widescreen.h"
 #include "pc/net.h"
+#include "pc/xr_scene.h"
 #endif
 
 static HSD_WObjDesc ifMagnify_803F97C0 = { 0, { 0.0F, 0.0F, 300.0F }, 0 };
@@ -218,7 +219,19 @@ void ifMagnify_802FB8C0(HSD_GObj* gobj, intptr_t code)
             translate.z = 0.0f;
             HSD_JObjSetTranslate(player->gobj->hsd_obj, &translate);
 
+#ifdef TARGET_PC
+            /* XR: the bubble stays in the flat frame; the fighter itself
+             * stays in the 3D view (pc/xr_scene.c). */
+            {
+                const bool flat_only = pc_xr_magnify_begin();
+                HSD_GObj_JObjCallback(gobj, code);
+                if (flat_only) {
+                    pc_xr_magnify_end();
+                }
+            }
+#else
             HSD_GObj_JObjCallback(gobj, code);
+#endif
             if ((player->state.edge == 4) || (player->state.edge == 2)) {
                 ifMagnify_GetPlayerColor(&color, slot);
                 cp = &color_copy;

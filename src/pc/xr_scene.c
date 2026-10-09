@@ -10,6 +10,7 @@
 #include <aurora/xr.h>
 #include <dolphin/pad.h>
 #include <SDL3/SDL_gamepad.h>
+#include <SDL3/SDL_timer.h>
 #include <melee/gm/gmscene.h>
 #include <melee/gr/ground.h>
 #include <melee/gr/stage.h>
@@ -529,6 +530,53 @@ void pc_xr_hud_camera(void) {
 void pc_xr_mono_camera(void) {
     s_category = AURORA_XR_MONO;
     aurora_xr_camera(AURORA_XR_MONO, NULL);
+}
+
+/* Fighters past the flat camera's view. The game stops drawing them there
+ * (ftLib_UpdateScreenVisibility) and shows a magnifier bubble at the screen
+ * edge instead; the 3D view sees the whole arena, so in XR they keep drawing,
+ * pulsing between see-through and solid to say they're out where the game
+ * would have lost them. The visibility test still runs and sets its flags,
+ * so nothing the game reads changes. Presentation only: the 3D view draws
+ * them, the flat frame's camera can't see them anyway. MELEE_XR_OFFSCREEN=0
+ * keeps the game's behavior. */
+bool pc_xr_fighter_offscreen_begin(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char* v = getenv("MELEE_XR_OFFSCREEN");
+        on = v == NULL || *v != '0';
+    }
+    if (!on || !aurora_xr_active() || s_category != AURORA_XR_WORLD) {
+        return false;
+    }
+    /* 1.5 pulses a second, from 30% to 85% (dithered). */
+    const double t = (double)SDL_GetTicksNS() * 1e-9;
+    const float opacity = 0.575f + 0.275f * (float)sin(t * 2.0 * 3.14159265 * 1.5);
+    aurora_xr_world_clips4_fade(NULL, NULL, 0, opacity);
+    return true;
+}
+
+void pc_xr_fighter_offscreen_end(void) { aurora_xr_world_clip(NULL); }
+
+/* The magnifier bubble (and its arrow) goes to the flat frame only: in XR
+ * the fighter itself stays in view. Its game state is untouched, including
+ * the off-screen flag the damage tick reads. */
+static int s_magnify_saved = -1;
+
+bool pc_xr_magnify_begin(void) {
+    if (!aurora_xr_active() || s_category != AURORA_XR_HUD) {
+        return false;
+    }
+    s_magnify_saved = s_category;
+    pc_xr_mono_camera();
+    return true;
+}
+
+void pc_xr_magnify_end(void) {
+    if (s_magnify_saved == AURORA_XR_HUD) {
+        pc_xr_hud_camera();
+    }
+    s_magnify_saved = -1;
 }
 
 static bool has_joint_rules(int grkind, int map_id) {
