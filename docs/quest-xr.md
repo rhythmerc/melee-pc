@@ -94,7 +94,6 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     - Kongo Jungle: the waterfall shares a part with the plateau.
     - Mushroom Kingdom and Mushroom Kingdom II: the sky and hills are mixed
       into the stage meshes.
-    - Fourside: which buildings count as stage.
     - Rainbow Cruise and Icicle Mountain: scrolling stages.
     - Flat Zone: the Game & Watch frame.
     - Mute City and Big Blue: left for their own treatment.
@@ -180,6 +179,12 @@ and the investigation behind it are in docs/xr-3d-plan.md.
       islands' trees with it.
     - Mesh rules now reach meshes 32-63 of a joint (a 64-bit mask). Before,
       `1 << 33` wrapped to mesh 1.
+  - **Fourside (2026-10-08):** the city is all one joint (part 6 joint 2)
+    and is hidden. That leaves the three buildings you fight on (joints 11,
+    24 and 31 of the same part), whole down to their bases like a model on
+    the table, at 0.8 like Onett. The crane (part 1) has collision and
+    stays. The helicopter (part 3) and the UFO (part 5, a platform) are
+    left as they are: both come in close above the buildings.
   - **To revisit: Fountain of Dreams.** It runs badly on the Quest even
     without the reflection render. Profile it, then build a proper 3D
     reflection: mirror the world draws about the water plane per eye,
@@ -572,8 +577,8 @@ Peach's Castle's roof), and its size against the default arena scale.
 Sizes meet halfway between the game's proportions and making every stage's
 floors as wide as Final Destination's, `sqrt(171 / floor width)` rounded
 (Fountain of Dreams at 1.15), except Temple, tuned down to 0.55 to fit in
-view. Moving stages and stages still being surveyed (Fourside, both
-Mushroom Kingdoms) aren't listed and sit at the world origin at scale 1.
+view. Moving stages and stages still being surveyed (both Mushroom
+Kingdoms) aren't listed and sit at the world origin at scale 1.
 
 Pause the fight to move the arena. Put a controller down and that hand is
 tracked instead (`XR_EXT_hand_tracking`), and a pinch does what the grip

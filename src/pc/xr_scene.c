@@ -133,6 +133,9 @@ static const PartRule s_builtin_rules[] = {
      * the hills (23); the rest is boxed in by clip planes (s_clips). */
     {0x14, 5, 14, -1, false},
     {0x14, 5, 23, -1, false},
+    /* Fourside: the city (part 6 joint 2) around the three buildings you
+     * fight on (joints 11, 24 and 31 of the same part). */
+    {0x15, 6, 2, -1, false},
 };
 
 /* Joints moved in the 3D view only: the joint and everything under it are
@@ -253,6 +256,7 @@ static const StagePlacement s_placements[] = {
     {0x0F, 0.f, 0.f, 0.f, 0.95f},    /* Venom */
     {0x10, 0.f, 0.f, 0.f, 1.f},      /* Pokemon Stadium */
     {0x14, 0.f, 0.f, 0.f, 0.8f},     /* Onett */
+    {0x15, 0.f, 0.f, 0.f, 0.8f},     /* Fourside */
     {0x1B, 0.f, 0.f, 0.f, 1.1f},     /* Flat Zone */
     {0x1C, 0.f, 0.f, 0.f, 1.05f},    /* Dream Land */
     {0x1D, 0.f, 0.f, 0.f, 1.f},      /* Yoshi's Island 64 */
