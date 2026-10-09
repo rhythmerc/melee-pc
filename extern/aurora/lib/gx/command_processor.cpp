@@ -399,9 +399,8 @@ static u32 calc_vtx_size(GXVtxFmt fmt) noexcept {
 // shader's fetch_* helpers read them (shader.cpp), for a vertex buffer the
 // GPU fetches in hardware. `raw` is the draw's GX vertex stream (big-endian
 // indices and direct data); indexed positions come from the bound array.
-static float decode_component(const u8* p, u8 compType, u8 frac, bool le) noexcept {
+static float decode_component(const u8* p, u8 compType, float scale, bool le) noexcept {
   const auto u16v = [&] { return le ? u16(p[0] | (p[1] << 8)) : u16((p[0] << 8) | p[1]); };
-  const float scale = 1.f / static_cast<float>(1u << frac);
   switch (compType) {
   case GX_U8:
     return static_cast<float>(p[0]) * scale;
@@ -421,11 +420,15 @@ static float decode_component(const u8* p, u8 compType, u8 frac, bool le) noexce
   }
 }
 
+static float decode_component(const u8* p, u8 compType, u8 frac, bool le) noexcept {
+  return decode_component(p, compType, 1.f / static_cast<float>(1u << frac), le);
+}
+
 // Where one attribute of one vertex lives (NBT slice `slice`), and its byte
 // order: the same address attr_address/attr_load_nbt_slice build in the
 // shader. Null when an index runs past its array.
-static const u8* decoded_source(const AttrConfig& m, GXAttr attr, u32 slice, const u8* vtx, bool& le) noexcept {
-  const u32 compSize = comp_type_size(attr, static_cast<GXCompType>(m.compType));
+static const u8* decoded_source(const AttrConfig& m, GXAttr attr, u32 slice, const u8* vtx, bool& le,
+                                u32 compSize) noexcept {
   const u32 within = attr == GX_VA_NRM ? slice * 3 * compSize : 0;
   if (m.attrType == GX_DIRECT) {
     le = false;
@@ -444,44 +447,51 @@ static const u8* decoded_source(const AttrConfig& m, GXAttr attr, u32 slice, con
   return static_cast<const u8*>(array.data) + at;
 }
 
+static const u8* decoded_source(const AttrConfig& m, GXAttr attr, u32 slice, const u8* vtx, bool& le) noexcept {
+  return decoded_source(m, attr, slice, vtx, le, comp_type_size(attr, static_cast<GXCompType>(m.compType)));
+}
+
 // fetch_rgb565 .. fetch_rgba8 (shader.cpp).
+// Reciprocal multiplies, not divides: per vertex on the FIFO thread.
 static void decode_color(const u8* p, u8 compType, bool le, float* out) noexcept {
   const auto u16v = [&] { return le ? u32(p[0] | (p[1] << 8)) : u32((p[0] << 8) | p[1]); };
   switch (compType) {
   case GX_RGB565: {
     const u32 v = u16v();
-    out[0] = float((v >> 11) & 0x1F) / 31.f, out[1] = float((v >> 5) & 0x3F) / 63.f,
-    out[2] = float(v & 0x1F) / 31.f, out[3] = 1.f;
+    out[0] = float((v >> 11) & 0x1F) * (1.f / 31.f), out[1] = float((v >> 5) & 0x3F) * (1.f / 63.f),
+    out[2] = float(v & 0x1F) * (1.f / 31.f), out[3] = 1.f;
     break;
   }
   case GX_RGB8:
   case GX_RGBX8:
-    out[0] = p[0] / 255.f, out[1] = p[1] / 255.f, out[2] = p[2] / 255.f, out[3] = 1.f;
+    out[0] = p[0] * (1.f / 255.f), out[1] = p[1] * (1.f / 255.f), out[2] = p[2] * (1.f / 255.f), out[3] = 1.f;
     break;
   case GX_RGBA4: {
     const u32 v = u16v();
-    out[0] = float((v >> 12) & 0xF) / 15.f, out[1] = float((v >> 8) & 0xF) / 15.f,
-    out[2] = float((v >> 4) & 0xF) / 15.f, out[3] = float(v & 0xF) / 15.f;
+    out[0] = float((v >> 12) & 0xF) * (1.f / 15.f), out[1] = float((v >> 8) & 0xF) * (1.f / 15.f),
+    out[2] = float((v >> 4) & 0xF) * (1.f / 15.f), out[3] = float(v & 0xF) * (1.f / 15.f);
     break;
   }
   case GX_RGBA6: {
     const u32 v = le ? u32(p[0] | (p[1] << 8) | (p[2] << 16)) : u32((p[0] << 16) | (p[1] << 8) | p[2]);
-    out[0] = float((v >> 18) & 0x3F) / 63.f, out[1] = float((v >> 12) & 0x3F) / 63.f,
-    out[2] = float((v >> 6) & 0x3F) / 63.f, out[3] = float(v & 0x3F) / 63.f;
+    out[0] = float((v >> 18) & 0x3F) * (1.f / 63.f), out[1] = float((v >> 12) & 0x3F) * (1.f / 63.f),
+    out[2] = float((v >> 6) & 0x3F) * (1.f / 63.f), out[3] = float(v & 0x3F) * (1.f / 63.f);
     break;
   }
   default: // GX_RGBA8
-    out[0] = p[0] / 255.f, out[1] = p[1] / 255.f, out[2] = p[2] / 255.f, out[3] = p[3] / 255.f;
+    out[0] = p[0] * (1.f / 255.f), out[1] = p[1] * (1.f / 255.f), out[2] = p[2] * (1.f / 255.f), out[3] = p[3] * (1.f / 255.f);
     break;
   }
 }
 
 // One draw's vertices for the GPU's own vertex fetch: positions only
 // (decodedPos, float3), or every attribute interleaved (decodedAll,
-// decoded_layout). `raw` is the draw's GX vertex stream.
+// decoded_layout). `raw` is the draw's GX vertex stream. Decoded straight
+// into the storage pool, each attribute's formats worked out once per draw:
+// this is most of the FIFO thread's time on the Quest (Pokemon Stadium's
+// fire form spent 21% of it in memcpy here, and 5% sizing components).
 static gfx::Range push_decoded_vertices(const ShaderConfig& config, const u8* raw, u16 vtxCount,
                                         size_t alignment) noexcept {
-  static std::vector<u8> out;
   DecodedLayout layout;
   if (!config.decodedAll || !decoded_layout(config, layout)) {
     layout = {};
@@ -489,39 +499,77 @@ static gfx::Range push_decoded_vertices(const ShaderConfig& config, const u8* ra
     layout.count = 1;
     layout.stride = 12;
   }
-  out.assign(static_cast<size_t>(vtxCount) * layout.stride, 0);
+  enum : u8 { kU32, kColor, kComps };
+  struct Plan {
+    const AttrConfig* m;
+    GXAttr attr;
+    u8 slice, kind, compType;
+    float scale;
+    u32 compSize, n, words, offset;
+  };
+  std::array<Plan, std::size(DecodedLayout{}.attrs)> plans;
+  for (u8 i = 0; i < layout.count; ++i) {
+    const auto& d = layout.attrs[i];
+    const auto attr = static_cast<GXAttr>(d.attr);
+    const auto& m = config.attrs[attr];
+    const u8 kind = d.format == DecodedFormat::U32               ? kU32
+                    : attr == GX_VA_CLR0 || attr == GX_VA_CLR1 ? kColor
+                                                               : kComps;
+    const u32 comps = d.format == DecodedFormat::F32x2 ? 2 : d.format == DecodedFormat::F32x3 ? 3 : 4;
+    plans[i] = {&m,
+                attr,
+                d.slice,
+                kind,
+                m.compType,
+                1.f / static_cast<float>(1u << m.frac),
+                comp_type_size(attr, static_cast<GXCompType>(m.compType)),
+                std::min<u32>(m.cnt, 3),
+                kind == kU32 ? 1u : comps,
+                d.offset};
+  }
+  u8* base = nullptr;
+  const auto range = gfx::map_storage_aligned(static_cast<size_t>(vtxCount) * layout.stride, alignment, base);
+  if (base == nullptr) {
+    return range;
+  }
   for (u32 v = 0; v < vtxCount; ++v) {
     const u8* vtx = raw + v * config.vtxStride;
-    u8* dst = out.data() + static_cast<size_t>(v) * layout.stride;
+    u8* dst = base + static_cast<size_t>(v) * layout.stride;
     for (u8 i = 0; i < layout.count; ++i) {
-      const auto& d = layout.attrs[i];
-      const auto attr = static_cast<GXAttr>(d.attr);
-      const auto& m = config.attrs[attr];
+      const auto& p = plans[i];
       bool le = false;
-      const u8* src = decoded_source(m, attr, d.slice, vtx, le);
+      const u8* src = decoded_source(*p.m, p.attr, p.slice, vtx, le, p.compSize);
+      // 4-byte words at 4-byte offsets in a 4-aligned range, stored one by
+      // one: a memcpy of a size picked at run time is a library call.
+      u32* out = reinterpret_cast<u32*>(dst + p.offset);
       if (src == nullptr) {
-        continue; // zeros, as the shader's bounds-checked loads return
+        // Zeros, as the shader's bounds-checked loads return.
+        for (u32 w = 0; w < p.words; ++w)
+          out[w] = 0;
+        continue;
       }
-      if (d.format == DecodedFormat::U32) {
-        const u32 value = src[0];
-        std::memcpy(dst + d.offset, &value, 4);
+      if (p.kind == kU32) {
+        out[0] = src[0];
         continue;
       }
       float f[4] = {0.f, 0.f, 0.f, 0.f};
-      if (attr == GX_VA_CLR0 || attr == GX_VA_CLR1) {
-        decode_color(src, m.compType, le, f);
+      if (p.kind == kColor) {
+        decode_color(src, p.compType, le, f);
       } else {
-        const u32 compSize = comp_type_size(attr, static_cast<GXCompType>(m.compType));
-        const u32 n = std::min<u32>(m.cnt, 3);
-        for (u32 c = 0; c < n; ++c) {
-          f[c] = decode_component(src + c * compSize, m.compType, m.frac, le);
+        for (u32 c = 0; c < p.n; ++c) {
+          f[c] = decode_component(src + c * p.compSize, p.compType, p.scale, le);
         }
       }
-      const u32 comps = d.format == DecodedFormat::F32x2 ? 2 : d.format == DecodedFormat::F32x3 ? 3 : 4;
-      std::memcpy(dst + d.offset, f, comps * sizeof(float));
+      // Straight-line stores: a loop here is turned back into a memcpy call.
+      out[0] = std::bit_cast<u32>(f[0]);
+      out[1] = std::bit_cast<u32>(f[1]);
+      if (p.words > 2)
+        out[2] = std::bit_cast<u32>(f[2]);
+      if (p.words > 3)
+        out[3] = std::bit_cast<u32>(f[3]);
     }
   }
-  return gfx::push_storage_aligned(out.data(), out.size(), alignment);
+  return range;
 }
 
 #if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)

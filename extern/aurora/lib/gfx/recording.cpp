@@ -1234,6 +1234,17 @@ Range push_storage_aligned(const uint8_t* data, size_t length, size_t alignment)
   return push(current_frame_packet().storage, data, length, alignment);
 }
 
+Range map_storage_aligned(size_t length, size_t alignment, uint8_t*& out) {
+  if (!check_recording("map_storage_aligned")) {
+    out = nullptr;
+    return {};
+  }
+  auto& storage = current_frame_packet().storage;
+  const Range range = map(storage, length, alignment);
+  out = storage.data() + range.offset;
+  return range;
+}
+
 size_t storage_tail() noexcept { return current_frame_packet().storage.size(); }
 
 Range push_texture_data(const uint8_t* data, u32 bytesPerRow, u32 rowsPerImage) {

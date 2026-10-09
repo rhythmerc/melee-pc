@@ -88,6 +88,9 @@ Range push_storage(const uint8_t* data, size_t length);
 // Into the storage pool at a chosen alignment (0 appends with no padding, so
 // a merged draw's range stays contiguous), and the pool's current end.
 Range push_storage_aligned(const uint8_t* data, size_t length, size_t alignment);
+// Room for `length` bytes in the storage pool, to be written in place through
+// `out` before anything else is pushed (not zeroed).
+Range map_storage_aligned(size_t length, size_t alignment, uint8_t*& out);
 size_t storage_tail() noexcept;
 template <typename T>
 Range push_storage(ArrayRef<T> data) {
