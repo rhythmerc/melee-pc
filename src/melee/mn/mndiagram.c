@@ -106,7 +106,8 @@ static AnimLoopSettings mnDiagram_ArrowAnim = { 0.0f, 199.0f, 0.0f };
 static AnimLoopSettings mnDiagram_CursorAnim = { 0.0f, 10.0f, -0.1f };
 
 /// Overlay over the contiguous .data run starting at
-/// mnDiagram_PopupTextOffsets. The compiler addresses a few of these from that
+/// mnDiagram_PopupTextOffsets (the GC's layout only: on PC only `points`,
+/// the run's own first member, is read through it). The compiler addresses a few of these from that
 /// base rather than from their own symbols: the popup text offsets in
 /// mnDiagram_PopupAnimProc and mnDiagram_CreatePopupTexts, and cursor_anim.
 /// Everything else is accessed through its own symbol.
@@ -688,9 +689,18 @@ void mnDiagram_SortNamesByKOs(void)
     int max_idx;
     u8* dst_iter;
     int i;
+#ifdef TARGET_PC
+    /* The overlay below reaches the name order through the fighter order,
+     * which only works where the two tables sit back to back (the GC's
+     * .bss). Here the linker puts other globals after the fighter order, and
+     * the 120 name indices landed on them: MenMainConB1_Top's joint read
+     * back as name bytes ("DEFG") and VS Records crashed loading it. */
+    u8* dst = mnDiagram_NameDisplayOrder;
+#else
     mnDiagram_Assets* assets =
         (mnDiagram_Assets*) &mnDiagram_FighterDisplayOrder;
     u8* dst = assets->sorted_names;
+#endif
     u32* tp;
     u8* candidate;
     int n;
@@ -718,8 +728,13 @@ void mnDiagram_SortNamesByKOs(void)
             }
         }
         if (max_idx != i) {
+#ifdef TARGET_PC
+            u8* p = &dst[max_idx];
+            u8 temp = *p;
+#else
             u8* p = &assets->sorted_fighters[max_idx];
             u8 temp = *(p += sizeof(mnDiagram_FighterDisplayOrder));
+#endif
             while (max_idx > i) {
                 *p = *(p - 1);
                 p--;
@@ -1467,7 +1482,13 @@ void mnDiagram_PopupAnimProc(HSD_GObj* arg0)
         text->default_alignment = 1;
     }
 
+#ifdef TARGET_PC
+    /* Its own symbol: the table overlay only matches the GC's .data, where
+     * the cursor animation follows the popup text offsets. */
+    anim_frame = mn_8022EFD8(data->jobjs[12], &mnDiagram_CursorAnim);
+#else
     anim_frame = mn_8022EFD8(data->jobjs[12], &tbl->cursor_anim);
+#endif
     {
         HSD_Text* t;
         f32 y;
@@ -1481,7 +1502,11 @@ void mnDiagram_PopupAnimProc(HSD_GObj* arg0)
     }
     text->default_alignment = 1;
 
+#ifdef TARGET_PC
+    if (anim_frame == mnDiagram_CursorAnim.end_frame) {
+#else
     if (anim_frame == tbl->cursor_anim.end_frame) {
+#endif
         HSD_GObjProc_RemoveProc(HSD_GObj_CurrentInvokedProc);
     }
 }
