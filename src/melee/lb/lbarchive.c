@@ -40,7 +40,11 @@ static inline void vLoadSections(HSD_Archive* archive, void** symbol,
 {
     const char* symbol_name;
 
-    for (; symbol != NULL; symbol = va_arg(symbols, void**)) {
+    /* Callers end the list with a plain int 0. Past the eighth argument it
+     * goes on the stack, and arm64 leaves the slot's upper half as it was,
+     * so it can read back as 0x7800000000 (Name Entry's 66 arguments); the
+     * same guard as the loops below. */
+    for (; symbol != NULL && (uint32_t)(uintptr_t)symbol != 0; symbol = va_arg(symbols, void**)) {
         symbol_name = va_arg(symbols, const char*);
         *symbol = NULL;
         *symbol = HSD_ArchiveGetPublicAddress(archive, symbol_name);
