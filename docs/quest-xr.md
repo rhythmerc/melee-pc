@@ -217,12 +217,12 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     and cars are also cut below y −60 (its pylons, cars thrown off it), and
     the track above y 150, where other stretches of it sweep overhead.
     Scale 0.85. A window onto the whole world, behind the box, is for later
-    (also for Rainbow Cruise and Venom).
+    (also for Venom).
   - **Mute City (2026-10-09):** like Big Blue, the action stays put while
     the city streams past, but here the track runs toward the player and
     the fighters fight across it. So it's a diorama: a block of the city
     (part 30: track, gates, towers), boxed solid to x ±210 (the blast
-    zones), z ±90 and y −30 to 200 (about the top blast zone), dissolving
+    zones), z ±90 and y −80 to 200 (about the top blast zone), dissolving
     over the 30 to 70 units past that. Track and towers stream through it.
     Those six planes needed the clip limit raised past four. The
     traffic (part 2) gets the same box. Hidden: the sky dome (part 30
@@ -230,6 +230,12 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     and 14). The floor sat about 150 units below the fight, too far down
     to place the stage by. The platform the fighters ride
     between stops (part 29) is unclipped. Scale 0.8, for the box's width.
+  - **Rainbow Cruise (2026-10-09):** the action stays put while the course
+    (parts 1, 4 and 5) streams past and the ship (6) sails, sinks and comes
+    back. Boxed solid to about the blast zones (x −168 to 185, y −66 to 198)
+    and z ±90, dissolving past that: course pieces stream in and out, and the
+    ship fades as it sinks out of the box. Hidden: the corner brackets around
+    the action (part 3). Scale 0.85, as for Big Blue.
   - **To revisit: Fountain of Dreams.** It runs badly on the Quest even
     without the reflection render. Profile it, then build a proper 3D
     reflection: mirror the world draws about the water plane per eye,
@@ -659,8 +665,8 @@ Peach's Castle's roof), and its size against the default arena scale.
 Sizes meet halfway between the game's proportions and making every stage's
 floors as wide as Final Destination's, `sqrt(171 / floor width)` rounded
 (Fountain of Dreams at 1.15), except Temple, tuned down to 0.55 to fit in
-view. Big Blue and Mute City sit at the world origin, at 0.85 and 0.8 for
-their boxes. Other moving stages aren't listed and sit there at scale 1.
+view. Big Blue, Mute City and Rainbow Cruise sit at the world origin, at
+0.85, 0.8 and 0.85 for their boxes. Other moving stages aren't listed and sit there at scale 1.
 
 Pause the fight to move the arena. Put a controller down and that hand is
 tracked instead (`XR_EXT_hand_tracking`), and a pinch does what the grip
