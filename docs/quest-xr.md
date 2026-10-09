@@ -92,8 +92,6 @@ and the investigation behind it are in docs/xr-3d-plan.md.
       Dream Land, Yoshi's Island 64, Battlefield, Final Destination.
   - **Open questions** (left as they are):
     - Kongo Jungle: the waterfall shares a part with the plateau.
-    - Mushroom Kingdom II: the sky and hills are mixed into the stage
-      meshes.
     - Rainbow Cruise and Icicle Mountain: scrolling stages.
     - Flat Zone: the Game & Watch frame.
     - Mute City and Big Blue: left for their own treatment.
@@ -190,6 +188,12 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     blocks are cut at y −40 with a 15-unit fade, leaving a slab under the
     floor. The castle walls, pipes (joint 2), and the mushroom poles and
     clouds just behind the stage (joint 32) stay. Scale 0.9.
+  - **Mushroom Kingdom II (2026-10-09):** everything is in part 2. The
+    clouds and trees behind (joint 8) are hidden. The side cliffs (joints 3
+    and 5) are floor at y 21 from x ±52 out to ±304, well past the blast
+    zones (±150), so they stay, boxed by clip planes at x ±150 and cut
+    below y −50, which also cuts the waterfall and the pillars under the
+    bridge. Scale 0.8, for the cliffs' width.
   - **To revisit: Fountain of Dreams.** It runs badly on the Quest even
     without the reflection render. Profile it, then build a proper 3D
     reflection: mirror the world draws about the water plane per eye,
@@ -582,8 +586,7 @@ Peach's Castle's roof), and its size against the default arena scale.
 Sizes meet halfway between the game's proportions and making every stage's
 floors as wide as Final Destination's, `sqrt(171 / floor width)` rounded
 (Fountain of Dreams at 1.15), except Temple, tuned down to 0.55 to fit in
-view. Moving stages and stages still being surveyed (Mushroom Kingdom
-II) aren't listed and sit at the world origin at scale 1.
+view. Moving stages aren't listed and sit at the world origin at scale 1.
 
 Pause the fight to move the arena. Put a controller down and that hand is
 tracked instead (`XR_EXT_hand_tracking`), and a pinch does what the grip
