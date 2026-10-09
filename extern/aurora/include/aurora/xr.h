@@ -18,6 +18,14 @@ extern "C" {
  * *out is left untouched. Safe to call from any thread. */
 bool aurora_xr_get_pad(PADStatus* out);
 
+/* Where a laser points on the virtual screen's picture (menus), in the
+ * game frame's own coordinates: 0..1 across the whole frame, x right, y
+ * down. `pressed`: the trigger or a pinch is held, having started on the
+ * picture. Returns false when no laser is on the picture (also during a 3D
+ * fight, or while the screen is being moved); the outputs are then left
+ * untouched. Any thread. */
+bool aurora_xr_screen_pointer(float* x, float* y, bool* pressed);
+
 /* Draw categories for 3D fights (docs/xr-3d-plan.md). Everything drawn after
  * this call, until the next one, is tagged with the category.
  *   AURORA_XR_MONO   only the normal flat frame (the default every frame)

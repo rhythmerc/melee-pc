@@ -281,7 +281,10 @@ To survey a stage on desktop:
 Checked on desktop against Monado (`AURORA_XR_DUMP` images):
 - **Final Destination** (VS boot scene) and **Battlefield** (training boot
   scene) render in 3D at 60 frames per second.
-- **The title screen** stays on the virtual screen.
+- **The title screen** stays on the virtual screen. In XR it never times out
+  into the attract demo, since a fight springing up unasked in the room is
+  jarring, and A starts as well as Start, so a click on the screen (or bare
+  hands) can get past it.
 
 ### Multiview
 
@@ -699,18 +702,46 @@ headset plays each clip forward and then back, so a clip needs to show
 only one direction of a gesture. Rerun the script after changing any of
 these.
 
-### Placing the screen
+### Pointing at the screen
 
-The virtual screen (menus, character and stage select, results) is grabbed
-the same way, at any time it shows. Its lasers only appear while they point
-at it, and the grips press Z as usual unless a laser is on the screen.
+The virtual screen (menus, character and stage select, results) works like
+a Quest window. Its lasers only appear while they point at it. While a laser
+is on it, the grips don't press Z and the triggers don't press L or R.
 
-- **One hand.** Squeeze or pinch with the laser on the screen, or touching
-  it. The screen hangs off the laser or the touch point. While a controller
-  drags it along its laser, that controller's stick pushes it away or pulls
-  it in, instead of steering the menu.
-- **Two hands.** Spreading or closing the hands resizes it about its center,
-  and moving them carries it along.
+- **Pointing.** A laser on the picture is a pointer. The main menus (1P,
+  VS., Trophies, Options, Data and their lists) highlight the option under
+  it, and the character and stage select cursors follow it. A trigger pull or
+  a pinch clicks, which holds A while it's held. On those menus a click on
+  nothing presses nothing. Every other menu (rules, name entry, results) takes
+  a click as plain A, wherever it lands.
+- **The pad still steers.** Moving a stick or the D-pad takes the lead from
+  the pointer, so a laser resting on the screen doesn't fight it. The
+  pointer takes the lead back once it moves away (8 logical pixels) or
+  clicks.
+- **Netplay.** The pointer is off there, because those menus run on the pads
+  both peers exchange. Its clicks only ever reach the game as port 1's A,
+  and the highlight it moves is menu state that no fight reads.
+
+The bar under the screen is its handle:
+
+- **One hand.** Squeeze, pull the trigger, or pinch with the laser on the bar,
+  or touch the bar. The screen hangs off the laser or the touch point. While a
+  controller drags it along its laser, that controller's stick pushes it
+  away or pulls it in, instead of steering the menu.
+- **Two hands.** While one hand holds the bar, the other joins by pressing
+  with its laser anywhere on the screen. Spreading or closing the hands
+  resizes the screen about its center, and moving them carries it along.
+
+The bar is faint until a laser or hand is on it, then bright, then cyan while
+the screen is held.
+
+The game side is `src/pc/xr_pointer.c`, with a hook in each menu that
+follows the pointer: `mnmain.c`, `mncharsel.c` and `mnstagesel.c`. The main
+menus place each option's joint through the menu camera
+(`pc_xr_pointer_project`). The two select screens put their cursor where
+the pointer meets the cursor's plane (`pc_xr_pointer_unproject`).
+`MELEE_POINTER_MOUSE=1` drives the pointer with the mouse in the window, so
+these hooks can be tried flat on a desktop.
 
 The screen always turns to face the head. Its pose is separate from the
 arena's: moving or resizing one leaves the other alone. It lasts for the
@@ -721,8 +752,11 @@ The lasers and dots are quad layers with static textures, drawn at display
 rate from the latest controller and hand poses. Coloring them needs
 `XR_KHR_composition_layer_color_scale_bias`. A laser or dot is cyan on the
 arena, amber while grabbing, and faint white otherwise. A pinch closes when
-the thumb and index tips come within 2 cm and opens past 3.5 cm. The arena moves at the
-game's frame rate.
+the thumb and index tips come within 2 cm and opens past 3.5 cm. A tracked hand
+whose palm turns toward the face isn't pointing, as on the Quest's own menus.
+Its laser goes, and its pinches do nothing, until the palm turns away again,
+unless that hand is already holding or clicking something. The arena moves at
+the game's frame rate.
 
 ### Performance
 
@@ -899,10 +933,11 @@ AURORA_XR=1 build/linux-xr-fork/melee disc.rvz
 | A / B | A / B |
 | X / Y | X / Y |
 | Triggers | Analog L / R, digital past 90% |
-| Either grip | Z (grabs the arena while paused, or the screen with a laser on it; with hands, pinch) |
+| Either grip | Z (grabs the arena while paused, or the screen's bar with a laser on it; with hands, pinch) |
+| Either trigger, laser on the screen | Clicks (A) where it points, instead of L / R |
 | Left menu button | Start |
 
-While a stage waits before its first fight, A or Start begins it, B resets
+While a stage waits before a fight, A or Start begins it, B resets
 the stage's placement, and Y shows or hides the how-to cards.
 
 An external gamepad plays as player one, alongside the headset's
@@ -943,6 +978,8 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_HUD_HEIGHT` | 0.3 | Lowest HUD plane height (center) above the arena in meters; set, it's fixed there |
 | `AURORA_XR_HUD_CLEARANCE` | 40 | Game units between the stage's highest floor and the HUD's bottom edge |
 | `AURORA_XR_HUD_BACKDROP` | 0 | Minimum HUD alpha, as a translucent panel behind it |
+| `MELEE_POINTER_MOUSE` | 0 | 1: the mouse in the window is the screen's pointer (testing the menu hooks flat) |
+| `AURORA_XR_HUD_ON_TOP` | 0 | 1: the HUD draws over the fighters in mixed reality too (it always does in full VR) |
 | `AURORA_XR_DUMP` | unset | Directory to write each stream's image once (PPM, plus alpha as PGM) |
 | `MELEE_XR_STAGE_LAYERS` | `0xB` | Stage layers shown in 3D, as a bitmask |
 | `MELEE_XR_PARTS` | unset | Overrides, e.g. `16:1,-16:1/12,-16:2/2.27` (`stage:part[/joint[.mesh]]`, `-` hides) |

@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include "gmboot.h"
 #include "pc/net.h"
+#include "pc/xr_scene.h"
 #endif
 #include <melee/db/db.h>
 #include <melee/lb/lbarchive.h>
@@ -292,7 +293,11 @@ void gm_Scene_Title_OnFrame(void)
     }
     frame_count++;
 #ifdef TARGET_PC
-    if (getenv("MELEE_NO_ATTRACT") != NULL || pc_boot_scene() == GM_ONLINE) {
+    /* No attract demo in XR: a fight springing up unasked in the room is
+     * jarring, and it would be held for placing its stage. */
+    if (getenv("MELEE_NO_ATTRACT") != NULL || pc_boot_scene() == GM_ONLINE ||
+        pc_xr_presenting())
+    {
         if (frame_count > 600) {
             frame_count = 0;
         }
@@ -305,6 +310,13 @@ void gm_Scene_Title_OnFrame(void)
         return;
     }
 
+#ifdef TARGET_PC
+    /* In XR, A starts too: a click on the screen (pc/xr_pointer.h) is A,
+     * and bare hands have no Start. */
+    if (pc_xr_presenting() && (input & HSD_PAD_A)) {
+        input = (input & ~HSD_PAD_A) | HSD_PAD_START;
+    }
+#endif
     if (input & HSD_PAD_START) {
         lbAudioAx_80026F2C(0x1C);
         lbAudioAx_8002702C(0xC, 0);

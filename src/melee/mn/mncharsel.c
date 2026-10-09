@@ -318,6 +318,7 @@ static struct CSSDoorsData2 data2 = {
 
 #ifdef TARGET_PC
 #include "pc/region.h"
+#include "pc/xr_pointer.h"
 /* The character-select header and token counters are composed by index out
  * of SdSlChr, and the USA build's layout does not exist on PAL: there the
  * digits are string 73 (one byte per glyph, see sislib.static.h), 72 is the
@@ -2574,6 +2575,28 @@ void mnCharSel_CursorThink(HSD_GObj* gobj)
 
         cursor->xC = (f32) ((0.0002f * dx) + cursor->xC);
         cursor->x10 = (f32) ((0.0002f * dy) + cursor->x10);
+#ifdef TARGET_PC
+        /* Pointing at the menus (pc/xr_pointer.h): the cursor port 1 steers
+         * goes where the pointer is, and a click is A wherever it lands. */
+        {
+            float px, py, w[3];
+            bool leads;
+            const int steering = mnCharSel_804D6CF5 == 1
+                                     ? (u8) mnCharSel_804D6CF0
+                                     : cursor->x4;
+            if (steering == 0 && pc_xr_pointer_at(&px, &py, &leads)) {
+                pc_xr_pointer_target(true);
+                if (leads &&
+                    pc_xr_pointer_unproject(GET_COBJ(mnCharSel_804D6CB8), px,
+                                            py, HSD_JObjGetTranslationZ(jobj),
+                                            w))
+                {
+                    cursor->xC = w[0];
+                    cursor->x10 = w[1];
+                }
+            }
+        }
+#endif
 
         mnCharSel_803F0E8C[cursor->x4].data->scroll_amt = 0.0f;
 

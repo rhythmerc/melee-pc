@@ -667,11 +667,46 @@ u8 mn_802295AC(void)
     return 0;
 }
 
+#ifdef TARGET_PC
+#include "pc/xr_pointer.h"
+/* Pointing at the menus (pc/xr_pointer.h): the selection under the pointer
+ * on the menu showing, found as its panel updates (fn_8022AFEC), taken by
+ * the menu's think at its next input read. */
+static struct {
+    bool fresh;
+    MenuKind8 kind;
+    s8 selection; /* -1: none */
+} mn_PcPointer;
+
+static void mn_PcPointerHover(void)
+{
+    float x, y;
+    bool leads;
+    if (!mn_PcPointer.fresh) {
+        return;
+    }
+    mn_PcPointer.fresh = false;
+    /* Asked now, not when the panel looked: a click takes the lead back
+     * this frame, and must land on what it points at. */
+    if (pc_xr_pointer_at(&x, &y, &leads) && leads &&
+        mn_PcPointer.kind == mn_804A04F0.cur_menu &&
+        mn_PcPointer.selection >= 0 &&
+        mn_PcPointer.selection != mn_804A04F0.hovered_selection)
+    {
+        sfxMove();
+        mn_804A04F0.hovered_selection = mn_PcPointer.selection;
+    }
+}
+#endif
+
 u32 mn_80229624(u32 slot)
 {
     u32 ret = 0;
     u64 inputs_repeated;
     u64 inputs_trigger;
+#ifdef TARGET_PC
+    mn_PcPointerHover();
+#endif
     inputs_repeated = gm_801A36C0(slot);
     inputs_trigger = gm_GetButtonsTriggered(slot);
     if (mn_804D6BC8.cooldown != 0) {
@@ -1297,6 +1332,51 @@ void fn_8022AF10(HSD_GObj* gp)
     HSD_JObjAnim(jobj);
 }
 
+#ifdef TARGET_PC
+/* The selection under the pointer on this panel, while it is the menu
+ * showing; what the think takes (mn_PcPointerHover). While the panel is
+ * still sliding in, nothing is under it, so a click there presses nothing. */
+static void mn_PcPointerFind(MainMenuData* data)
+{
+    float px, py, x, y, best_dy = 1e9f;
+    bool leads;
+    int i, count, best = -1;
+    if (data->menu_kind != mn_804A04F0.cur_menu || mn_804D6BAC == NULL ||
+        !pc_xr_pointer_at(&px, &py, &leads))
+    {
+        return;
+    }
+    if (data->state != MENU_STATE_IDLE) {
+        pc_xr_pointer_target(false);
+        return;
+    }
+    count = mn_803EB6B0[data->menu_kind].selection_count & 0xFF;
+    for (i = 0; i < count; i++) {
+        Vec3 w;
+        if (!mn_80229938(data->menu_kind, i)) {
+            continue;
+        }
+        lb_8000B1CC(data->tree[mn_803EAE68[mn_80229A04(data->menu_kind, i)]],
+                    NULL, &w);
+        if (!pc_xr_pointer_project(GET_COBJ(mn_804D6BAC), &w.x, &x, &y)) {
+            continue;
+        }
+        /* The option boxes are about 280 x 44 logical pixels about their
+         * joint, 46 to 50 apart: the nearest one in reach. */
+        if (fabsf(py - y) < 25.f && fabsf(px - x) < 140.f &&
+            fabsf(py - y) < best_dy)
+        {
+            best = i;
+            best_dy = fabsf(py - y);
+        }
+    }
+    pc_xr_pointer_target(best >= 0);
+    mn_PcPointer.fresh = true;
+    mn_PcPointer.kind = data->menu_kind;
+    mn_PcPointer.selection = best;
+}
+#endif
+
 /// @brief main menu think func that handles the updating
 /// of objects (animations, text)
 void fn_8022AFEC(HSD_GObj* gp)
@@ -1468,6 +1548,7 @@ void fn_8022AFEC(HSD_GObj* gp)
         break;
     }
 #ifdef TARGET_PC
+    mn_PcPointerFind(final_data);
     mn_UpdatePcLabels(final_data,
                       final_data->state != MENU_STATE_EXIT_FROM &&
                           final_data->state != MENU_STATE_ENTER_FROM);

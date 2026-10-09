@@ -29,6 +29,7 @@
 
 #include "pc/pc.h"
 #include "pc/touch.h"
+#include "pc/xr_pointer.h"
 
 static bool s_key[SDL_SCANCODE_COUNT];
 static bool s_key_latched[SDL_SCANCODE_COUNT];
@@ -335,6 +336,13 @@ static void publish_locked(void) {
             st.triggerLeft = gc_st.triggerLeft;
         if (gc_st.triggerRight > st.triggerRight)
             st.triggerRight = gc_st.triggerRight;
+        any_active = true;
+    }
+
+    /* Clicks on the menus with the headset's lasers (xr_pointer.c). */
+    const u16 pointer_buttons = pc_xr_pointer_frame(&st);
+    if (pointer_buttons != 0) {
+        st.button |= pointer_buttons;
         any_active = true;
     }
 

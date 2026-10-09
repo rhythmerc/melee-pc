@@ -680,6 +680,8 @@ bool pc_xr_mixed_reality(void) {
     return s_xr_mode == 1 && aurora_xr_active();
 }
 
+bool pc_xr_presenting(void) { return aurora_xr_active(); }
+
 bool pc_xr_toggle_mode(void) {
     if (!aurora_xr_active()) {
         return false;

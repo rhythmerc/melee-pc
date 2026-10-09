@@ -122,6 +122,7 @@ struct StageSelUserData {
 
 #ifdef TARGET_PC
 #include "pc/net.h"
+#include "pc/xr_pointer.h"
 #include "pc/net_lan.h"
 #include "pc/net_rank_session.h"
 #include <sysdolphin/baselib/sislib.h>
@@ -570,6 +571,26 @@ void fn_8025A310(HSD_GObj* gobj)
     if (19.0F < sp1C.y) {
         sp1C.y = 19.0F;
     }
+#ifdef TARGET_PC
+    /* Pointing at the menus (pc/xr_pointer.h): the cursor goes where the
+     * pointer is when port 1 may steer it, and a click is A only over a
+     * stage (below); A anywhere else takes the last stage it was on. */
+    bool pointed = false;
+    {
+        float px, py, w[3];
+        bool leads;
+        if (mnStageSel_804D50A0 <= 0 && pc_xr_pointer_at(&px, &py, &leads)) {
+            pointed = true;
+            pc_xr_pointer_target(false);
+            if (leads && pc_xr_pointer_unproject(GET_COBJ(mnStageSel_804D6C9C),
+                                                 px, py, sp1C.z, w))
+            {
+                sp1C.x = w[0] < -27.0F ? -27.0F : w[0] > 27.0F ? 27.0F : w[0];
+                sp1C.y = w[1] < -19.0F ? -19.0F : w[1] > 19.0F ? 19.0F : w[1];
+            }
+        }
+    }
+#endif
 
     HSD_JObjSetTranslate(jobj, &sp1C);
     lb_8000B1CC(jobj, NULL, &sp1C);
@@ -582,6 +603,11 @@ void fn_8025A310(HSD_GObj* gobj)
                 if (sp10.y - mnStageSel_803F06D0[i].x10 < sp1C.y &&
                     sp10.y + mnStageSel_803F06D0[i].x10 > sp1C.y)
                 {
+#ifdef TARGET_PC
+                    if (pointed) {
+                        pc_xr_pointer_target(true);
+                    }
+#endif
                     mnStageSel_804D6CAE = i;
                     return;
                 }
