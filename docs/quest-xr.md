@@ -194,6 +194,17 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     zones (±150), so they stay, boxed by clip planes at x ±150 and cut
     below y −50, which also cuts the waterfall and the pillars under the
     bridge. Scale 0.8, for the cliffs' width.
+  - **Big Blue (2026-10-09):** the action stays put in game space (the
+    Falcon Flyer, and the floors, which move only as cars come and go)
+    while the track streams past, curving and banking. Hidden: the sky and
+    clouds (part 2) and the corner brackets around the action (31). Boxed:
+    the track (parts 34 and 36), the cars (33) and the craft fighters ride
+    (32), solid out to the blast zones (x ±152) and dissolving over the 70
+    units past them, so the track streams in and out of the box. The track
+    and cars are also cut below y −60 (its pylons, cars thrown off it), and
+    the track above y 150, where other stretches of it sweep overhead.
+    Scale 0.85. A window onto the whole world, behind the box, is for later
+    (also for Mute City, Rainbow Cruise and Venom).
   - **To revisit: Fountain of Dreams.** It runs badly on the Quest even
     without the reflection render. Profile it, then build a proper 3D
     reflection: mirror the world draws about the water plane per eye,

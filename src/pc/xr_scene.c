@@ -144,6 +144,11 @@ static const PartRule s_builtin_rules[] = {
      * cliffs are floor out past the blast zones, so they are boxed in
      * (s_clips). */
     {0x19, 2, 8, -1, false},
+    /* Big Blue: the sky and clouds (part 2) and the corner brackets around
+     * the action (31). The track, cars and passing craft are boxed in
+     * (s_clips). */
+    {0x13, 2, -1, -1, false},
+    {0x13, 31, -1, -1, false},
 };
 
 /* Joints moved in the 3D view only: the joint and everything under it are
@@ -229,6 +234,19 @@ static const ClipRule s_clips[] = {
     CLIP_LEFT(0x19, 2, -150.f, 10.f),
     CLIP_RIGHT(0x19, 2, 150.f, 10.f),
     CLIP_BELOW(0x19, 2, -50.f, 20.f),
+    /* Big Blue: the track streams through a box, solid out to the blast
+     * zones (x +-152) and dissolving over the 70 units past them: the track
+     * (parts 34 and 36, also cut below and above), the cars (33) and
+     * the passing craft fighters ride (32). The Falcon Flyer stays put. */
+#define BB_BOX(part) CLIP_LEFT(0x13, part, -220.f, 70.f), CLIP_RIGHT(0x13, part, 220.f, 70.f)
+    BB_BOX(32), BB_BOX(33), BB_BOX(34), BB_BOX(36),
+#undef BB_BOX
+    CLIP_BELOW(0x13, 34, -60.f, 30.f),
+    CLIP_BELOW(0x13, 36, -60.f, 30.f),
+    CLIP_BELOW(0x13, 33, -60.f, 30.f), /* cars thrown off the track */
+    /* ...and above the action, where other stretches of it sweep overhead. */
+    {0x13, 34, {0.f, -1.f, 0.f, 150.f}, 40.f},
+    {0x13, 36, {0.f, -1.f, 0.f, 150.f}, 40.f},
     /* Brinstar: only the stretch of the acid's river around the stage (it
      * runs the length of the cave). LevelRule hides it while it is low. */
     CLIP_LEFT(0x08, 8, -120.f, 12.f),
@@ -271,6 +289,7 @@ static const StagePlacement s_placements[] = {
     {0x10, 0.f, 0.f, 0.f, 1.f},      /* Pokemon Stadium */
     {0x14, 0.f, 0.f, 0.f, 0.8f},     /* Onett */
     {0x15, 0.f, 0.f, 0.f, 0.8f},     /* Fourside */
+    {0x13, 0.f, 0.f, 0.f, 0.85f},    /* Big Blue */
     {0x18, 0.f, 0.f, 0.f, 0.9f},     /* Mushroom Kingdom */
     {0x19, 0.f, 0.f, 0.f, 0.8f},     /* Mushroom Kingdom II: its cliffs reach the blast zones */
     {0x1B, 0.f, 0.f, 0.f, 1.1f},     /* Flat Zone */
