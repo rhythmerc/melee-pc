@@ -140,6 +140,10 @@ static const PartRule s_builtin_rules[] = {
      * (joint 46). The mushroom poles and clouds just behind (32) stay; the
      * ground's deep blocks are cut (s_clips). */
     {0x18, 3, 46, -1, false},
+    /* Mushroom Kingdom II: the clouds and trees behind (part 2 joint 8). The
+     * cliffs are floor out past the blast zones, so they are boxed in
+     * (s_clips). */
+    {0x19, 2, 8, -1, false},
 };
 
 /* Joints moved in the 3D view only: the joint and everything under it are
@@ -220,9 +224,8 @@ static const ClipRule s_clips[] = {
     CLIP_BEHIND(0x14, 5, -70.f, 6.f),
     CLIP_FRONT(0x14, 5, 70.f, 6.f),
     CLIP_BELOW(0x18, 3, -40.f, 15.f), /* Mushroom Kingdom: the ground's deep blocks */
-    /* Mushroom Kingdom II: the cliffs are floor out past the blast zones.
-     * Cut at the blast zones and below, with the waterfall, the pillars
-     * under the bridge, and the trees and clouds behind (joint 8). */
+    /* Mushroom Kingdom II: the cliffs, cut at the blast zones and below,
+     * with the waterfall and the pillars under the bridge. */
     CLIP_LEFT(0x19, 2, -150.f, 10.f),
     CLIP_RIGHT(0x19, 2, 150.f, 10.f),
     CLIP_BELOW(0x19, 2, -50.f, 20.f),
