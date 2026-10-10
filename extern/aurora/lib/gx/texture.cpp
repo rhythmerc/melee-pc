@@ -134,6 +134,48 @@ std::atomic<uint64_t> s_pendingInvalidations = 0;
 std::atomic<uint64_t> s_pendingCacheClears = 0;
 TextureStats s_stats;
 
+// Texture content hashes, kept for the frame (AURORA_TEX_HASH_MEMO=0 turns
+// it off). HSD sets up a fresh GXTexObj for every draw, so the object cache
+// never hits and every draw hashed its texture's whole data: about 8% of the
+// FIFO thread on the Quest (four-CPU Mute City). Keyed by where the data is
+// and how it's read; cleared at the end of the frame and on
+// GXInvalidateTexAll, which a game calls once the CPU has written texture
+// memory. AURORA_TEX_HASH_MEMO_CHECK=1 hashes anyway and counts mismatches.
+struct HashMemoKey {
+  const void* data;
+  size_t bytes;
+  bool operator==(const HashMemoKey&) const = default;
+  template <typename H>
+  friend H AbslHashValue(H h, const HashMemoKey& k) {
+    return H::combine(std::move(h), k.data, k.bytes);
+  }
+};
+absl::flat_hash_map<HashMemoKey, XXH128_hash_t> s_hashMemo;
+uint64_t s_hashMemoMismatches = 0;
+
+XXH128_hash_t memo_hash(const void* data, size_t bytes) {
+  static const bool on = [] {
+    const char* v = std::getenv("AURORA_TEX_HASH_MEMO");
+    return v == nullptr || *v != '0';
+  }();
+  if (!on)
+    return XXH3_128bits(data, bytes);
+  static const bool check = [] {
+    const char* v = std::getenv("AURORA_TEX_HASH_MEMO_CHECK");
+    return v != nullptr && *v == '1';
+  }();
+  const HashMemoKey key{data, bytes};
+  if (const auto it = s_hashMemo.find(key); it != s_hashMemo.end()) {
+    if (check && !XXH128_isEqual(it->second, XXH3_128bits(data, bytes)) && ++s_hashMemoMismatches <= 8)
+      Log.warn("Texture hash memo: stale entry ({} bytes)", bytes);
+    return it->second;
+  }
+  const XXH128_hash_t h = XXH3_128bits(data, bytes);
+  s_hashMemo.emplace(key, h);
+  s_stats.hashedBytes += bytes;
+  return h;
+}
+
 #if DEBUG
 constexpr bool BuildSourceKeyForDebug = true;
 #else
@@ -289,13 +331,12 @@ TextureKeys hash_texture_source(const GXTexObj_& obj, const GXTlutObj_* tlut, bo
 
   TextureKeys keys;
   keys.contentKey = {
-      .textureHash = XXH3_128bits(obj.data, textureBytes),
+      .textureHash = memo_hash(obj.data, textureBytes),
       .width = obj.width(),
       .height = obj.height(),
       .format = obj.format(),
       .mipCount = obj.mip_count(),
   };
-  s_stats.hashedBytes += textureBytes;
 
   uint32_t minTlutIndex = UINT32_MAX;
   uint32_t maxTlutIndex = 0;
@@ -357,10 +398,9 @@ TextureKeys hash_texture_source(const GXTexObj_& obj, const GXTlutObj_* tlut, bo
   if (tlut != nullptr) {
     const size_t tlutBytes = texture::tlut_source_size(tlut->numEntries);
     CHECK(tlut->data != nullptr && tlutBytes != 0, "invalid TLUT source for content hash");
-    keys.contentKey.tlutHash = XXH3_128bits(tlut->data, tlutBytes);
+    keys.contentKey.tlutHash = memo_hash(tlut->data, tlutBytes);
     keys.contentKey.tlutFormat = static_cast<u32>(tlut->format);
     keys.contentKey.tlutEntries = tlut->numEntries;
-    s_stats.hashedBytes += tlutBytes;
 
     if (keys.sourceKey.has_value() && minTlutIndex != UINT32_MAX) {
       const size_t tlutOffset = static_cast<size_t>(minTlutIndex) * sizeof(uint16_t);
@@ -718,6 +758,7 @@ gfx::TextureHandle resolve_static_palette_texture(const GXTexObj_& obj, const GX
 }
 
 void end_frame() noexcept {
+  s_hashMemo.clear();
   const auto streamingStats = gfx::texture_replacement::process_streaming();
   s_stats.pendingLoads = streamingStats.pendingLoads;
   s_stats.publishes = streamingStats.publishes;
@@ -788,6 +829,8 @@ void evict_texture_object(u32 texObjId) noexcept {
     }
   }
 }
+
+void invalidate_texture_hashes() noexcept { s_hashMemo.clear(); }
 
 void evict_tlut_object(u32 tlutObjId) noexcept {
   if (const auto it = s_tlutObjectCaches.find(tlutObjId); it != s_tlutObjectCaches.end()) {

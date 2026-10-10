@@ -692,6 +692,28 @@ needs more than 16 vertex inputs falls back to positions only. Both are on
 by default on Android (`AURORA_VTX_DECODE=0` leaves positions only,
 `AURORA_POS_DECODE=0` with it neither).
 
+Decoded vertices are kept across frames (`AURORA_VTX_CACHE`, on with the
+decode; 2026-10-10). Re-decoding the same stage and fighter meshes every
+frame was a third of the FIFO thread on the Quest. A draw's key is its own
+vertex stream (indices, or the data itself), its attribute formats, and the
+contents of each array it indexes, hashed once a frame when first used; an
+array the game rewrites gets a new key, so nothing goes stale. Draws come in
+the same order every frame, so last frame's entry at the same position is
+tried before the table, and entries unused for two seconds are dropped:
+with a table of 126,000 stale entries the lookups cost as much as the decode
+saved. The texture content hash is memoized for the frame too (keyed by the
+data's address and size, cleared on `GXInvalidateTexAll`, which now reaches
+the FIFO as `GX_AURORA_INVALIDATE_TEX`): HSD sets up a new `GXTexObj` for
+every draw, so the per-object cache never hit and every draw hashed its
+whole texture. `AURORA_VTX_CACHE_CHECK=1` and `AURORA_TEX_HASH_MEMO_CHECK=1`
+recompute every hit and warn on a mismatch (none on Mute City or Pokémon
+Stadium); `AURORA_VTX_CACHE_STATS=1` logs hits.
+
+Four-CPU Mute City, FIFO thread: about 9.8 -> 8.3 ms of CPU a frame for the
+vertex cache (decode from 31% of it to 4%), and the frame's recording ends
+9.8 ms after the tick instead of 10.9. At latency 3 that took it from 2.7
+stale frames a second to 1.1, every image on its two display frames.
+
 Quest 3, mixed reality, four CPUs, game fps, decode off -> on:
 
 | Stage | Off | On |
@@ -1159,6 +1181,8 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_DYNRES_BAND_MS` | 0.5 | How far past the aim a frame goes before the scale is cut |
 | `AURORA_XR_FIXED_LATENCY` | adaptive | Display frames from tick to release; 0 turns fixed-latency presentation off |
 | `AURORA_XR_RELEASE_DONE` | 0 | Hand 3D images to the runtime only once their GPU work is done (Android; drops frames) |
+| `AURORA_VTX_CACHE` | 1 | Keep decoded vertices across frames (with `AURORA_VTX_DECODE`) |
+| `AURORA_TEX_HASH_MEMO` | 1 | Reuse texture content hashes within a frame |
 | `AURORA_PIPELINE_INLINE` | 0 | Compile pipelines on the render thread instead of the compile thread |
 | `AURORA_XR_ARENA_SCALE` | 0.0035 | Starting meters per game unit, times each stage's own size (grab with two hands to change) |
 | `AURORA_XR_ARENA_YAW` | 0 | Starting arena turn in degrees (counter-clockwise from above) |

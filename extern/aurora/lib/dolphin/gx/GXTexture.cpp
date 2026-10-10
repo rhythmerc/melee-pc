@@ -345,7 +345,9 @@ void GXLoadTlut(const GXTlutObj* obj_, u32 idx) {
 // TODO GXInvalidateTexRegion
 
 void GXInvalidateTexAll() {
-  // no-op?
+  // Texture memory may have changed: content hashes worked out this frame
+  // (aurora::gx::texture's memo) can't be reused past here.
+  GX_WRITE_AURORA(GX_AURORA_INVALIDATE_TEX);
 }
 
 // TODO GXPreLoadEntireTexture

@@ -308,6 +308,10 @@ struct AttrArray {
   u8 stride;
   bool le = true;
   gfx::Range cachedRange;
+  // Its contents' hash this frame, for the decoded-vertex cache: worked out
+  // at its first decoded draw, cleared with cachedRange.
+  u64 contentHash = 0;
+  bool hashed = false;
 };
 inline bool operator==(const AttrArray& lhs, const AttrArray& rhs) {
   return lhs.data == rhs.data && lhs.size == rhs.size && lhs.stride == rhs.stride && lhs.le == rhs.le;
@@ -389,6 +393,7 @@ struct GXState {
   std::array<IndStage, MaxIndStages> indStages;
   std::array<IndTexMtxInfo, MaxIndTexMtxs> indTexMtxs;
   std::array<AttrArray, MaxVtxAttr> arrays;
+  u32 frameSerial = 0; // frames recorded (the decoded-vertex cache's clock)
   bool depthCompare = true;
   bool depthUpdate = true;
   bool colorUpdate = true;
@@ -455,6 +460,7 @@ void clear_copy_texture_cache() noexcept;
 void evict_copy_texture(const void* dest) noexcept;
 void evict_texture_object(u32 texObjId) noexcept;
 void evict_tlut_object(u32 tlutObjId) noexcept;
+void invalidate_texture_hashes() noexcept;
 Vec2<uint32_t> logical_fb_size() noexcept;
 gfx::Viewport map_logical_viewport(const gfx::Viewport& logicalViewport) noexcept;
 gfx::ClipRect map_logical_scissor(const gfx::ClipRect& logicalScissor) noexcept;

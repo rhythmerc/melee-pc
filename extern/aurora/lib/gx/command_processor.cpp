@@ -18,11 +18,13 @@
 #include "texture.hpp"
 
 #include <tracy/Tracy.hpp>
+#include <xxhash.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 namespace aurora::gx::fifo {
@@ -301,6 +303,7 @@ ProcessResult process(const u8* data, u32 size) noexcept {
     case CP_CMD_INVAL_VTX: {
       for (auto& array : g_gxState.arrays) {
         array.cachedRange = {};
+        array.hashed = false;
       }
       g_gxState.dirty |= DirtyImmediates;
       break;
@@ -490,8 +493,7 @@ static void decode_color(const u8* p, u8 compType, bool le, float* out) noexcept
 // into the storage pool, each attribute's formats worked out once per draw:
 // this is most of the FIFO thread's time on the Quest (Pokemon Stadium's
 // fire form spent 21% of it in memcpy here, and 5% sizing components).
-static gfx::Range push_decoded_vertices(const ShaderConfig& config, const u8* raw, u16 vtxCount,
-                                        size_t alignment) noexcept {
+static DecodedLayout decode_layout_for(const ShaderConfig& config) noexcept {
   DecodedLayout layout;
   if (!config.decodedAll || !decoded_layout(config, layout)) {
     layout = {};
@@ -499,6 +501,11 @@ static gfx::Range push_decoded_vertices(const ShaderConfig& config, const u8* ra
     layout.count = 1;
     layout.stride = 12;
   }
+  return layout;
+}
+
+static void decode_vertices(const ShaderConfig& config, const DecodedLayout& layout, const u8* raw, u16 vtxCount,
+                            u8* base) noexcept {
   enum : u8 { kU32, kColor, kComps };
   struct Plan {
     const AttrConfig* m;
@@ -526,11 +533,6 @@ static gfx::Range push_decoded_vertices(const ShaderConfig& config, const u8* ra
                 std::min<u32>(m.cnt, 3),
                 kind == kU32 ? 1u : comps,
                 d.offset};
-  }
-  u8* base = nullptr;
-  const auto range = gfx::map_storage_aligned(static_cast<size_t>(vtxCount) * layout.stride, alignment, base);
-  if (base == nullptr) {
-    return range;
   }
   for (u32 v = 0; v < vtxCount; ++v) {
     const u8* vtx = raw + v * config.vtxStride;
@@ -568,6 +570,187 @@ static gfx::Range push_decoded_vertices(const ShaderConfig& config, const u8* ra
       if (p.words > 3)
         out[3] = std::bit_cast<u32>(f[3]);
     }
+  }
+}
+
+// Decoded vertices kept across frames (AURORA_VTX_CACHE, default on with the
+// decode; 0 turns it off). Most of a frame's draws decode the same vertices
+// as last frame (the stage, the fighters' meshes: skinning is the GPU's), and
+// decoding them was a third of the FIFO thread on the Quest (four-CPU Mute
+// City: about 3 of 9.8 ms a frame). The key is the draw's own vertex stream
+// (indices, or the data itself), its attribute formats, and the contents of
+// every array it indexes, hashed once a frame (AttrArray::contentHash): an
+// array the game rewrites gets a new key, so nothing goes stale. A hit is a
+// copy into the frame's storage pool. AURORA_VTX_CACHE_CHECK=1 decodes every
+// hit anyway and counts mismatches; AURORA_VTX_CACHE_STATS=1 logs hits.
+namespace {
+struct DecodeKey {
+  u64 lo, hi;
+  bool operator==(const DecodeKey&) const = default;
+};
+struct DecodeKeyHash {
+  size_t operator()(const DecodeKey& k) const noexcept { return static_cast<size_t>(k.lo); }
+};
+struct DecodeEntry {
+  DecodeKey key{};
+  std::vector<u8> bytes;
+  u32 lastFrame = 0;
+};
+struct DecodeCache {
+  std::unordered_map<DecodeKey, DecodeEntry, DecodeKeyHash> entries;
+  // Draws come in the same order frame after frame: last frame's entry at a
+  // draw's position is tried before the table, whose lookups (a cache miss
+  // or two each, thousands a frame) were half the FIFO thread's cost of a
+  // hit. Cleared when entries are erased (they point into the table).
+  std::vector<DecodeEntry*> order, lastOrder;
+  u32 orderFrame = 0;
+  size_t bytes = 0;
+  u32 sweptFrame = 0;
+  u64 hits = 0, misses = 0, hitBytes = 0, mismatches = 0;
+  u32 loggedFrame = 0;
+};
+DecodeCache sDecodeCache;
+#ifdef __ANDROID__
+constexpr size_t kDecodeCacheBytes = 24u << 20;
+#else
+constexpr size_t kDecodeCacheBytes = 64u << 20;
+#endif
+
+bool decode_cache_on() noexcept {
+  static const bool on = [] {
+    const char* v = std::getenv("AURORA_VTX_CACHE");
+    return v == nullptr || *v != '0';
+  }();
+  return on;
+}
+
+u64 array_content_hash(GXAttr attr) noexcept {
+  auto& array = g_gxState.arrays[attr];
+  if (!array.hashed) {
+    array.contentHash = array.data != nullptr ? XXH3_64bits(array.data, array.size) : 0;
+    array.hashed = true;
+  }
+  return array.contentHash;
+}
+
+DecodeKey decode_key(const ShaderConfig& config, const u8* raw, u16 vtxCount) noexcept {
+  struct Parts {
+    u64 raw = 0, attrs = 0;
+    std::array<u64, GX_VA_TEX7 - GX_VA_POS + 1> arrays{};
+    std::array<u32, GX_VA_TEX7 - GX_VA_POS + 1> sizes{};
+    u32 vtxCount = 0;
+    u8 vtxStride = 0, decodedAll = 0, decodedPos = 0, pad = 0;
+  } parts;
+  parts.raw = XXH3_64bits(raw, static_cast<size_t>(vtxCount) * config.vtxStride);
+  parts.attrs = XXH3_64bits(config.attrs.data(), sizeof(config.attrs));
+  for (int a = GX_VA_POS; a <= GX_VA_TEX7; ++a) {
+    const u8 type = config.attrs[a].attrType;
+    if (type != GX_INDEX8 && type != GX_INDEX16)
+      continue;
+    parts.arrays[a - GX_VA_POS] = array_content_hash(static_cast<GXAttr>(a));
+    parts.sizes[a - GX_VA_POS] = g_gxState.arrays[a].size;
+  }
+  parts.vtxCount = vtxCount;
+  parts.vtxStride = config.vtxStride;
+  parts.decodedAll = config.decodedAll;
+  parts.decodedPos = config.decodedPos;
+  const XXH128_hash_t h = XXH3_128bits(&parts, sizeof(parts));
+  return {h.low64, h.high64};
+}
+
+// Every few seconds, and at once past the budget: entries unused for two
+// seconds go (a table of stale entries makes every lookup slower), then, if
+// still over the budget, everything not used this frame.
+void sweep_decode_cache() noexcept {
+  auto& c = sDecodeCache;
+  const u32 now = g_gxState.frameSerial;
+  if (c.sweptFrame == now || (c.bytes <= kDecodeCacheBytes && now - c.sweptFrame < 300))
+    return;
+  c.sweptFrame = now;
+  c.order.clear();
+  c.lastOrder.clear();
+  for (u32 age : {120u, 1u}) {
+    for (auto it = c.entries.begin(); it != c.entries.end();) {
+      if (now - it->second.lastFrame >= age) {
+        c.bytes -= it->second.bytes.size();
+        it = c.entries.erase(it);
+      } else {
+        ++it;
+      }
+    }
+    if (c.bytes <= kDecodeCacheBytes * 3 / 4)
+      break;
+  }
+}
+} // namespace
+
+static gfx::Range push_decoded_vertices(const ShaderConfig& config, const u8* raw, u16 vtxCount,
+                                        size_t alignment) noexcept {
+  const DecodedLayout layout = decode_layout_for(config);
+  const size_t size = static_cast<size_t>(vtxCount) * layout.stride;
+  u8* base = nullptr;
+  if (!decode_cache_on()) {
+    const auto range = gfx::map_storage_aligned(size, alignment, base);
+    if (base != nullptr)
+      decode_vertices(config, layout, raw, vtxCount, base);
+    return range;
+  }
+  auto& c = sDecodeCache;
+  const DecodeKey key = decode_key(config, raw, vtxCount);
+  const auto range = gfx::map_storage_aligned(size, alignment, base);
+  if (base == nullptr)
+    return range;
+  const u32 now = g_gxState.frameSerial;
+  if (c.orderFrame != now) {
+    sweep_decode_cache();
+    c.orderFrame = now;
+    c.lastOrder.swap(c.order);
+    c.order.clear();
+  }
+  const size_t ordinal = c.order.size();
+  DecodeEntry* entry = nullptr;
+  if (ordinal < c.lastOrder.size() && c.lastOrder[ordinal] != nullptr && c.lastOrder[ordinal]->key == key) {
+    entry = c.lastOrder[ordinal];
+  } else if (auto it = c.entries.find(key); it != c.entries.end()) {
+    entry = &it->second;
+  }
+  if (entry != nullptr && entry->bytes.size() == size) {
+    c.order.push_back(entry);
+    std::memcpy(base, entry->bytes.data(), size);
+    entry->lastFrame = now;
+    ++c.hits;
+    c.hitBytes += size;
+    static const bool check = [] {
+      const char* v = std::getenv("AURORA_VTX_CACHE_CHECK");
+      return v != nullptr && *v == '1';
+    }();
+    if (check) {
+      static std::vector<u8> fresh;
+      fresh.resize(size);
+      decode_vertices(config, layout, raw, vtxCount, fresh.data());
+      if (std::memcmp(fresh.data(), base, size) != 0 && ++c.mismatches <= 8)
+        Log.warn("Decoded-vertex cache: stale entry ({} vertices, stride {})", vtxCount, layout.stride);
+    }
+  } else {
+    decode_vertices(config, layout, raw, vtxCount, base);
+    ++c.misses;
+    auto& e = c.entries[key];
+    c.bytes += size - e.bytes.size();
+    e.key = key;
+    e.bytes.assign(base, base + size);
+    e.lastFrame = now;
+    c.order.push_back(&e);
+  }
+  static const bool stats = [] {
+    const char* v = std::getenv("AURORA_VTX_CACHE_STATS");
+    return v != nullptr && *v == '1';
+  }();
+  if (stats && now - c.loggedFrame >= 600) {
+    c.loggedFrame = now;
+    Log.info("Decoded-vertex cache: {} hits ({:.1f} MiB), {} misses, {} mismatches; {} entries, {:.1f} MiB",
+             c.hits, static_cast<double>(c.hitBytes) / (1 << 20), c.misses, c.mismatches, c.entries.size(),
+             static_cast<double>(c.bytes) / (1 << 20));
+    c.hits = c.misses = c.hitBytes = 0;
   }
   return range;
 }
@@ -1154,6 +1337,7 @@ void handle_aurora(ByteReader& reader) noexcept {
       array.size = arraySize;
       array.le = le;
       array.cachedRange = {};
+      array.hashed = false;
       g_gxState.dirty |= DirtyImmediates;
     }
   } else if (subCmd == GX_AURORA_LOAD_TEXOBJ) {
@@ -1269,6 +1453,8 @@ void handle_aurora(ByteReader& reader) noexcept {
     evict_texture_object(reader.read<u32>());
   } else if (subCmd == GX_AURORA_DESTROY_TLUT) {
     evict_tlut_object(reader.read<u32>());
+  } else if (subCmd == GX_AURORA_INVALIDATE_TEX) {
+    invalidate_texture_hashes();
   } else if (subCmd == GX_AURORA_DESTROY_COPY_TEX) {
     evict_copy_texture(reinterpret_cast<const void*>(reader.read<u64>()));
   } else if (subCmd == GX_AURORA_DRAW_SIZED) {

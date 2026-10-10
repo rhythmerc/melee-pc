@@ -636,7 +636,9 @@ RecordedFrame end_recording() {
 
   for (auto& array : gx::g_gxState.arrays) {
     array.cachedRange = {};
+    array.hashed = false;
   }
+  ++gx::g_gxState.frameSerial;
 #if defined(AURORA_GFX_DEBUG_GROUPS)
   if (!g_recorder.debugGroupStack.empty()) {
     for (auto& item : std::ranges::reverse_view(g_recorder.debugGroupStack)) {

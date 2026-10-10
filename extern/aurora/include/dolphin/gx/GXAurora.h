@@ -87,6 +87,12 @@ extern "C" {
 #define GX_AURORA_END_OFFSCREEN 0x003A
 
 /**
+ * GXInvalidateTexAll: texture memory may have changed (the CPU wrote a texture).
+ * Clears the per-frame memo of texture content hashes. No payload.
+ */
+#define GX_AURORA_INVALIDATE_TEX 0x003B
+
+/**
  * Draw primitives with the vertex count derived from a byte length, as written by
  * GXBegin(prim, fmt, GX_AUTO). Must be followed by a u8 draw opcode (vtxfmt|prim),
  * a u32 vertex data byte length, then that many bytes of vertex data. The byte length
