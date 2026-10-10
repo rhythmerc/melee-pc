@@ -549,20 +549,28 @@ practice](https://martinfullerblog.wordpress.com/2023/10/11/dynamic-resolution-s
   jumbotron's grab or anything else in the frame counts. Timing the 3D pass
   alone read differently per stage.
 - **Cost table:** the scale moves in steps of 0.025. Each step keeps the
-  frame time measured there, per stage and per mode (mixed reality or VR),
-  for the session. It's trusted by how many samples it has (30 for full
-  trust) and how fresh they are (trust falls to 1/e in 20 s).
+  eye pass's time measured there, per stage and per mode (mixed reality or
+  VR), for the session; the rest of the frame (flat passes, HUD, compose)
+  doesn't scale and is one running average added to every prediction. A
+  step is trusted by how many samples it has (30 for full trust) and how
+  fresh they are (trust falls to 1/e in 20 s).
 - **Prediction:** a step's cost blends its own history, by that trust,
-  with a fit of cost against pixels (`a + b * scale²`) over the trusted
+  with a fit of eye cost against pixels (`a + b * scale²`) over the trusted
   steps. The fit is used only once the steps span enough range (scale²
-  0.1 apart); until then a quarter of the frame is taken to scale with
-  pixels. Much of a frame doesn't scale at all: Brinstar's eye pass is
-  about 9.6 of its 11 ms at any scale.
-- **Target and band:** aim at `AURORA_XR_DYNRES_TARGET_MS` (13 ms per game
-  frame), and cut only past target + `AURORA_XR_DYNRES_BAND_MS` (0.5).
-  A frame averaging 13.5 ms filled the GPU enough for the XR thread to miss
-  submits; Brinstar at a fixed 1.0 averaged 12.5 with no more misses than at
-  0.8.
+  0.1 apart); until then half the eye pass is taken to scale with pixels.
+  Much of a frame doesn't scale at all: Brinstar's eye pass is about 9.6 of
+  its 11 ms at any scale, and on four-CPU Mute City 1.0 → 0.8 (36% fewer
+  pixels) saves 0.7-1.2 ms of a 9.7 ms eye pass.
+- **Target and band:** the target is the game frame's share of the GPU:
+  1000/60 ms, less the compositor's GPU time over the display frames a game
+  frame spans, less `AURORA_XR_DYNRES_HEADROOM_MS` (1.2). The compositor's
+  time is read live from `XR_META_performance_metrics` (2.3 ms a display
+  frame when the runtime has no such counter), so at 120 Hz the target is
+  about 11 ms, at 72 Hz about 12.7. Cut only past target +
+  `AURORA_XR_DYNRES_BAND_MS` (0.5). `AURORA_XR_DYNRES_TARGET_MS` pins the
+  target. Measured on Mute City with four CPUs: about 10.2 ms a frame kept
+  every image on its two display frames, 12 ms missed 10-14 a second. The
+  old fixed 13 ms target was over that.
 - **Steps:** down at once to the best step predicted to fit; up one step
   after half a second, only to a step predicted to fit.
 - **Clean costs:** while shaders are compiling (a stage's first fight of
@@ -1116,7 +1124,8 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_HUD_SCALE` | 0.5 | HUD texture resolution, relative to the screen |
 | `AURORA_XR_TIMING` | 1 | Log GPU pass times every 10 s |
 | `AURORA_XR_LOG_PERIOD` | 10 | Seconds between the GPU timing and dynamic resolution log lines |
-| `AURORA_XR_DYNRES_TARGET_MS` | 13 | Dynamic resolution's frame GPU aim (Android) |
+| `AURORA_XR_DYNRES_TARGET_MS` | display-derived | Pins dynamic resolution's frame GPU aim (Android) |
+| `AURORA_XR_DYNRES_HEADROOM_MS` | 1.2 | Margin left under the game frame's GPU share |
 | `AURORA_XR_DYNRES_BAND_MS` | 0.5 | How far past the aim a frame goes before the scale is cut |
 | `AURORA_PIPELINE_INLINE` | 0 | Compile pipelines on the render thread instead of the compile thread |
 | `AURORA_XR_ARENA_SCALE` | 0.0035 | Starting meters per game unit, times each stage's own size (grab with two hands to change) |

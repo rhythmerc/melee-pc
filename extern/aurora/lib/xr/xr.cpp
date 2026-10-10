@@ -173,12 +173,26 @@ struct DynamicResolution {
   float scale = 1.f;
   uint32_t recWidth = 0, recHeight = 0; // recommended eye size (times AURORA_XR_EYE_SCALE)
   // Controller (update_dynamic_resolution): a live cost table. The scale
-  // moves in steps of kDynresStep; each step keeps the frame GPU time
-  // measured there, trusted less the longer ago it was measured, and steps
-  // not measured lately are predicted from the ones that were.
+  // moves in steps of kDynresStep; each step keeps the eye pass's GPU time
+  // measured there (the part that scales with resolution), trusted less the
+  // longer ago it was measured, and steps not measured lately are predicted
+  // from the ones that were. The rest of the frame (flat passes, HUD,
+  // compose) is one running estimate on top: a step's frame is that plus its
+  // eye pass.
+  //
+  // The target is what a game frame leaves us on the GPU: its 16.7 ms less
+  // the compositor's work over the display frames it spans (measured with
+  // XR_META_performance_metrics, 2.3 ms each otherwise; about 4.6 ms a game
+  // frame at 120 Hz), less headroom. The frame times the controller reads
+  // include the compositor's preemptions of our passes. Mute City with four
+  // fighters at 120 Hz: 10.2 ms frames held every 2-display-frame slot,
+  // 12.1 ms frames missed some 12 a second (2026-10-10).
   double targetNs = 13.0e6; // per game frame, compositor preemptions included
+  bool fixedTarget = false; // AURORA_XR_DYNRES_TARGET_MS pins it
+  double headroomNs = 1.2e6; // AURORA_XR_DYNRES_HEADROOM_MS
   double bandNs = 0.5e6;    // hysteresis: down only past target + band, up to the target
   double emaNs = 0;         // frame GPU time at the current step, this visit
+  double restNs = 0;        // frame GPU time outside the eye pass, running
   int level = 0;            // the current step: scale = minScale + level * kDynresStep
   uint64_t seenSeq = 0;     // R.timing.frameSeq last read
   int settle = 0;           // frames measured since the last scale change
@@ -234,6 +248,10 @@ std::mutex g_paceMutex;
 std::condition_variable g_paceCv;
 uint64_t g_paceTick = 0;
 std::atomic<int> g_displayPerGameFrame{0};
+std::atomic<float> g_displayHz{0.f}; // the display's refresh rate (0: unknown)
+// The compositor's GPU time per display frame (ms, XR_META_performance_metrics;
+// negative: unknown), polled by the XR thread for dynamic resolution.
+std::atomic<float> g_compositorGpuMs{-1.f};
 std::atomic<uint64_t> g_lastTickFrame{0}; // the display frame of the newest tick
 // 3D images the headset held past their display frames during a fight (XR
 // thread): a missed frame as the user sees it. Dynamic resolution reads it.
@@ -355,6 +373,14 @@ struct Bridge {
 
   bool hasRefreshRateExt = false;
   bool hasPerfSettingsExt = false;
+#ifdef XR_META_performance_metrics
+  // The runtime's own counters (XR_META_performance_metrics): the
+  // compositor's GPU time per display frame, for dynamic resolution's budget.
+  bool hasPerfMetricsExt = false;
+  PFN_xrSetPerformanceMetricsStateMETA setPerfMetricsState = nullptr;
+  PFN_xrQueryPerformanceMetricsCounterMETA queryPerfMetric = nullptr;
+  XrPath compositorGpuPath = XR_NULL_PATH;
+#endif
   PFN_xrPerfSettingsSetPerformanceLevelEXT setPerformanceLevel = nullptr;
   PFN_xrEnumerateDisplayRefreshRatesFB enumerateRefreshRates = nullptr;
   PFN_xrRequestDisplayRefreshRateFB requestRefreshRate = nullptr;
@@ -523,6 +549,9 @@ bool create_instance() {
     B.hasRefreshRateExt |= !std::strcmp(p.extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
     B.hasColorScaleBias |= !std::strcmp(p.extensionName, XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME);
     B.hasPerfSettingsExt |= !std::strcmp(p.extensionName, XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
+#ifdef XR_META_performance_metrics
+    B.hasPerfMetricsExt |= !std::strcmp(p.extensionName, XR_META_PERFORMANCE_METRICS_EXTENSION_NAME);
+#endif
     B.hasHandTrackingExt |= !std::strcmp(p.extensionName, XR_EXT_HAND_TRACKING_EXTENSION_NAME);
 #ifdef XR_META_boundary_visibility
     B.hasBoundaryVisibilityExt |= !std::strcmp(p.extensionName, XR_META_BOUNDARY_VISIBILITY_EXTENSION_NAME);
@@ -541,6 +570,10 @@ bool create_instance() {
     exts.push_back(XR_KHR_COMPOSITION_LAYER_COLOR_SCALE_BIAS_EXTENSION_NAME);
   if (B.hasPerfSettingsExt)
     exts.push_back(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
+#ifdef XR_META_performance_metrics
+  if (B.hasPerfMetricsExt)
+    exts.push_back(XR_META_PERFORMANCE_METRICS_EXTENSION_NAME);
+#endif
   // AURORA_XR_HANDS=0 leaves hand tracking off, for measuring what it costs.
   B.hasHandTrackingExt &= env_flag("AURORA_XR_HANDS", true);
   if (B.hasHandTrackingExt)
@@ -590,6 +623,31 @@ bool create_instance() {
   }
   if (B.hasPerfSettingsExt)
     B.setPerformanceLevel = xr_proc<PFN_xrPerfSettingsSetPerformanceLevelEXT>("xrPerfSettingsSetPerformanceLevelEXT");
+#ifdef XR_META_performance_metrics
+  if (B.hasPerfMetricsExt) {
+    B.setPerfMetricsState = xr_proc<PFN_xrSetPerformanceMetricsStateMETA>("xrSetPerformanceMetricsStateMETA");
+    B.queryPerfMetric = xr_proc<PFN_xrQueryPerformanceMetricsCounterMETA>("xrQueryPerformanceMetricsCounterMETA");
+    auto enumerate =
+        xr_proc<PFN_xrEnumeratePerformanceMetricsCounterPathsMETA>("xrEnumeratePerformanceMetricsCounterPathsMETA");
+    uint32_t count = 0;
+    std::vector<XrPath> paths;
+    if (enumerate && XR_SUCCEEDED(enumerate(B.instance, 0, &count, nullptr))) {
+      paths.resize(count);
+      enumerate(B.instance, count, &count, paths.data());
+    }
+    std::string list;
+    for (XrPath path : paths) {
+      char name[XR_MAX_PATH_LENGTH];
+      uint32_t len = 0;
+      if (XR_FAILED(xrPathToString(B.instance, path, sizeof name, &len, name)))
+        continue;
+      list += fmt::format("{}{}", list.empty() ? "" : ", ", name);
+      if (std::strstr(name, "compositor") && std::strstr(name, "gpu"))
+        B.compositorGpuPath = path;
+    }
+    Log.info("XR_META_performance_metrics counters: {}", list.empty() ? "none" : list);
+  }
+#endif
   if (B.hasHandTrackingExt) {
     B.createHandTracker = xr_proc<PFN_xrCreateHandTrackerEXT>("xrCreateHandTrackerEXT");
     B.destroyHandTracker = xr_proc<PFN_xrDestroyHandTrackerEXT>("xrDestroyHandTrackerEXT");
@@ -753,12 +811,11 @@ bool size_stereo_stream() {
   if (dr.on) {
     dr.minScale = std::clamp(env_float("AURORA_XR_DYNRES_MIN", 0.8f), 0.5f, 1.f);
     dr.maxScale = std::clamp(env_float("AURORA_XR_DYNRES_MAX", 1.3f), 1.f, 1.6f);
-    // A frame averaging 13.5 ms filled the GPU enough for the XR thread to
-    // miss submits; Brinstar at a fixed 1.0 averaged 12.5 (13.3 at worst)
-    // with no more misses than at 0.8. So aim at 13 and only cut past 13.5:
-    // a single 12 ms target answered Brinstar's acid (0.5 ms) by sliding to
-    // the lowest scale, which saves almost nothing there.
+    // The target follows the display and the compositor (DynamicResolution);
+    // AURORA_XR_DYNRES_TARGET_MS pins it instead.
+    dr.fixedTarget = std::getenv("AURORA_XR_DYNRES_TARGET_MS") != nullptr;
     dr.targetNs = std::clamp(env_float("AURORA_XR_DYNRES_TARGET_MS", 13.f), 3.f, 16.f) * 1.0e6;
+    dr.headroomNs = std::clamp(env_float("AURORA_XR_DYNRES_HEADROOM_MS", 1.2f), 0.f, 8.f) * 1.0e6;
     dr.bandNs = std::clamp(env_float("AURORA_XR_DYNRES_BAND_MS", 0.5f), 0.f, 4.f) * 1.0e6;
     dr.random = env_flag("AURORA_XR_DYNRES_RANDOM", false);
     dr.level = std::max(static_cast<int>((1.f - dr.minScale) / kDynresStep + 0.5f), 0); // start at 1.0
@@ -768,8 +825,11 @@ bool size_stereo_stream() {
   const uint32_t eyeW = even(static_cast<float>(dr.recWidth) * alloc);
   const uint32_t eyeH = even(static_cast<float>(dr.recHeight) * alloc);
   if (dr.on)
-    Log.info("Dynamic resolution: {:.2f}-{:.2f} of {}x{} per eye, frame GPU target {:.1f} +- {:.1f} ms",
-             dr.minScale, dr.maxScale, dr.recWidth, dr.recHeight, dr.targetNs / 1.0e6, dr.bandNs / 1.0e6);
+    Log.info("Dynamic resolution: {:.2f}-{:.2f} of {}x{} per eye, frame GPU target {} +- {:.1f} ms", dr.minScale,
+             dr.maxScale, dr.recWidth, dr.recHeight,
+             dr.fixedTarget ? fmt::format("{:.1f}", dr.targetNs / 1.0e6)
+                            : fmt::format("from the display, {:.1f} ms headroom", dr.headroomNs / 1.0e6),
+             dr.bandNs / 1.0e6);
   g_streams[kStereo].width = g_multiview ? eyeW : eyeW * 2;
   g_streams[kStereo].height = eyeH;
   g_streams[kStereo].layers = g_multiview ? 2 : 1;
@@ -1396,6 +1456,7 @@ void update_pacing() {
     B.getRefreshRate(B.session, &rate);
   if (rate <= 0.f && !B.getRefreshRate)
     rate = 60.f; // no extension (e.g. some runtimes): assume a 60 Hz display
+  g_displayHz = rate;
   const float ratio = rate / 60.f;
   const int per = std::abs(ratio - std::round(ratio)) < 0.02f ? static_cast<int>(std::round(ratio)) : 0;
   const int old = g_displayPerGameFrame.exchange(env_flag("AURORA_XR_LOCKSTEP", true) ? per : 0);
@@ -2797,6 +2858,22 @@ bool render_xr_frame() {
   fei.layers = layers.data();
   XR_TRY(xrEndFrame(B.session, &fei));
   ++B.framesShown;
+#ifdef XR_META_performance_metrics
+  // About twice a second: the compositor's GPU time per display frame.
+  if (B.queryPerfMetric && B.compositorGpuPath != XR_NULL_PATH && B.framesShown % 36 == 0) {
+    XrPerformanceMetricsCounterMETA c{XR_TYPE_PERFORMANCE_METRICS_COUNTER_META};
+    if (XR_SUCCEEDED(B.queryPerfMetric(B.session, B.compositorGpuPath, &c)) &&
+        (c.counterFlags & XR_PERFORMANCE_METRICS_COUNTER_FLOAT_VALUE_VALID_BIT_META) && c.floatValue > 0.f) {
+      static bool logged = false;
+      if (!logged) {
+        Log.info("Compositor GPU time counter: {} (unit {})", c.floatValue, static_cast<int>(c.counterUnit));
+        logged = true;
+      }
+      if (c.counterUnit == XR_PERFORMANCE_METRICS_COUNTER_UNIT_MILLISECONDS_META)
+        g_compositorGpuMs = c.floatValue;
+    }
+  }
+#endif
 
   const double secs = std::chrono::duration<double>(now - B.statsStart).count();
   if (secs >= 10.0) {
@@ -2832,6 +2909,13 @@ bool poll_events() {
         request_refresh_rate();
         request_performance_levels();
         update_pacing();
+#ifdef XR_META_performance_metrics
+        if (B.setPerfMetricsState && B.compositorGpuPath != XR_NULL_PATH) {
+          XrPerformanceMetricsStateMETA pm{XR_TYPE_PERFORMANCE_METRICS_STATE_META};
+          pm.enabled = XR_TRUE;
+          B.setPerfMetricsState(B.session, &pm);
+        }
+#endif
         B.statsStart = std::chrono::steady_clock::now();
       } else if (state == XR_SESSION_STATE_STOPPING) {
         XR_TRY(xrEndSession(B.session));
@@ -3781,8 +3865,9 @@ void dynres_predict(const std::array<DynresCost, kDynresLevels>& costs, uint64_t
     const double mx = sx / sw, my = sy / sw;
     const double var = sxx / sw - mx * mx;
     // A fit across a narrow spread of scales mostly measures how the scene
-    // changed between visits: until the steps span enough, assume a quarter
-    // of the frame scales with pixels (Brinstar measured about a tenth).
+    // changed between visits: until the steps span enough, assume half of
+    // the eye pass scales with pixels (Mute City's: 9.8 ms at 1.0, 11.8 at
+    // 1.3, so about 0.4 of it).
     double lo = 1e9, hi = 0;
     for (int i = 0; i < levels; ++i)
       if (dynres_trust(costs[i], frame) > 0) {
@@ -3790,9 +3875,9 @@ void dynres_predict(const std::array<DynresCost, kDynresLevels>& costs, uint64_t
         lo = std::min(lo, x);
         hi = std::max(hi, x);
       }
-    // At most half of the frame scales with pixels: a fit that says more is
-    // reading a scene change as a resolution cost.
-    b = hi - lo >= 0.1 && var > 1e-6 ? std::clamp((sxy / sw - mx * my) / var, 0.0, 0.5 * my / mx) : 0.25 * my / mx;
+    // At most all of the eye pass scales with pixels: a fit that says more
+    // is reading a scene change as a resolution cost.
+    b = hi - lo >= 0.1 && var > 1e-6 ? std::clamp((sxy / sw - mx * my) / var, 0.0, my / mx) : 0.5 * my / mx;
     a = my - b * mx;
   }
   for (int i = 0; i < levels; ++i) {
@@ -3820,6 +3905,11 @@ void update_dynamic_resolution(bool missed) {
     auto& costs = g_dynresCosts[stage * 2 + (g_passthroughWanted ? 1 : 0)];
     const int levels = dynres_levels();
     dr.level = std::clamp(dr.level, 0, levels - 1);
+    if (!dr.fixedTarget) {
+      const float hz = g_displayHz > 0.f ? g_displayHz.load() : 120.f;
+      const float compositorMs = g_compositorGpuMs > 0.f ? g_compositorGpuMs.load() : 2.3f;
+      dr.targetNs = std::clamp(1.0e9 / 60.0 - compositorMs * 1.0e6 * hz / 60.0 - dr.headroomNs, 5.0e6, 16.0e6);
+    }
     // Shaders compiling (a stage's first fight of the session) stall the
     // frame on the CPU and inflate its span; less resolution can't help, and
     // those frames would make every step look dear for a long while. They're
@@ -3840,6 +3930,8 @@ void update_dynamic_resolution(bool missed) {
       // over from them. (A bogus low reading, under 2 ms, once seeded the
       // average and every real frame after it looked like a spike.)
       const double ns = t.lastFrameNs;
+      // The eye pass of the same frame (its share of the span), when timed.
+      const double eyeNs = t.last3DNs > 0 && t.last3DNs < ns ? t.last3DNs : ns;
       bool spike = dr.emaNs > 0 && ns > dr.emaNs * 1.5;
       if (spike && ++dr.spikeRun >= 5) {
         dr.emaNs = 0;
@@ -3856,12 +3948,13 @@ void update_dynamic_resolution(bool missed) {
         ++dr.skipSpike;
       } else {
         dr.emaNs = dr.emaNs == 0 ? ns : dr.emaNs * 0.85 + ns * 0.15;
+        dr.restNs = dr.restNs == 0 ? ns - eyeNs : dr.restNs * 0.95 + (ns - eyeNs) * 0.05;
         dr.nsSum += ns;
         ++dr.nsFrames;
         auto& c = costs[dr.level];
         // What is left of the old history, then this sample on top.
         c.samples *= std::exp(-static_cast<double>(dr.frameCount - c.lastFrame) / kDynresForget);
-        c.ns = c.samples <= 0 ? ns : c.ns + (ns - c.ns) / std::min(c.samples + 1, kDynresFullSamples);
+        c.ns = c.samples <= 0 ? eyeNs : c.ns + (eyeNs - c.ns) / std::min(c.samples + 1, kDynresFullSamples);
         c.samples = std::min(c.samples + 1, kDynresFullSamples);
         c.lastFrame = dr.frameCount;
       }
@@ -3885,7 +3978,7 @@ void update_dynamic_resolution(bool missed) {
     if (panic) {
       // This step is dearer than it measured: remembered past the band.
       auto& c = costs[dr.level];
-      c.ns = std::max(c.ns, dr.targetNs + dr.bandNs) + 0.5e6;
+      c.ns = std::max(c.ns, dr.targetNs + dr.bandNs - dr.restNs) + 0.5e6;
       c.samples = std::max(c.samples, kDynresFullSamples / 2);
       c.lastFrame = dr.frameCount;
       std::fill(dr.recentMisses.begin(), dr.recentMisses.end(), 0);
@@ -3894,6 +3987,9 @@ void update_dynamic_resolution(bool missed) {
     } else if (dr.emaNs > 0 && dr.settle > 4) {
       std::array<double, kDynresLevels> predicted{};
       dynres_predict(costs, dr.frameCount, levels, predicted);
+      // Eye passes predicted, plus the rest of the frame: whole frames.
+      for (int i = 0; i < levels; ++i)
+        predicted[i] += dr.restNs;
       if (dr.emaNs > dr.targetNs + dr.bandNs && !compiling) {
         // Down at once to the best step predicted to fit, at least one.
         next = 0;
@@ -3939,10 +4035,12 @@ void update_dynamic_resolution(bool missed) {
           if (dynres_trust(costs[i], dr.frameCount) > 0.1)
             table += fmt::format(" {:.3f}:{:.1f}", dynres_scale(i), costs[i].ns / 1.0e6);
       }
-      Log.info("Dynamic resolution: scale {:.2f} average ({:.2f}-{:.2f}); frame GPU {:.1f} ms average; {} panics, "
+      Log.info("Dynamic resolution: scale {:.2f} average ({:.2f}-{:.2f}); frame GPU {:.1f} ms average against "
+               "{:.1f} (compositor {:.1f} ms a display frame), {:.1f} of it outside the eyes; {} panics, "
                "{} lone misses; {} images held long; {} timings ({} settling, {} compiling, {} spikes or bogus left out); "
-               "costs{}",
+               "eye pass costs{}",
                dr.scaleSum / dr.frames, dr.lowest, dr.highest, dr.nsFrames ? dr.nsSum / dr.nsFrames / 1.0e6 : 0.0,
+               dr.targetNs / 1.0e6, g_compositorGpuMs.load(), dr.restNs / 1.0e6,
                dr.panics, dr.loneMisses, dr.lateImages, dr.readings, dr.skipSettle, dr.skipCompile, dr.skipSpike,
                table);
     }
