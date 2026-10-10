@@ -239,13 +239,17 @@ struct FramePacket {
   // Then XrMaxClipPlanes clip planes (all must pass; 0,0,0,1 always passes),
   // their fade bands (game units; 0 = a hard cut) and the draw's opacity.
   std::vector<std::array<float, 12 + XrClipFloats>> xrTransforms; // move 3x4, clip planes 8x4, fades 8, opacity
-  // XR early eyes (set_xr_early_eyes): the frame's uploads go through
-  // WriteBuffer/WriteTexture, not copies from the staging buffer (mapped until
-  // the frame ends, so no command buffer copying from it can be submitted
-  // early); the world was split off and its eyes queued (xrEarlySplit);
-  // world draws came after that (xrWorldResumed: the early eyes lack them);
-  // the eyes went in their own submit (xrEyesDone, render worker).
-  bool directUploads = false;
+  // XR early eyes (set_xr_early_eyes): whether this frame may split
+  // (earlyEyes); the world was split off and its eyes queued (xrEarlySplit),
+  // the uploads after that going to a second staging buffer (stagingBuffer2,
+  // from the stagingSplit high water on, padded to 4 bytes) so the first can be
+  // unmapped for the early submit (stagingUnmapped, render worker); world
+  // draws came after the split (xrWorldResumed: the early eyes lack them); the
+  // eyes went in their own submit (xrEyesDone, render worker).
+  bool earlyEyes = false;
+  size_t stagingBuffer2 = SIZE_MAX;
+  StagingHighWater stagingSplit;
+  bool stagingUnmapped = false;
   bool xrEarlySplit = false;
   bool xrWorldResumed = false;
   bool xrEyesDone = false;

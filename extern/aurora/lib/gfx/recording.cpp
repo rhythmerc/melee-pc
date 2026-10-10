@@ -1283,9 +1283,9 @@ static void split_for_early_eyes(XrCategory next) {
       frame.xrWorldResumed = true;
     return;
   }
-  if (!frame.directUploads || !frame.xrHasWorld || !fromWorld || next == XrCategory::World ||
+  if (!frame.earlyEyes || !frame.xrHasWorld || !fromWorld || next == XrCategory::World ||
       next == XrCategory::Hidden || g_recorder.inOffscreen || g_recorder.currentRenderPass == UINT32_MAX ||
-      g_recorder.suppressRenderWorker)
+      g_recorder.suppressRenderWorker || !split_staging(frame))
     return;
   const uint32_t worldPass = g_recorder.currentRenderPass;
   enqueue_pass(frame, worldPass);

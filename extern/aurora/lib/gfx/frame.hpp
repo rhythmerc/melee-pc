@@ -13,7 +13,9 @@ inline constexpr size_t FrameSlotCount = 2;
 // staging set bounds GPU work in flight and avoids five 87 MiB allocations.
 inline constexpr size_t StagingBufferCount = 1;
 #elif defined(__ANDROID__)
-inline constexpr size_t StagingBufferCount = FrameSlotCount + 1; // 3 staging buffers on mobile
+// One more than frames in flight, plus one for XR early eyes, which switch a
+// frame to a second staging buffer at the world's end (split_staging).
+inline constexpr size_t StagingBufferCount = FrameSlotCount + 2; // 4 staging buffers on mobile
 #else
 inline constexpr size_t StagingBufferCount = FrameSlotCount + 3; // 5 staging buffers on desktop
 #endif
@@ -21,6 +23,13 @@ inline constexpr uint64_t StagingBufferSize = UniformBufferSize + VertexBufferSi
                                               StorageBufferSize + (UseTextureBuffer ? TextureUploadSize : 0);
 
 const wgpu::Buffer& staging_buffer(size_t slot);
+struct FramePacket;
+// XR early eyes. Recording thread: moves the rest of `frame`'s uploads to a
+// second mapped staging buffer at the same offsets, so the first can be
+// unmapped and its copies submitted while recording goes on; false (nothing
+// changed) when none is free right now. Render worker: unmaps the first.
+bool split_staging(FramePacket& frame);
+void unmap_first_staging(FramePacket& frame);
 
 struct RegisteredDrawType {
   DrawCallback draw = nullptr;

@@ -304,6 +304,10 @@ public:
     append(&obj, sizeof(T));
   }
 
+  // Points a borrowed buffer at other memory of the same layout (bytes before
+  // the current length aren't copied: the caller only writes past it).
+  void rebase(uint8_t* data) noexcept { m_data = data; }
+
   // Grows by `size` bytes left for the caller to write; returns where.
   [[nodiscard]] uint8_t* append_uninit(size_t size) {
     resize(m_length + size, false);

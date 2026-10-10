@@ -1257,6 +1257,10 @@ struct Presentation {
 // Frames whose eyes went early, and of those, drawn again at the frame's end
 // (world draws after the split); logged with the frame stats.
 std::atomic<uint32_t> g_earlyEyes{0}, g_earlyResumed{0};
+// Render worker: the longest wait for a swapchain image, and waits over 2 ms,
+// per stream (read racily by the frame stats).
+std::array<int64_t, 3> g_acquireWaitMaxNs{};
+std::array<uint32_t, 3> g_acquireWaitsOver2{};
 
 // Pacing probe (Android): where each 3D frame's time goes after its tick,
 // and when its GPU work finishes against the display time it's due for. A
@@ -1287,6 +1291,7 @@ struct PaceProbe {
   int64_t slotWaitNs = 0;                   // render worker: this frame's wait for a 3D image
   std::vector<uint8_t> doneLatency;          // display frames from tick to GPU done, for g_present
   std::vector<float> idealMargins;           // ns from GPU done to the ideal latency's slot, for g_dynres
+  std::vector<std::string> spikes;           // frames done well past the ideal slot, by hop (logged, a few)
   bool started = false;
 } g_pace;
 
@@ -1345,6 +1350,15 @@ void pace_watch() {
     const double slot = static_cast<double>(tick.waitNs) + ideal * 1e9 / hz;
     if (g_pace.idealMargins.size() < 256)
       g_pace.idealMargins.push_back(static_cast<float>(slot - static_cast<double>(doneNs - p.slotWaitNs)));
+    // A spike: done 5 ms past the ideal slot. Each hop, ms after the tick.
+    if (static_cast<double>(doneNs - p.slotWaitNs) > slot + 5e6 && g_pace.spikes.size() < 6) {
+      const auto ms = [&](int64_t ns) { return ns != 0 ? static_cast<float>(ns - tick.waitNs) / 1e6f : -1.f; };
+      g_pace.spikes.push_back(fmt::format("[world {:.1f} game {:.1f} recorded {:.1f} replaying {:.1f} submitted {:.1f} "
+                                          "done {:.1f} image wait {:.1f}]",
+                                          ms(p.ns[PaceProbe::WorldEnd]), ms(p.ns[PaceProbe::GameDone]),
+                                          ms(p.ns[PaceProbe::RecordEnd]), ms(p.ns[PaceProbe::RenderStart]),
+                                          ms(p.ns[PaceProbe::Submit]), ms(doneNs), p.slotWaitNs / 1e6));
+    }
     // The display time of the frame it's released for.
     const auto& due = g_pace.displays[(p.tickFrame + p.latency) % g_pace.displays.size()];
     if (due.frame == p.tickFrame + p.latency)
@@ -1408,6 +1422,12 @@ std::string pace_summary() {
     auto& v = g_pace.ms[m];
     s += fmt::format(" {} {:.1f}/{:.1f}/{:.1f}{}", kNames[m], pct(v, 0.5f), pct(v, 0.95f), pct(v, 1.f),
                      m + 1 < PaceProbe::Margin ? "," : ";");
+  }
+  if (!g_pace.spikes.empty()) {
+    s += "; spikes";
+    for (const auto& sp : g_pace.spikes)
+      s += " " + sp;
+    g_pace.spikes.clear();
   }
   auto& margin = g_pace.ms[PaceProbe::Margin];
   auto under = [&](float ms) { return std::count_if(margin.begin(), margin.end(), [&](float m) { return m < ms; }); };
@@ -3153,13 +3173,17 @@ bool render_xr_frame() {
              "3D images shown 1/2/3/4+ display frames: {}/{}/{}/{}; presented {} display frames after the tick "
              "({} held); XR loop: wait to end {:.1f} ms at most, {} over 4 ms; gaps {:.1f} ms at most, {} over 10 ms; "
              "{:.1f} ms least before display; slow loops' sections (most ms, times largest): {}; "
-             "early eyes {} ({} redrawn){}",
+             "early eyes {} ({} redrawn); image waits (most ms, over 2 ms) 3D {:.1f}/{} HUD {:.1f}/{} screen {:.1f}/{}{}",
              B.framesShown / secs, 100.0 * B.fightFrames / std::max<uint64_t>(B.framesShown, 1),
              B.releasedSinceStats[kScreen] / secs, B.releasedSinceStats[kStereo] / secs,
              B.releasedSinceStats[kHud] / secs, B.shownHistogram[0], B.shownHistogram[1], B.shownHistogram[2],
              B.shownHistogram[3], g_present.latency, g_present.held, B.loopMaxNs / 1e6, B.loopOver4,
              B.gapMaxNs / 1e6, B.gapOver10, B.leadMinNs / 1e6, sections, g_earlyEyes.exchange(0),
-             g_earlyResumed.exchange(0), pace_summary());
+             g_earlyResumed.exchange(0), g_acquireWaitMaxNs[kStereo] / 1e6, g_acquireWaitsOver2[kStereo],
+             g_acquireWaitMaxNs[kHud] / 1e6, g_acquireWaitsOver2[kHud], g_acquireWaitMaxNs[kScreen] / 1e6,
+             g_acquireWaitsOver2[kScreen], pace_summary());
+    g_acquireWaitMaxNs = {};
+    g_acquireWaitsOver2 = {};
     B.sectionMaxNs = {};
     B.sectionWorst = {};
     B.loopMaxNs = B.gapMaxNs = 0;
@@ -3429,8 +3453,14 @@ wgpu::Texture acquire_slot(Stream& st, std::chrono::milliseconds wait = std::chr
     const int64_t start = monotonic_ns();
     std::unique_lock lock{g_mutex};
     g_slotFreeCv.wait_for(lock, wait, [&] { return take_slot_locked(st) >= 0 || g_phase != Phase::Imported; });
+    const int64_t waited = monotonic_ns() - start;
     if (&st == &g_streams[kStereo])
-      g_pace.slotWaitNs = monotonic_ns() - start;
+      g_pace.slotWaitNs = waited;
+    // Logged with the frame stats: the longest wait for an image, per stream.
+    auto& most = g_acquireWaitMaxNs[&st - g_streams.data()];
+    most = std::max<int64_t>(most, waited);
+    if (waited > 2000000)
+      ++g_acquireWaitsOver2[&st - g_streams.data()];
     index = take_slot_locked(st);
     if (index < 0)
       return {};

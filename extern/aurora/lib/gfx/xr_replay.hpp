@@ -59,8 +59,8 @@ struct XrReplayTarget {
 // with the passes so far. If it encoded the eyes into `cmd` (true), the frame
 // submits `cmd` at once, calls `submitted`, and goes on in a new encoder: the
 // eyes reach the GPU before the rest of the frame is recorded and translated.
-// Frames split only while set_xr_early_eyes is on, which also makes their
-// uploads skip the staging buffer (FramePacket::directUploads).
+// Frames split only while set_xr_early_eyes is on, and only when a second
+// staging buffer is free for the rest of the frame (split_staging).
 using XrEarlyHook = bool (*)(const wgpu::CommandEncoder& cmd, detail::FramePacket& frame,
                              const detail::XrEarlyEyes& early);
 using XrEarlySubmitted = void (*)(detail::FramePacket& frame);

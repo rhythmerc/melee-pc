@@ -690,9 +690,21 @@ after the split, the eyes are drawn again at the frame's end (counted as
 
 - **Uploads:** the frame's data reaches the GPU buffers by copies from a
   staging buffer that stays mapped until the frame ends, and Dawn rejects a
-  submit that copies from a mapped buffer. Early-eyes frames upload with
-  `WriteBuffer`/`WriteTexture` from the mapped memory instead
-  (`FramePacket::directUploads`, set when the frame begins).
+  submit that copies from a mapped buffer. At the split, recording moves the
+  rest of the frame to a second mapped staging buffer at the same offsets
+  (`split_staging`; each pool padded to 4 bytes there), and the render worker
+  unmaps the first before the early submit; copies below the split come
+  from the first, the rest from the second. Android keeps four staging
+  buffers (60 MiB each) instead of three; a frame that finds none free
+  doesn't split. Uploading with `WriteBuffer` from the mapped memory instead
+  cost the render worker about 2 ms a frame (four-CPU Stadium rock) and made
+  it late for the next frame.
+- **The image:** OpenXR allows one waited image per swapchain until it's
+  released, so a frame's eyes can't start before the previous frame's image
+  is handed over (at latency 3, 8.3 ms after this frame's tick). The eyes are
+  ready at about 6 ms and wait 2-4 ms for it on most frames; rendering into
+  a texture of our own and copying would save that but cost about a
+  millisecond of GPU for the copy.
 - **Copies of the EFB:** the world part drops its world draws like any flat
   pass nobody reads. If the continuation is then read (Pokémon Stadium's
   jumbotron zoom copies it), it draws the world part's world draws again

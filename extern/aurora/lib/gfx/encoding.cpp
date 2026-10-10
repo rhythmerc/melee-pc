@@ -517,16 +517,19 @@ constexpr uint32_t align_down_copy_offset(uint32_t value) noexcept { return valu
 #ifndef __EMSCRIPTEN__
 void copy_staging_buffer_range(wgpu::CommandEncoder& cmd, const FramePacket& frame, uint32_t& copied,
                                uint32_t highWater, uint64_t stagingOffset, const wgpu::Buffer& dst,
-                               const ByteBuffer& mapped) {
+                               uint32_t split) {
   if (highWater <= copied) {
     return;
   }
   const uint32_t copyStart = align_down_copy_offset(copied);
   const uint32_t copyEnd = AURORA_ALIGN(highWater, 4);
-  if (frame.directUploads) {
-    // XR early eyes: straight from the mapped staging memory (written up to
-    // the high water; later recording only appends past it).
-    g_queue.WriteBuffer(dst, copyStart, mapped.data() + copyStart, copyEnd - copyStart);
+  if (frame.stagingBuffer2 != SIZE_MAX && copyEnd > split) {
+    // XR early eyes: from `split` on (4-aligned), the second staging buffer.
+    if (copyStart < split)
+      cmd.CopyBufferToBuffer(staging_buffer(frame.stagingBuffer), stagingOffset + copyStart, dst, copyStart,
+                             split - copyStart);
+    const uint32_t from = std::max(copyStart, split);
+    cmd.CopyBufferToBuffer(staging_buffer(frame.stagingBuffer2), stagingOffset + from, dst, from, copyEnd - from);
     copied = highWater;
     return;
   }
@@ -561,34 +564,20 @@ void copy_staging_to_high_water(wgpu::CommandEncoder& cmd, FramePacket& frame, c
   frame.copied.indices = highWater.indices;
   frame.copied.storage = highWater.storage;
 #else
+  const auto& split = frame.stagingSplit;
   copy_staging_buffer_range(cmd, frame, frame.copied.verts, highWater.verts, VertexStagingOffset, res.vertexBuffer,
-                            frame.verts);
+                            split.verts);
   copy_staging_buffer_range(cmd, frame, frame.copied.uniforms, highWater.uniforms, UniformStagingOffset,
-                            res.uniformBuffer, frame.uniforms);
+                            res.uniformBuffer, split.uniforms);
   copy_staging_buffer_range(cmd, frame, frame.copied.indices, highWater.indices, IndexStagingOffset, res.indexBuffer,
-                            frame.indices);
+                            split.indices);
   copy_staging_buffer_range(cmd, frame, frame.copied.storage, highWater.storage, StorageStagingOffset,
-                            res.storageBuffer, frame.storage);
+                            res.storageBuffer, split.storage);
 #endif
 
   if constexpr (UseTextureBuffer) {
     for (size_t i = frame.copied.textureUploadCount; i < op.textureUploads.size(); ++i) {
       const auto& item = *op.textureUploads[i];
-#ifndef __EMSCRIPTEN__
-      if (frame.directUploads && !item.buffer) {
-        const uint32_t rowBytes = AURORA_ALIGN(item.layout.bytesPerRow, 256);
-        const uint32_t rows = item.layout.rowsPerImage != 0 ? item.layout.rowsPerImage : item.size.height;
-        const wgpu::TexelCopyBufferLayout layout{
-            .offset = 0,
-            .bytesPerRow = rowBytes,
-            .rowsPerImage = rows,
-        };
-        g_queue.WriteTexture(&item.tex, frame.textureUpload.data() + item.layout.offset,
-                             static_cast<size_t>(rowBytes) * rows * std::max(item.size.depthOrArrayLayers, 1u), &layout,
-                             &item.size);
-        continue;
-      }
-#endif
       const wgpu::TexelCopyBufferInfo buf{
           .layout =
               wgpu::TexelCopyBufferLayout{
@@ -596,7 +585,11 @@ void copy_staging_to_high_water(wgpu::CommandEncoder& cmd, FramePacket& frame, c
                   .bytesPerRow = AURORA_ALIGN(item.layout.bytesPerRow, 256),
                   .rowsPerImage = item.layout.rowsPerImage,
               },
-          .buffer = item.buffer ? item.buffer : staging_buffer(frame.stagingBuffer),
+          .buffer = item.buffer                                    ? item.buffer
+                    : frame.stagingBuffer2 != SIZE_MAX &&
+                            item.layout.offset >= frame.stagingSplit.textureUpload
+                        ? staging_buffer(frame.stagingBuffer2)
+                        : staging_buffer(frame.stagingBuffer),
       };
       cmd.CopyBufferToTexture(&buf, &item.tex, &item.size);
     }
@@ -688,7 +681,9 @@ void run_xr_early(FramePacket& frame, const XrEarlyEyes& early) {
   if (g_xrEarlyHook == nullptr || !frame.encoder || !g_xrEarlyHook(frame.encoder, frame, early))
     return;
   // Everything so far goes now; the rest of the frame continues in a new
-  // encoder (frame.cpp submits it at the end as usual).
+  // encoder (frame.cpp submits it at the end as usual). Its copies come from
+  // the first staging buffer, which recording no longer writes.
+  unmap_first_staging(frame);
   const wgpu::CommandBuffer commands = frame.encoder.Finish();
   g_queue.Submit(1, &commands);
   constexpr wgpu::CommandEncoderDescriptor EncoderDescriptor{.label = "Redraw encoder (after the eyes)"};

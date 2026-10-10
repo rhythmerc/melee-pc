@@ -276,6 +276,54 @@ Resources& resources() noexcept { return g_resources; }
 
 const wgpu::Buffer& staging_buffer(size_t slot) { return g_stagingBuffers[slot]; }
 
+bool split_staging(FramePacket& frame) {
+#ifdef __EMSCRIPTEN__
+  return false;
+#else
+  const auto slot = g_stagingSlots.try_acquire();
+  if (!slot)
+    return false;
+  if (g_mappingStates[*slot].load(std::memory_order_acquire) != BufferMapState::Mapped) {
+    map_staging_buffer(*slot);
+    g_stagingSlots.release(*slot);
+    return false;
+  }
+  // Each pool continues at the same offset in the second buffer, from a
+  // 4-byte boundary (copies are 4-aligned: a word mustn't straddle the two).
+  const auto& buffer = g_stagingBuffers[*slot];
+  size_t offset = 0;
+  const auto move = [&](ByteBuffer& buf, uint64_t size) {
+    if (buf.size() % 4 != 0)
+      buf.append_zeroes(4 - buf.size() % 4);
+    buf.rebase(static_cast<u8*>(buffer.GetMappedRange(offset, size)));
+    offset += size;
+  };
+  move(frame.verts, VertexBufferSize);
+  move(frame.uniforms, UniformBufferSize);
+  move(frame.indices, IndexBufferSize);
+  move(frame.storage, StorageBufferSize);
+  if constexpr (UseTextureBuffer)
+    move(frame.textureUpload, TextureUploadSize);
+  frame.stagingSplit = {
+      .verts = static_cast<uint32_t>(frame.verts.size()),
+      .uniforms = static_cast<uint32_t>(frame.uniforms.size()),
+      .indices = static_cast<uint32_t>(frame.indices.size()),
+      .storage = static_cast<uint32_t>(frame.storage.size()),
+      .textureUpload = static_cast<uint32_t>(frame.textureUpload.size()),
+  };
+  frame.stagingBuffer2 = *slot;
+  return true;
+#endif
+}
+
+void unmap_first_staging(FramePacket& frame) {
+  if (frame.stagingBuffer2 == SIZE_MAX || frame.stagingUnmapped)
+    return;
+  g_stagingBuffers[frame.stagingBuffer].Unmap();
+  g_mappingStates[frame.stagingBuffer].store(BufferMapState::Unmapped, std::memory_order_release);
+  frame.stagingUnmapped = true;
+}
+
 std::optional<RegisteredDrawType> find_runtime_draw_type(DrawTypeId id) {
   std::lock_guard lock{g_runtimeTypeMutex};
   const auto* slot = find_runtime_draw_type_locked(id);
@@ -692,9 +740,7 @@ bool begin_frame() {
 #if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
   frame.xrTickFrame = xr_game_frame_tick();
   frame.xrRecordStartNs = std::chrono::steady_clock::now().time_since_epoch().count();
-  // Early eyes: decided for the whole frame, since a pass's uploads are
-  // encoded with it (xr_replay.hpp).
-  frame.directUploads = xr_early_eyes();
+  frame.earlyEyes = xr_early_eyes();
 #endif
   frame.stagingBuffer = *stagingSlot;
   size_t bufferOffset = 0;
@@ -800,8 +846,16 @@ void end_frame(EndFrameCallback callback) {
     if constexpr (UseTextureBuffer) upload(g_stagingBuffers[stagingSlot], packet.textureUpload, TextureUploadSize);
     browser_upload_pools(g_queue.Get(), entries, count);
 #else
-    g_stagingBuffers[stagingSlot].Unmap();
+    // XR early eyes may have unmapped the first already (unmap_first_staging)
+    // and moved the rest of the frame to a second.
+    if (!packet.stagingUnmapped)
+      g_stagingBuffers[stagingSlot].Unmap();
+    if (packet.stagingBuffer2 != SIZE_MAX) {
+      g_stagingBuffers[packet.stagingBuffer2].Unmap();
+      g_mappingStates[packet.stagingBuffer2].store(BufferMapState::Unmapped, std::memory_order_release);
+    }
 #endif
+    const size_t stagingSlot2 = packet.stagingBuffer2;
     g_mappingStates[stagingSlot].store(BufferMapState::Unmapped, std::memory_order_release);
 #if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
     // Every pass of this frame is encoded; the OpenXR presenter re-draws the
@@ -827,6 +881,8 @@ void end_frame(EndFrameCallback callback) {
     g_frameSlots.release(frameSlot);
     expire_cached_bind_groups();
     map_staging_buffer(stagingSlot, true);
+    if (stagingSlot2 != SIZE_MAX)
+      map_staging_buffer(stagingSlot2, true);
     process_events();
   });
 }
