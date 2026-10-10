@@ -189,11 +189,28 @@ struct DynamicResolution {
   // include the compositor's preemptions of our passes. Mute City with four
   // fighters at 120 Hz: 10.2 ms frames held every 2-display-frame slot,
   // 12.1 ms frames missed some 12 a second (2026-10-10).
+  //
+  // Since 2026-10-10 the target comes from the deadline instead: each 3D
+  // frame's margin between its GPU work being done (less any wait for a
+  // swapchain image) and the release slot of the ideal latency (a game frame
+  // plus one display frame after its tick; the pacing probe measures it). The
+  // frame may grow by what the low end of recent margins (5th percentile)
+  // has beyond AURORA_XR_DYNRES_MARGIN_MS (1), and must shrink by what it
+  // lacks. Steps up wait for fresh margins at the new step. Below 1.0 looked
+  // too soft to be worth it (AURORA_XR_DYNRES_MIN, default 1.0): a stage that
+  // can't make the ideal latency at 1.0 stays there, and the fixed latency
+  // goes one display frame later instead.
   double targetNs = 13.0e6; // per game frame, compositor preemptions included
   bool fixedTarget = false; // AURORA_XR_DYNRES_TARGET_MS pins it
   double headroomNs = 1.2e6; // AURORA_XR_DYNRES_HEADROOM_MS
   double bandNs = 0.5e6;    // hysteresis: down only past target + band, up to the target
   double emaNs = 0;         // frame GPU time at the current step, this visit
+  double spanNs = 0;        // frame GPU time, running across steps
+  double wantMarginNs = 1.0e6;             // AURORA_XR_DYNRES_MARGIN_MS
+  std::array<float, 120> margins{};       // ns before the ideal slot, this step
+  size_t marginCount = 0, marginNext = 0;
+  double marginNs = 0;                    // their 5th percentile (with 30 or more)
+  bool haveMargin = false;
   double restNs = 0;        // frame GPU time outside the eye pass, running
   int level = 0;            // the current step: scale = minScale + level * kDynresStep
   uint64_t seenSeq = 0;     // R.timing.frameSeq last read
@@ -819,7 +836,8 @@ bool size_stereo_stream() {
   dr.on = g_multiview && env_flag("AURORA_XR_DYNRES", false);
 #endif
   if (dr.on) {
-    dr.minScale = std::clamp(env_float("AURORA_XR_DYNRES_MIN", 0.8f), 0.5f, 1.f);
+    dr.minScale = std::clamp(env_float("AURORA_XR_DYNRES_MIN", 1.f), 0.5f, 1.f);
+    dr.wantMarginNs = std::clamp(env_float("AURORA_XR_DYNRES_MARGIN_MS", 1.f), 0.f, 8.f) * 1.0e6;
     dr.maxScale = std::clamp(env_float("AURORA_XR_DYNRES_MAX", 1.3f), 1.f, 1.6f);
     // The target follows the display and the compositor (DynamicResolution);
     // AURORA_XR_DYNRES_TARGET_MS pins it instead.
@@ -1264,6 +1282,7 @@ struct PaceProbe {
   std::array<int64_t, 4> next{};            // render worker: record start, world end, record end, render start
   int64_t slotWaitNs = 0;                   // render worker: this frame's wait for a 3D image
   std::vector<uint8_t> doneLatency;          // display frames from tick to GPU done, for g_present
+  std::vector<float> idealMargins;           // ns from GPU done to the ideal latency's slot, for g_dynres
   bool started = false;
 } g_pace;
 
@@ -1316,6 +1335,12 @@ void pace_watch() {
         std::ceil(static_cast<double>(doneNs - p.slotWaitNs + 500000 - tick.waitNs) * hz / 1e9);
     if (g_pace.doneLatency.size() < 256)
       g_pace.doneLatency.push_back(static_cast<uint8_t>(std::clamp(frames, 0.0, 15.0)));
+    // Dynamic resolution's margin: to the slot of a game frame plus one
+    // display frame, whatever the latency is now.
+    const int ideal = std::max(g_displayPerGameFrame.load(), 1) + 1;
+    const double slot = static_cast<double>(tick.waitNs) + ideal * 1e9 / hz;
+    if (g_pace.idealMargins.size() < 256)
+      g_pace.idealMargins.push_back(static_cast<float>(slot - static_cast<double>(doneNs - p.slotWaitNs)));
     // The display time of the frame it's released for.
     const auto& due = g_pace.displays[(p.tickFrame + p.latency) % g_pace.displays.size()];
     if (due.frame == p.tickFrame + p.latency)
@@ -4158,10 +4183,37 @@ void update_dynamic_resolution(bool missed) {
     auto& costs = g_dynresCosts[stage * 2 + (g_passthroughWanted ? 1 : 0)];
     const int levels = dynres_levels();
     dr.level = std::clamp(dr.level, 0, levels - 1);
+    // Margins to the ideal latency's slot, from the pacing probe.
+    {
+      std::vector<float> margins;
+      {
+        std::lock_guard lock{g_pace.mutex};
+        margins.swap(g_pace.idealMargins);
+      }
+      for (float m : margins) {
+        dr.margins[dr.marginNext++ % dr.margins.size()] = m;
+        dr.marginCount = std::min(dr.marginCount + 1, dr.margins.size());
+      }
+      if (!margins.empty() && dr.marginCount >= 30) {
+        std::array<float, 120> sorted{};
+        std::copy_n(dr.margins.begin(), dr.marginCount, sorted.begin());
+        const size_t at = dr.marginCount / 20;
+        std::nth_element(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(at),
+                         sorted.begin() + static_cast<std::ptrdiff_t>(dr.marginCount));
+        dr.marginNs = sorted[at];
+        dr.haveMargin = true;
+      }
+    }
     if (!dr.fixedTarget) {
-      const float hz = g_displayHz > 0.f ? g_displayHz.load() : 120.f;
-      const float compositorMs = g_compositorGpuMs > 0.f ? g_compositorGpuMs.load() : 2.3f;
-      dr.targetNs = std::clamp(1.0e9 / 60.0 - compositorMs * 1.0e6 * hz / 60.0 - dr.headroomNs, 5.0e6, 16.0e6);
+      const double span = dr.emaNs > 0 ? dr.emaNs : dr.spanNs;
+      if (dr.haveMargin && span > 0) {
+        dr.targetNs = std::clamp(span + dr.marginNs - dr.wantMarginNs, 3.0e6, 20.0e6);
+      } else if (dr.spanNs == 0) {
+        // Until margins come in: what a game frame leaves us on the GPU.
+        const float hz = g_displayHz > 0.f ? g_displayHz.load() : 120.f;
+        const float compositorMs = g_compositorGpuMs > 0.f ? g_compositorGpuMs.load() : 2.3f;
+        dr.targetNs = std::clamp(1.0e9 / 60.0 - compositorMs * 1.0e6 * hz / 60.0 - dr.headroomNs, 5.0e6, 16.0e6);
+      }
     }
     // Shaders compiling (a stage's first fight of the session) stall the
     // frame on the CPU and inflate its span; less resolution can't help, and
@@ -4201,6 +4253,7 @@ void update_dynamic_resolution(bool missed) {
         ++dr.skipSpike;
       } else {
         dr.emaNs = dr.emaNs == 0 ? ns : dr.emaNs * 0.85 + ns * 0.15;
+        dr.spanNs = dr.spanNs == 0 ? ns : dr.spanNs * 0.95 + ns * 0.05;
         dr.restNs = dr.restNs == 0 ? ns - eyeNs : dr.restNs * 0.95 + (ns - eyeNs) * 0.05;
         dr.nsSum += ns;
         ++dr.nsFrames;
@@ -4251,7 +4304,7 @@ void update_dynamic_resolution(bool missed) {
             next = i;
             break;
           }
-      } else if (++dr.sinceStep >= kDynresUpDwell && dr.level + 1 < levels &&
+      } else if (++dr.sinceStep >= kDynresUpDwell && dr.level + 1 < levels && (dr.haveMargin || dr.fixedTarget) &&
                  predicted[dr.level + 1] <= dr.targetNs) {
         next = dr.level + 1;
       }
@@ -4262,6 +4315,9 @@ void update_dynamic_resolution(bool missed) {
       dr.emaNs = 0;
       dr.settle = 0;
       dr.sinceStep = 0;
+      // Margins at the old step say nothing about this one.
+      dr.marginCount = dr.marginNext = 0;
+      dr.haveMargin = false;
     }
     dr.scale = dynres_scale(dr.level);
   }
@@ -4289,11 +4345,11 @@ void update_dynamic_resolution(bool missed) {
             table += fmt::format(" {:.3f}:{:.1f}", dynres_scale(i), costs[i].ns / 1.0e6);
       }
       Log.info("Dynamic resolution: scale {:.2f} average ({:.2f}-{:.2f}); frame GPU {:.1f} ms average against "
-               "{:.1f} (compositor {:.1f} ms a display frame), {:.1f} of it outside the eyes; {} panics, "
+               "{:.1f} (margin to the ideal slot {:.1f} ms at 5%), {:.1f} of it outside the eyes; {} panics, "
                "{} lone misses; {} images held long; {} timings ({} settling, {} compiling, {} spikes or bogus left out); "
                "eye pass costs{}",
                dr.scaleSum / dr.frames, dr.lowest, dr.highest, dr.nsFrames ? dr.nsSum / dr.nsFrames / 1.0e6 : 0.0,
-               dr.targetNs / 1.0e6, g_compositorGpuMs.load(), dr.restNs / 1.0e6,
+               dr.targetNs / 1.0e6, dr.haveMargin ? dr.marginNs / 1.0e6 : 0.0, dr.restNs / 1.0e6,
                dr.panics, dr.loneMisses, dr.lateImages, dr.readings, dr.skipSettle, dr.skipCompile, dr.skipSpike,
                table);
     }

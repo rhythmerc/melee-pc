@@ -532,7 +532,7 @@ Dynamic resolution (multiview only; on by default on Android,
 `AURORA_XR_DYNRES=0|1` overrides) makes the stereo swapchain at the
 largest scale (`AURORA_XR_DYNRES_MAX`, 1.3) and renders each frame into its
 top-left corner at a scale of the runtime's recommended eye size, between
-`AURORA_XR_DYNRES_MIN` (0.8) and the maximum. The pass uses Dawn's
+`AURORA_XR_DYNRES_MIN` (1.0) and the maximum. The pass uses Dawn's
 `RenderPassRenderAreaRect`, so tiles outside the corner are neither cleared,
 resolved nor stored, and the projection layer's `imageRect` tells the
 compositor which corner to stretch over the field of view. The Dawn fork
@@ -561,16 +561,25 @@ practice](https://martinfullerblog.wordpress.com/2023/10/11/dynamic-resolution-s
   Much of a frame doesn't scale at all: Brinstar's eye pass is about 9.6 of
   its 11 ms at any scale, and on four-CPU Mute City 1.0 → 0.8 (36% fewer
   pixels) saves 0.7-1.2 ms of a 9.7 ms eye pass.
-- **Target and band:** the target is the game frame's share of the GPU:
-  1000/60 ms, less the compositor's GPU time over the display frames a game
-  frame spans, less `AURORA_XR_DYNRES_HEADROOM_MS` (1.2). The compositor's
-  time is read live from `XR_META_performance_metrics` (2.3 ms a display
-  frame when the runtime has no such counter), so at 120 Hz the target is
-  about 11 ms, at 72 Hz about 12.7. Cut only past target +
-  `AURORA_XR_DYNRES_BAND_MS` (0.5). `AURORA_XR_DYNRES_TARGET_MS` pins the
-  target. Measured on Mute City with four CPUs: about 10.2 ms a frame kept
-  every image on its two display frames, 12 ms missed 10-14 a second. The
-  old fixed 13 ms target was over that.
+- **Target and band:** the deadline, not a GPU budget (2026-10-10). The
+  pacing probe measures each 3D frame's margin between its GPU work being
+  done (less any wait for a swapchain image) and the release slot of the
+  ideal latency, a game frame plus one display frame after its tick (25 ms
+  at 120 Hz). The target is the frame's GPU time plus what the 5th
+  percentile of recent margins has beyond `AURORA_XR_DYNRES_MARGIN_MS` (1),
+  or less what it lacks. Steps up wait for fresh margins at the new step.
+  Cut only past target + `AURORA_XR_DYNRES_BAND_MS` (0.5).
+  `AURORA_XR_DYNRES_TARGET_MS` pins the target. Before margins come in, the
+  target is the game frame's GPU share: 1000/60 ms less the compositor's GPU
+  time over the display frames it spans (`XR_META_performance_metrics`)
+  less `AURORA_XR_DYNRES_HEADROOM_MS` (1.2). That budget left the scale at
+  0.8 on every heavy stage while the misses came from the deadline.
+- **Floor 1.0:** 0.8 looked too soft to be worth it, so the scale never goes
+  under 1.0 (`AURORA_XR_DYNRES_MIN`, default 1.0). A stage that can't make
+  the ideal latency at 1.0 stays there and fixed-latency presentation goes
+  one display frame later. Four CPUs, 2026-10-10: Battlefield (two) holds
+  1.30 at latency 3, 0.2 stale frames a second, 5 ms to spare; Mute City
+  holds 1.0 at latency 4, 0.9 a second, 2-3 ms short of latency 3.
 - **Steps:** down at once to the best step predicted to fit; up one step
   after half a second, only to a step predicted to fit.
 - **Clean costs:** while shaders are compiling (a stage's first fight of
@@ -1176,7 +1185,9 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_HUD_SCALE` | 0.5 | HUD texture resolution, relative to the screen |
 | `AURORA_XR_TIMING` | 1 | Log GPU pass times every 10 s |
 | `AURORA_XR_LOG_PERIOD` | 10 | Seconds between the GPU timing and dynamic resolution log lines |
-| `AURORA_XR_DYNRES_TARGET_MS` | display-derived | Pins dynamic resolution's frame GPU aim (Android) |
+| `AURORA_XR_DYNRES_TARGET_MS` | deadline-derived | Pins dynamic resolution's frame GPU aim (Android) |
+| `AURORA_XR_DYNRES_MIN` / `_MAX` | 1.0 / 1.3 | Dynamic resolution's scale range |
+| `AURORA_XR_DYNRES_MARGIN_MS` | 1 | Margin dynamic resolution keeps before the ideal latency's slot |
 | `AURORA_XR_DYNRES_HEADROOM_MS` | 1.2 | Margin left under the game frame's GPU share |
 | `AURORA_XR_DYNRES_BAND_MS` | 0.5 | How far past the aim a frame goes before the scale is cut |
 | `AURORA_XR_FIXED_LATENCY` | adaptive | Display frames from tick to release; 0 turns fixed-latency presentation off |
