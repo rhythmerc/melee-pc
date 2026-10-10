@@ -26,6 +26,7 @@
 // plus the melee-xr patches; see docs/quest-xr.md).
 #include <dawn/native/VulkanBackend.h>
 
+#include <poll.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -46,6 +47,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 namespace aurora::xr {
 namespace {
@@ -443,6 +445,14 @@ struct Bridge {
 
   uint64_t framesShown = 0, fightFrames = 0;
   std::array<uint64_t, 4> shownHistogram{}; // 3D images shown for 1, 2, 3, 4+ display frames
+  // XR loop timing (logged): xrWaitFrame's return to xrEndFrame, the gap
+  // between returns, and the time left before the predicted display.
+  int64_t loopWaitNs = 0, loopLastWaitNs = 0, loopMaxNs = 0, gapMaxNs = 0, leadMinNs = INT64_MAX;
+  uint32_t loopOver4 = 0, gapOver10 = 0;
+  // Sections of a slow loop (over 4 ms): begin, then release and acquire per
+  // stream, then the rest up to xrEndFrame, and xrEndFrame itself.
+  std::array<int64_t, 9> sectionNs{}, sectionMaxNs{};
+  std::array<uint32_t, 9> sectionWorst{}; // slow loops each section was the largest part of
   std::array<uint64_t, kStreamCount> releasedSinceStats{};
   std::chrono::steady_clock::time_point statsStart;
 };
@@ -1207,9 +1217,15 @@ bool acquire_ahead(Stream& st) {
 // soon as ready, images finishing right around a frame boundary alternated
 // between being shown 3 display frames and 1 instead of 2 and 2 (about 20
 // such pairs a second on Battlefield). `latency` is the smallest number of
-// display frames by which 97% of recent 3D images were ready, at most one
+// display frames by which 97% of recent 3D images were ready, at most two
 // past a game frame's display frames; it rises at once and falls after four
-// steady windows. On with dynamic resolution (see release_ready);
+// steady windows. On Android "ready" is the image's GPU work being done (the
+// pacing probe), not its submit: the runtime's xrBeginFrame waits for the
+// work of images already handed over, so an image released unfinished
+// stalled the XR loop and display frames went stale. Four-CPU Mute City
+// finishes about 26 ms after its tick, past latency 3's 25: at 4 it went
+// from 2.7 stale frames a second to 0.1, every image on its two display
+// frames, for one display frame (8 ms) more latency. On with dynamic resolution (see release_ready);
 // AURORA_XR_FIXED_LATENCY=0 turns it off, =<n> forces it on at n.
 struct Presentation {
   int forced = -1; // AURORA_XR_FIXED_LATENCY
@@ -1219,6 +1235,156 @@ struct Presentation {
   int sinceUpdate = 0, steadyLower = 0;
   uint64_t held = 0; // images held for their slot (logged)
 } g_present;
+
+// Pacing probe (Android): where each 3D frame's time goes after its tick,
+// and when its GPU work finishes against the display time it's due for. A
+// watcher thread polls a dup of Dawn's sync fd, so the finish time is exact.
+// Logged with the frame stats: the game waking on the tick, its recording
+// starting and ending, the render worker starting the eye replay, the
+// submit, the GPU finishing, and the margin before the image's display
+// time (tick + latency).
+struct PaceProbe {
+  struct Display {
+    uint64_t frame = 0;
+    int64_t waitNs = 0, displayNs = 0, wakeNs = 0; // xrWaitFrame's return; its predicted display; game woken
+  };
+  enum Mark { Wake, RecordStart, RecordEnd, RenderStart, Submit, Done, Margin, Marks };
+  std::mutex mutex;
+  std::condition_variable cv;
+  std::array<Display, 256> displays{};
+  struct Pending {
+    uint64_t tickFrame;
+    int latency;
+    int64_t slotWaitNs;
+    std::array<int64_t, Done> ns; // by Mark, up to the submit
+    int fd;
+  };
+  std::deque<Pending> pending;
+  std::array<std::vector<float>, Marks> ms; // since the last log, by Mark
+  std::array<int64_t, 3> next{};            // render worker: record start/end, render start of this frame
+  int64_t slotWaitNs = 0;                   // render worker: this frame's wait for a 3D image
+  std::vector<uint8_t> doneLatency;          // display frames from tick to GPU done, for g_present
+  bool started = false;
+} g_pace;
+
+int64_t monotonic_ns() { return std::chrono::steady_clock::now().time_since_epoch().count(); }
+
+void pace_display(uint64_t frame, XrTime displayTime) {
+  std::lock_guard lock{g_pace.mutex};
+  g_pace.displays[frame % g_pace.displays.size()] = {frame, monotonic_ns(), static_cast<int64_t>(displayTime), 0};
+}
+
+void pace_wake(uint64_t tickFrame) {
+  std::lock_guard lock{g_pace.mutex};
+  auto& d = g_pace.displays[tickFrame % g_pace.displays.size()];
+  if (d.frame == tickFrame)
+    d.wakeNs = monotonic_ns();
+}
+
+#ifdef __ANDROID__
+void pace_watch() {
+  for (;;) {
+    PaceProbe::Pending p;
+    {
+      std::unique_lock lock{g_pace.mutex};
+      g_pace.cv.wait(lock, [] { return !g_pace.pending.empty(); });
+      p = g_pace.pending.front();
+      g_pace.pending.pop_front();
+    }
+    pollfd pfd{.fd = p.fd, .events = POLLIN};
+    const bool done = poll(&pfd, 1, 200) > 0;
+    const int64_t doneNs = monotonic_ns();
+    close(p.fd);
+    if (!done)
+      continue;
+    std::lock_guard lock{g_pace.mutex};
+    const auto& tick = g_pace.displays[p.tickFrame % g_pace.displays.size()];
+    if (tick.frame != p.tickFrame || g_pace.ms[PaceProbe::Done].size() >= 4096)
+      continue;
+    p.ns[PaceProbe::Wake] = tick.wakeNs;
+    for (int m = 0; m < PaceProbe::Done; ++m)
+      if (p.ns[m] != 0)
+        g_pace.ms[m].push_back(static_cast<float>(p.ns[m] - tick.waitNs) / 1e6f);
+    g_pace.ms[PaceProbe::Done].push_back(static_cast<float>(doneNs - tick.waitNs) / 1e6f);
+    // The first display frame whose loop could release it finished (half a
+    // millisecond of slack): fixed-latency presentation's sample. Less the
+    // render worker's wait for a free image, which the latency itself
+    // causes: counted, it kept Battlefield at latency 4, where holding
+    // images starved the render worker and 3D ran at 30 a second.
+    const float hz = g_displayHz > 0.f ? g_displayHz.load() : 120.f;
+    const double frames =
+        std::ceil(static_cast<double>(doneNs - p.slotWaitNs + 500000 - tick.waitNs) * hz / 1e9);
+    if (g_pace.doneLatency.size() < 256)
+      g_pace.doneLatency.push_back(static_cast<uint8_t>(std::clamp(frames, 0.0, 15.0)));
+    // The display time of the frame it's released for.
+    const auto& due = g_pace.displays[(p.tickFrame + p.latency) % g_pace.displays.size()];
+    if (due.frame == p.tickFrame + p.latency)
+      g_pace.ms[PaceProbe::Margin].push_back(static_cast<float>(due.displayNs - doneNs) / 1e6f);
+  }
+}
+#endif
+
+// When the XR thread's loop for `frame` began (0: not recorded).
+int64_t pace_wait_ns(uint64_t frame) {
+  std::lock_guard lock{g_pace.mutex};
+  const auto& d = g_pace.displays[frame % g_pace.displays.size()];
+  return d.frame == frame ? d.waitNs : 0;
+}
+
+// Render worker: the frame about to be replayed for the eyes.
+void pace_frame(int64_t recordStartNs, int64_t recordEndNs) {
+  g_pace.next = {recordStartNs, recordEndNs, monotonic_ns()};
+  g_pace.slotWaitNs = 0;
+}
+
+// The render worker's 3D image for `tickFrame`, submitted now (fd: a dup of
+// its Dawn sync fd, owned from here).
+void pace_submit(uint64_t tickFrame, int fd) {
+#ifdef __ANDROID__
+  std::lock_guard lock{g_pace.mutex};
+  if (!g_pace.started) {
+    std::thread(pace_watch).detach();
+    g_pace.started = true;
+  }
+  PaceProbe::Pending p{tickFrame, std::max(g_present.latency, g_displayPerGameFrame.load()), g_pace.slotWaitNs, {}, fd};
+  p.ns[PaceProbe::RecordStart] = g_pace.next[0];
+  p.ns[PaceProbe::RecordEnd] = g_pace.next[1];
+  p.ns[PaceProbe::RenderStart] = g_pace.next[2];
+  p.ns[PaceProbe::Submit] = monotonic_ns();
+  g_pace.pending.push_back(p);
+  g_pace.cv.notify_one();
+#else
+  close(fd);
+#endif
+}
+
+std::string pace_summary() {
+  std::lock_guard lock{g_pace.mutex};
+  auto pct = [](std::vector<float>& v, float q) {
+    if (v.empty())
+      return 0.f;
+    const size_t i = std::min(v.size() - 1, static_cast<size_t>(q * static_cast<float>(v.size())));
+    std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(i), v.end());
+    return v[i];
+  };
+  if (g_pace.ms[PaceProbe::Done].empty())
+    return {};
+  static constexpr const char* kNames[] = {"woken", "recording", "recorded", "replaying", "submitted", "GPU done"};
+  std::string s = "; pacing (ms after the tick, median/95%/max):";
+  for (int m = 0; m < PaceProbe::Margin; ++m) {
+    auto& v = g_pace.ms[m];
+    s += fmt::format(" {} {:.1f}/{:.1f}/{:.1f}{}", kNames[m], pct(v, 0.5f), pct(v, 0.95f), pct(v, 1.f),
+                     m + 1 < PaceProbe::Margin ? "," : ";");
+  }
+  auto& margin = g_pace.ms[PaceProbe::Margin];
+  auto under = [&](float ms) { return std::count_if(margin.begin(), margin.end(), [&](float m) { return m < ms; }); };
+  s += fmt::format(" margin before display {:.1f} median, {:.1f} least; under 8/10/12/14 ms: {}/{}/{}/{} of {}",
+                   pct(margin, 0.5f), pct(margin, 0.f), under(8.f), under(10.f), under(12.f), under(14.f),
+                   margin.size());
+  for (auto& v : g_pace.ms)
+    v.clear();
+  return s;
+}
 
 void note_ready_latency(uint64_t lat) {
   auto& p = g_present;
@@ -1240,10 +1406,9 @@ void note_ready_latency(uint64_t lat) {
     if (acc * 100 >= static_cast<int>(p.count) * 97)
       break;
   }
-  // At most one display frame past the ideal: holding images longer ties up
-  // the swapchain's few images, and the render worker then finds none free
-  // (Pokémon Stadium rock with four CPUs climbed to 4 and missed frames).
-  k = std::min(k, std::max(g_displayPerGameFrame.load(), 1) + 1);
+  // At most two display frames past the ideal: holding images longer ties up
+  // the swapchain's few images, and the render worker then finds none free.
+  k = std::min(k, std::max(g_displayPerGameFrame.load(), 1) + 2);
   if (k > p.latency) {
     p.latency = k;
     p.steadyLower = 0;
@@ -1281,8 +1446,25 @@ bool release_ready(Stream& st, bool& released) {
       }
       if (index < 0 || st.slots[index].state != SlotState::Ready)
         return true;
-      // Fixed-latency presentation: hold a 3D or HUD image for its slot.
       auto& sl = st.slots[index];
+#ifdef __ANDROID__
+      // AURORA_XR_RELEASE_DONE=1: not before its GPU work is done. The
+      // runtime's xrBeginFrame waits for the work of images already handed
+      // over, so an image released while its eye pass still ran stalled the
+      // XR loop for up to 25 ms and display frames went stale (Mute City,
+      // four CPUs, at 1.3: 10 a second). Held, those stalls go, but OpenXR
+      // allows one waited image per swapchain until it's released, so the
+      // render worker then waits and drops 3D frames (30-50 a second); a
+      // second swapchain only made it two images in flight. Off.
+      static const bool waitDone = env_flag("AURORA_XR_RELEASE_DONE", false);
+      if (waitDone)
+        for (int fd : sl.fromDawn.fds) {
+          pollfd pfd{.fd = fd, .events = POLLIN};
+          if (poll(&pfd, 1, 0) <= 0)
+            return true;
+        }
+#endif
+      // Fixed-latency presentation: hold a 3D or HUD image for its slot.
       // On with dynamic resolution, which keeps frames on time: without it,
       // frames running late on an overloaded stage were held into slots the
       // render worker then lacked (Pokémon Stadium rock, four CPUs: 58.2 ->
@@ -1292,8 +1474,11 @@ bool release_ready(Stream& st, bool& released) {
           (&st == &g_streams[kStereo] || &st == &g_streams[kHud])) {
         if (sl.readySeen == 0) {
           sl.readySeen = B.displayFrame;
+#ifndef __ANDROID__
+          // Android samples when the GPU work is done (the pacing probe).
           if (&st == &g_streams[kStereo] && B.displayFrame >= sl.tickFrame)
             note_ready_latency(B.displayFrame - sl.tickFrame);
+#endif
         }
         if (B.displayFrame < sl.tickFrame + static_cast<uint64_t>(g_present.latency)) {
           if (&st == &g_streams[kStereo] && sl.readySeen == B.displayFrame)
@@ -2697,6 +2882,13 @@ void sync_boundary() {
 bool render_xr_frame() {
   XrFrameState fs{XR_TYPE_FRAME_STATE};
   XR_TRY(xrWaitFrame(B.session, nullptr, &fs));
+  B.loopWaitNs = monotonic_ns();
+  if (B.loopLastWaitNs != 0) {
+    const int64_t gap = B.loopWaitNs - B.loopLastWaitNs;
+    B.gapMaxNs = std::max(B.gapMaxNs, gap);
+    B.gapOver10 += gap > 10000000 ? 1 : 0;
+  }
+  B.loopLastWaitNs = B.loopWaitNs;
   free_finished_uploads();
   if (const int per = g_displayPerGameFrame; per > 0 && ++B.displayFrame % static_cast<uint64_t>(per) == 0) {
     {
@@ -2705,6 +2897,17 @@ bool render_xr_frame() {
       g_lastTickFrame = B.displayFrame;
     }
     g_paceCv.notify_all();
+  }
+  if (g_displayPerGameFrame > 0)
+    pace_display(B.displayFrame, fs.predictedDisplayTime);
+  {
+    std::vector<uint8_t> done;
+    {
+      std::lock_guard lock{g_pace.mutex};
+      done.swap(g_pace.doneLatency);
+    }
+    for (uint8_t lat : done)
+      note_ready_latency(lat);
   }
   update_input();
   publish_views(fs.predictedDisplayTime);
@@ -2717,15 +2920,27 @@ bool render_xr_frame() {
     Log.info("Arena placed at the head: {:.2f},{:.2f},{:.2f}, yaw {:.0f} deg", g_arena.pos.x, g_arena.pos.y,
              g_arena.pos.z, g_arena.yaw * 57.2958f);
   }
+  int64_t mark = monotonic_ns();
+  auto section = [&](int i) {
+    const int64_t t = monotonic_ns();
+    B.sectionNs[i] = t - mark;
+    mark = t;
+  };
+  B.sectionNs = {};
   XR_TRY(xrBeginFrame(B.session, nullptr));
+  section(0);
 
   const auto now = std::chrono::steady_clock::now();
   // Hand finished images to the runtime, then line up the next ones for the
   // render worker.
   for (int i = 0; i < kStreamCount; ++i) {
     bool released = false;
-    if (!release_ready(g_streams[i], released) || !acquire_ahead(g_streams[i]))
+    if (!release_ready(g_streams[i], released))
       return false;
+    section(1 + i * 2);
+    if (!acquire_ahead(g_streams[i]))
+      return false;
+    section(2 + i * 2);
     B.releasedSinceStats[i] += released ? 1 : 0;
   }
   // A fight is on while 3D frames keep coming; otherwise the virtual screen.
@@ -2856,7 +3071,23 @@ bool render_xr_frame() {
   fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
   fei.layerCount = layerCount;
   fei.layers = layers.data();
+  section(7);
+  {
+    const int64_t now = monotonic_ns();
+    B.loopMaxNs = std::max(B.loopMaxNs, now - B.loopWaitNs);
+    B.loopOver4 += now - B.loopWaitNs > 4000000 ? 1 : 0;
+    B.leadMinNs = std::min(B.leadMinNs, static_cast<int64_t>(fs.predictedDisplayTime) - now);
+  }
   XR_TRY(xrEndFrame(B.session, &fei));
+  section(8);
+  if (monotonic_ns() - B.loopWaitNs > 4000000) {
+    int worst = 0;
+    for (int i = 0; i < 9; ++i) {
+      B.sectionMaxNs[i] = std::max(B.sectionMaxNs[i], B.sectionNs[i]);
+      worst = B.sectionNs[i] > B.sectionNs[worst] ? i : worst;
+    }
+    ++B.sectionWorst[worst];
+  }
   ++B.framesShown;
 #ifdef XR_META_performance_metrics
   // About twice a second: the compositor's GPU time per display frame.
@@ -2877,13 +3108,28 @@ bool render_xr_frame() {
 
   const double secs = std::chrono::duration<double>(now - B.statsStart).count();
   if (secs >= 10.0) {
+    static constexpr const char* kSections[] = {"begin",           "release screen", "acquire screen",
+                                                "release 3D",      "acquire 3D",     "release HUD",
+                                                "acquire HUD",     "layers",         "end"};
+    std::string sections;
+    for (int i = 0; i < 9; ++i)
+      if (B.sectionWorst[i] > 0 || B.sectionMaxNs[i] > 2000000)
+        sections += fmt::format("{}{} {:.1f}/{}", sections.empty() ? "" : ", ", kSections[i],
+                                B.sectionMaxNs[i] / 1e6, B.sectionWorst[i]);
     Log.info("{:.1f} display fps ({:.0f}% 3D); frames/s released: screen {:.1f}, 3D {:.1f}, HUD {:.1f}; "
              "3D images shown 1/2/3/4+ display frames: {}/{}/{}/{}; presented {} display frames after the tick "
-             "({} held)",
+             "({} held); XR loop: wait to end {:.1f} ms at most, {} over 4 ms; gaps {:.1f} ms at most, {} over 10 ms; "
+             "{:.1f} ms least before display; slow loops' sections (most ms, times largest): {}{}",
              B.framesShown / secs, 100.0 * B.fightFrames / std::max<uint64_t>(B.framesShown, 1),
              B.releasedSinceStats[kScreen] / secs, B.releasedSinceStats[kStereo] / secs,
              B.releasedSinceStats[kHud] / secs, B.shownHistogram[0], B.shownHistogram[1], B.shownHistogram[2],
-             B.shownHistogram[3], g_present.latency, g_present.held);
+             B.shownHistogram[3], g_present.latency, g_present.held, B.loopMaxNs / 1e6, B.loopOver4,
+             B.gapMaxNs / 1e6, B.gapOver10, B.leadMinNs / 1e6, sections, pace_summary());
+    B.sectionMaxNs = {};
+    B.sectionWorst = {};
+    B.loopMaxNs = B.gapMaxNs = 0;
+    B.leadMinNs = INT64_MAX;
+    B.loopOver4 = B.gapOver10 = 0;
     B.shownHistogram = {};
     g_present.held = 0;
     B.framesShown = 0;
@@ -3145,8 +3391,11 @@ int take_slot_locked(Stream& st) {
 wgpu::Texture acquire_slot(Stream& st, std::chrono::milliseconds wait = std::chrono::milliseconds(10)) {
   int index;
   {
+    const int64_t start = monotonic_ns();
     std::unique_lock lock{g_mutex};
     g_slotFreeCv.wait_for(lock, wait, [&] { return take_slot_locked(st) >= 0 || g_phase != Phase::Imported; });
+    if (&st == &g_streams[kStereo])
+      g_pace.slotWaitNs = monotonic_ns() - start;
     index = take_slot_locked(st);
     if (index < 0)
       return {};
@@ -3202,6 +3451,8 @@ void release_slot(Stream& st, const std::array<XrView, 2>* views, std::array<int
     if (oi.handle >= 0)
       release.fds.push_back(dup(oi.handle)); // the SharedFence keeps its own handle
   }
+  if (&st == &g_streams[kStereo] && tickFrame != 0 && !release.fds.empty())
+    pace_submit(tickFrame, dup(release.fds[0]));
   std::lock_guard lock{g_mutex};
   s.fromDawn = std::move(release);
   if (views != nullptr)
@@ -4062,6 +4313,7 @@ void render_3d(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame)
   R.missedStereo = false;
   R.renderedRect = {};
   R.renderedTick = frame.xrTickFrame;
+  pace_frame(frame.xrRecordStartNs, frame.xrRecordEndNs);
   render_3d_frame(cmd, frame);
   gfx::set_xr_drop_flat_world((R.renderedStereo || R.missedStereo) && g_skipPresent &&
                               !env_flag("AURORA_XR_FLAT_WORLD", false));
@@ -4160,7 +4412,19 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
   if (direct) {
     if (!ensure_direct(layout))
       return;
-    if (auto dst = acquire_slot(stereo)) {
+    // A frame released `latency` display frames after its tick needn't have
+    // its image until one display frame before then: waiting only the usual
+    // 10 ms, a stage that records quickly (Battlefield, done 5 ms after the
+    // tick) asked before the runtime freed one at latency 4 and dropped every
+    // other 3D frame.
+    auto wait = std::chrono::milliseconds(10);
+    if (const int64_t tickNs = R.renderedTick != 0 ? pace_wait_ns(R.renderedTick) : 0;
+        tickNs != 0 && g_present.latency > 1) {
+      const float hz = g_displayHz > 0.f ? g_displayHz.load() : 120.f;
+      const int64_t deadline = tickNs + static_cast<int64_t>((g_present.latency - 1) * 1e9 / hz);
+      wait = std::max(wait, std::chrono::milliseconds((deadline - monotonic_ns()) / 1000000));
+    }
+    if (auto dst = acquire_slot(stereo, wait)) {
       gfx::XrReplayTarget t;
       t.layout = layout;
       t.size = {stereo.width, stereo.height, 1};
@@ -4586,6 +4850,8 @@ extern "C" bool aurora_xr_pace(void) {
   const bool ticked = g_paceCv.wait_for(lock, std::chrono::milliseconds(50), [&] {
     return g_paceTick != tick || g_displayPerGameFrame <= 0 || !g_sessionRunning;
   }) && g_paceTick != tick;
+  if (ticked)
+    pace_wake(g_lastTickFrame);
   // The frame the game records next carries this tick (fixed-latency
   // presentation; 0 without one).
   aurora::gfx::set_xr_game_frame_tick(ticked ? g_lastTickFrame.load() : 0);

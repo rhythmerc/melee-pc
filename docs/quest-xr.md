@@ -577,8 +577,7 @@ practice](https://martinfullerblog.wordpress.com/2023/10/11/dynamic-resolution-s
   the session; `gfx::pipelines_created()` still climbing, and half a second
   after), frames stall on the CPU and look dear at any scale. They're left
   out of the table and don't cut the scale. A sample half again over the
-  step's running average (a hitch elsewhere) is left out too, and the fit
-  never lets more than half of the frame scale with pixels. Before these,
+  step's running average (a hitch elsewhere) is left out too. Before these,
   a first fight on Temple sat at low resolution until those early entries
   faded.
 - **Panic:** two missed swapchain images within a second, with the frame
@@ -618,11 +617,42 @@ Each frame packet now carries the display frame of the tick that started it
 (`FramePacket::xrTickFrame`, set from `aurora_xr_pace`), and the XR thread
 releases its 3D and HUD images `latency` display frames after the tick.
 `latency` is the smallest number of display frames by which 97% of recent
-3D images were ready, at most a game frame's display frames plus one. It's on with dynamic resolution, which keeps frames on
+3D images were ready, at most a game frame's display frames plus two. It's on with dynamic resolution, which keeps frames on
 time: without it, frames running late on an overloaded stage were held into
 slots the render worker then lacked (Pokémon Stadium rock with four CPUs,
 58.2 -> 55.5 game fps). `AURORA_XR_FIXED_LATENCY=0` turns it off, `=<n>`
 forces it on at n.
+
+On Android, "ready" is the image's GPU work being done, not its submit
+(2026-10-10). The runtime's `xrBeginFrame` waits for the GPU work of images
+already handed over, so an image released unfinished stalled the XR loop for
+up to 25 ms and the compositor showed stale frames: that, not GPU load, was
+four-CPU Mute City's 2-3 stale frames a second (the same at scale 0.8 and
+1.0). Its frames finish about 26 ms after the tick, past latency 3's 25 ms;
+the latency now goes to 4 there (8 ms more from game input to photon) and the
+stale frames to 0.1-0.5 a second, every image on its two display frames.
+Battlefield with two CPUs finishes by 21 and stays at 3. The sample leaves
+out the render worker's wait for a swapchain image, which the latency itself
+causes, and the render worker waits for an image until one display frame
+before the frame is due rather than 10 ms: otherwise a quickly recorded
+stage (Battlefield) asked before the runtime had freed one at latency 4,
+dropped every other 3D frame, and stayed there at 30 a second. Pokémon
+Stadium rock with four CPUs is at its limit either way (4.1 stale frames a
+second at 4, 4.7 at 3); what's left is shortening the chain from tick to
+GPU done.
+
+Holding an image until its GPU work is done instead
+(`AURORA_XR_RELEASE_DONE=1`) ends the stalls too, but OpenXR allows one
+waited image per swapchain until it's released, so the render worker then
+waits and drops 3D frames (30-50 a second); a second stereo swapchain only
+made it two images in flight.
+
+The XR log line also carries the pacing probe: when each 3D frame's game
+thread woke on the tick, its recording started and ended, the render worker
+began the eye replay and submitted it, and its GPU work was done (from Dawn's
+sync fd), as median/95%/max ms after the tick; and the XR loop's longest
+wait-to-end time, its gaps between display frames, and which section of a
+slow loop took longest.
 On Battlefield it settles at 2 display frames, no later than before, and
 every image is shown exactly two display frames (600 of 600 per 10 s,
 against 188 to 480 without it). The XR log line reports the histogram and
@@ -1127,6 +1157,8 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_DYNRES_TARGET_MS` | display-derived | Pins dynamic resolution's frame GPU aim (Android) |
 | `AURORA_XR_DYNRES_HEADROOM_MS` | 1.2 | Margin left under the game frame's GPU share |
 | `AURORA_XR_DYNRES_BAND_MS` | 0.5 | How far past the aim a frame goes before the scale is cut |
+| `AURORA_XR_FIXED_LATENCY` | adaptive | Display frames from tick to release; 0 turns fixed-latency presentation off |
+| `AURORA_XR_RELEASE_DONE` | 0 | Hand 3D images to the runtime only once their GPU work is done (Android; drops frames) |
 | `AURORA_PIPELINE_INLINE` | 0 | Compile pipelines on the render thread instead of the compile thread |
 | `AURORA_XR_ARENA_SCALE` | 0.0035 | Starting meters per game unit, times each stage's own size (grab with two hands to change) |
 | `AURORA_XR_ARENA_YAW` | 0 | Starting arena turn in degrees (counter-clockwise from above) |

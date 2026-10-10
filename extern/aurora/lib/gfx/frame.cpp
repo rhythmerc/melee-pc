@@ -691,6 +691,7 @@ bool begin_frame() {
   frame.frameIndex = g_frameIndex;
 #if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
   frame.xrTickFrame = xr_game_frame_tick();
+  frame.xrRecordStartNs = std::chrono::steady_clock::now().time_since_epoch().count();
 #endif
   frame.stagingBuffer = *stagingSlot;
   size_t bufferOffset = 0;
@@ -736,6 +737,9 @@ void end_frame(EndFrameCallback callback) {
   }
   const auto recorded = end_recording();
   auto& frame = *recorded.packet;
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+  frame.xrRecordEndNs = std::chrono::steady_clock::now().time_since_epoch().count();
+#endif
   const size_t frameSlot = recorded.frameSlot;
   const uint64_t frameId = frame.frameId;
   end_pipeline_frame();
