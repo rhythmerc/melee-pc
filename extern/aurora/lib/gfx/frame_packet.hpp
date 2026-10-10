@@ -217,6 +217,7 @@ struct FramePacket {
   // When the game thread began and ended recording it (steady clock ns;
   // lib/xr's pacing probe).
   int64_t xrRecordStartNs = 0, xrRecordEndNs = 0;
+  int64_t xrWorldEndNs = 0; // when its last world draw was recorded (0: still in the world at the end)
   uint32_t frameIndex = 0;
   size_t stagingBuffer = 0;
   StagingHighWater copied;

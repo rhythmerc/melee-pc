@@ -1271,6 +1271,11 @@ void xr_set_category(XrCategory category, const float* view3x4) {
     return;
   }
   if (category != g_recorder.xrCategory) {
+    // The latest end of a run of world draws (0 while one is still open).
+    if (g_recorder.xrCategory == XrCategory::World)
+      g_recorder.frame().xrWorldEndNs = std::chrono::steady_clock::now().time_since_epoch().count();
+    else if (category == XrCategory::World)
+      g_recorder.frame().xrWorldEndNs = 0;
     g_recorder.xrCategory = category;
     // A non-draw command between draws keeps them from merging across the
     // boundary (get_last_draw_command only merges into a trailing draw).
