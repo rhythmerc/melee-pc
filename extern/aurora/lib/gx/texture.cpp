@@ -12,6 +12,7 @@
 #include <xxhash.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -134,13 +135,17 @@ std::atomic<uint64_t> s_pendingInvalidations = 0;
 std::atomic<uint64_t> s_pendingCacheClears = 0;
 TextureStats s_stats;
 
-// Texture content hashes, kept for the frame (AURORA_TEX_HASH_MEMO=0 turns
+// Texture content hashes, kept across frames (AURORA_TEX_HASH_MEMO=0 turns
 // it off). HSD sets up a fresh GXTexObj for every draw, so the object cache
 // never hits and every draw hashed its texture's whole data: about 8% of the
-// FIFO thread on the Quest (four-CPU Mute City). Keyed by where the data is
-// and how it's read; cleared at the end of the frame and on
+// FIFO thread on the Quest (four-CPU Mute City), and still 7% hashing each
+// texture once a frame. Keyed by where the data is and its size; the first
+// use each frame checks a fingerprint (32 samples spread over the data, or
+// all of it when small) and hashes in full only when that changed. After
 // GXInvalidateTexAll, which a game calls once the CPU has written texture
-// memory. AURORA_TEX_HASH_MEMO_CHECK=1 hashes anyway and counts mismatches.
+// memory, each is checked again at its next use (Melee calls it while drawing
+// shadows, several times a frame: clearing the memo there re-hashed every
+// texture). AURORA_TEX_HASH_MEMO_CHECK=1 hashes anyway and counts mismatches.
 struct HashMemoKey {
   const void* data;
   size_t bytes;
@@ -150,8 +155,27 @@ struct HashMemoKey {
     return H::combine(std::move(h), k.data, k.bytes);
   }
 };
-absl::flat_hash_map<HashMemoKey, XXH128_hash_t> s_hashMemo;
+struct HashMemoEntry {
+  XXH128_hash_t hash;
+  uint64_t fingerprint;
+  uint64_t checkedFrame; // s_frameCount when last checked
+  uint64_t checkedGen;   // s_hashMemoGen when last checked
+};
+absl::flat_hash_map<HashMemoKey, HashMemoEntry> s_hashMemo;
 uint64_t s_hashMemoMismatches = 0;
+uint64_t s_hashMemoSwept = 0;
+uint64_t s_hashMemoGen = 0; // GXInvalidateTexAll calls
+
+uint64_t texture_fingerprint(const void* data, size_t bytes) {
+  constexpr size_t Samples = 32, SampleBytes = 8;
+  if (bytes <= Samples * SampleBytes * 2)
+    return XXH3_64bits(data, bytes);
+  std::array<uint8_t, Samples * SampleBytes> gathered;
+  const auto* p = static_cast<const uint8_t*>(data);
+  for (size_t i = 0; i < Samples; ++i)
+    std::memcpy(gathered.data() + i * SampleBytes, p + i * (bytes - SampleBytes) / (Samples - 1), SampleBytes);
+  return XXH3_64bits_withSeed(gathered.data(), gathered.size(), bytes);
+}
 
 XXH128_hash_t memo_hash(const void* data, size_t bytes) {
   static const bool on = [] {
@@ -165,15 +189,35 @@ XXH128_hash_t memo_hash(const void* data, size_t bytes) {
     return v != nullptr && *v == '1';
   }();
   const HashMemoKey key{data, bytes};
-  if (const auto it = s_hashMemo.find(key); it != s_hashMemo.end()) {
-    if (check && !XXH128_isEqual(it->second, XXH3_128bits(data, bytes)) && ++s_hashMemoMismatches <= 8)
+  auto it = s_hashMemo.find(key);
+  if (it != s_hashMemo.end()) {
+    auto& e = it->second;
+    if (e.checkedFrame != s_frameCount || e.checkedGen != s_hashMemoGen) {
+      const uint64_t fp = texture_fingerprint(data, bytes);
+      if (fp != e.fingerprint) {
+        e.hash = XXH3_128bits(data, bytes);
+        e.fingerprint = fp;
+        s_stats.hashedBytes += bytes;
+      }
+      e.checkedFrame = s_frameCount;
+      e.checkedGen = s_hashMemoGen;
+    }
+    if (check && !XXH128_isEqual(e.hash, XXH3_128bits(data, bytes)) && ++s_hashMemoMismatches <= 8)
       Log.warn("Texture hash memo: stale entry ({} bytes)", bytes);
-    return it->second;
+    return e.hash;
   }
   const XXH128_hash_t h = XXH3_128bits(data, bytes);
-  s_hashMemo.emplace(key, h);
+  s_hashMemo.emplace(key, HashMemoEntry{h, texture_fingerprint(data, bytes), s_frameCount, s_hashMemoGen});
   s_stats.hashedBytes += bytes;
   return h;
+}
+
+// Entries unchecked for ten seconds go (end of frame, every few seconds).
+void sweep_hash_memo() {
+  if (s_frameCount - s_hashMemoSwept < 300)
+    return;
+  s_hashMemoSwept = s_frameCount;
+  absl::erase_if(s_hashMemo, [](const auto& kv) { return s_frameCount - kv.second.checkedFrame > 600; });
 }
 
 #if DEBUG
@@ -758,7 +802,7 @@ gfx::TextureHandle resolve_static_palette_texture(const GXTexObj_& obj, const GX
 }
 
 void end_frame() noexcept {
-  s_hashMemo.clear();
+  sweep_hash_memo();
   const auto streamingStats = gfx::texture_replacement::process_streaming();
   s_stats.pendingLoads = streamingStats.pendingLoads;
   s_stats.publishes = streamingStats.publishes;
@@ -794,6 +838,8 @@ void shutdown() noexcept {
   s_contentCacheBytes = 0;
   s_contentCacheBudgetBytes = ContentCacheBudgetBytes;
   s_frameCount = 0;
+  s_hashMemo.clear();
+  s_hashMemoSwept = 0;
   s_bindGeneration = 1;
   s_pendingInvalidations.store(0, std::memory_order_release);
   s_pendingCacheClears.store(0, std::memory_order_release);
@@ -830,7 +876,7 @@ void evict_texture_object(u32 texObjId) noexcept {
   }
 }
 
-void invalidate_texture_hashes() noexcept { s_hashMemo.clear(); }
+void invalidate_texture_hashes() noexcept { ++s_hashMemoGen; }
 
 void evict_tlut_object(u32 tlutObjId) noexcept {
   if (const auto it = s_tlutObjectCaches.find(tlutObjId); it != s_tlutObjectCaches.end()) {

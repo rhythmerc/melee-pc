@@ -31,61 +31,49 @@ namespace aurora::gx::fifo {
 namespace {
 constexpr Module Log{"aurora::gx::fifo"};
 
+// Triangle indices for a draw, written straight into the buffer: appending
+// them one u16 at a time made each a capacity check and a memcpy call.
 u16 prepare_idx_buffer(ByteBuffer& buf, GXPrimitive prim, u16 vtxStart, u16 vtxCount) noexcept {
   u16 numIndices = 0;
   if (prim == GX_QUADS) {
-    buf.reserve_extra((vtxCount / 4) * 6 * sizeof(u16));
-
+    // As before, a partial last quad still makes its two triangles.
+    numIndices = static_cast<u16>(((vtxCount + 3) / 4) * 6);
+    auto* out = reinterpret_cast<u16*>(buf.append_uninit(numIndices * sizeof(u16)));
     for (u16 v = 0; v < vtxCount; v += 4) {
-      u16 idx0 = vtxStart + v;
-      u16 idx1 = vtxStart + v + 1;
-      u16 idx2 = vtxStart + v + 2;
-      u16 idx3 = vtxStart + v + 3;
-
-      buf.append(idx0);
-      buf.append(idx1);
-      buf.append(idx2);
-      numIndices += 3;
-
-      buf.append(idx2);
-      buf.append(idx3);
-      buf.append(idx0);
-      numIndices += 3;
+      const u16 i0 = vtxStart + v;
+      *out++ = i0;
+      *out++ = i0 + 1;
+      *out++ = i0 + 2;
+      *out++ = i0 + 2;
+      *out++ = i0 + 3;
+      *out++ = i0;
     }
   } else if (prim == GX_TRIANGLES) {
-    buf.reserve_extra(vtxCount * sizeof(u16));
-    for (u16 v = 0; v < vtxCount; ++v) {
-      const u16 idx = vtxStart + v;
-      buf.append(idx);
-      ++numIndices;
-    }
-  } else if (prim == GX_TRIANGLEFAN) {
-    buf.reserve_extra(((u32(vtxCount) - 3) * 3 + 3) * sizeof(u16));
-    for (u16 v = 0; v < vtxCount; ++v) {
-      const u16 idx = vtxStart + v;
-      if (v < 3) {
-        buf.append(idx);
-        ++numIndices;
-        continue;
-      }
-      buf.append(std::array{vtxStart, static_cast<u16>(idx - 1), idx});
-      numIndices += 3;
-    }
-  } else if (prim == GX_TRIANGLESTRIP) {
-    buf.reserve_extra(((static_cast<u32>(vtxCount) - 3) * 3 + 3) * sizeof(u16));
+    numIndices = vtxCount;
+    auto* out = reinterpret_cast<u16*>(buf.append_uninit(numIndices * sizeof(u16)));
+    for (u16 v = 0; v < vtxCount; ++v)
+      out[v] = vtxStart + v;
+  } else if (prim == GX_TRIANGLEFAN || prim == GX_TRIANGLESTRIP) {
+    const bool fan = prim == GX_TRIANGLEFAN;
+    numIndices = vtxCount < 3 ? vtxCount : static_cast<u16>((vtxCount - 3) * 3 + 3);
+    auto* out = reinterpret_cast<u16*>(buf.append_uninit(numIndices * sizeof(u16)));
     for (u16 v = 0; v < vtxCount; ++v) {
       const u16 idx = vtxStart + v;
       if (v < 3) {
-        buf.append(idx);
-        ++numIndices;
-        continue;
-      }
-      if ((v & 1) == 0) {
-        buf.append(std::array{static_cast<u16>(idx - 2), static_cast<u16>(idx - 1), idx});
+        *out++ = idx;
+      } else if (fan) {
+        *out++ = vtxStart;
+        *out++ = idx - 1;
+        *out++ = idx;
+      } else if ((v & 1) == 0) {
+        *out++ = idx - 2;
+        *out++ = idx - 1;
+        *out++ = idx;
       } else {
-        buf.append(std::array{static_cast<u16>(idx - 1), static_cast<u16>(idx - 2), idx});
+        *out++ = idx - 1;
+        *out++ = idx - 2;
+        *out++ = idx;
       }
-      numIndices += 3;
     }
   } else if (prim == GX_LINES || prim == GX_LINESTRIP || prim == GX_POINTS) {
     buf.reserve_extra(6 * sizeof(u16));
@@ -628,6 +616,14 @@ struct LastDecode {
   u32 frame = 0;
   DecodeEntry* entry = nullptr;
 } sLastDecode;
+// The key last worked out, and for which draw: the merge check classifies a
+// draw before push_decoded_vertices decodes it, and both need its key.
+struct LastKey {
+  const u8* raw = nullptr;
+  u16 vtxCount = 0;
+  u32 frame = 0;
+  DecodeKey key{};
+} sLastKey;
 #ifdef __ANDROID__
 constexpr size_t kDecodeCacheBytes = 24u << 20;
 #else
@@ -710,6 +706,22 @@ void sweep_decode_cache() noexcept {
 }
 } // namespace
 
+// `raw`'s key, reusing the one the merge check just worked out. The decode
+// takes it (`take`): it's for that draw only, and a later draw's data could
+// land at the same address.
+static DecodeKey decode_key_for(const ShaderConfig& config, const u8* raw, u16 vtxCount, bool take) noexcept {
+  auto& k = sLastKey;
+  if (k.raw == raw && k.vtxCount == vtxCount && k.frame == g_gxState.frameSerial) {
+    const DecodeKey key = k.key;
+    if (take)
+      k = {};
+    return key;
+  }
+  const DecodeKey key = decode_key(config, raw, vtxCount);
+  k = take ? LastKey{} : LastKey{raw, vtxCount, g_gxState.frameSerial, key};
+  return key;
+}
+
 static gfx::Range push_decoded_vertices(const ShaderConfig& config, const u8* raw, u16 vtxCount,
                                         size_t alignment) noexcept {
   const DecodedLayout layout = decode_layout_for(config);
@@ -722,7 +734,7 @@ static gfx::Range push_decoded_vertices(const ShaderConfig& config, const u8* ra
     return range;
   }
   auto& c = sDecodeCache;
-  const DecodeKey key = decode_key(config, raw, vtxCount);
+  const DecodeKey key = decode_key_for(config, raw, vtxCount, true);
   const auto range = gfx::map_storage_aligned(size, alignment, base);
   if (base == nullptr)
     return range;
@@ -855,8 +867,17 @@ static XrClipClass classify_xr_clip(const ShaderConfig& config, const u8* raw, u
     if (sLastDecode.raw == raw && sLastDecode.vtxCount == vtxCount && sLastDecode.frame == g_gxState.frameSerial) {
       entry = sLastDecode.entry;
       sLastDecode = {};
-    } else if (auto it = sDecodeCache.entries.find(decode_key(config, raw, vtxCount)); it != sDecodeCache.entries.end())
-      entry = &it->second;
+    } else {
+      // The merge check, before the draw is decoded: the draw the cache
+      // expects next, else the table.
+      const DecodeKey key = decode_key_for(config, raw, vtxCount, false);
+      auto& c = sDecodeCache;
+      if (c.orderFrame == g_gxState.frameSerial && c.cursor < c.lastOrder.size() && c.lastOrder[c.cursor] != nullptr &&
+          c.lastOrder[c.cursor]->key == key)
+        entry = c.lastOrder[c.cursor];
+      else if (auto it = c.entries.find(key); it != c.entries.end())
+        entry = &it->second;
+    }
   }
   static const bool checkBoxes = [] {
     const char* v = std::getenv("AURORA_VTX_CACHE_CHECK");

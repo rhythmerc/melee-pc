@@ -710,11 +710,13 @@ array the game rewrites gets a new key, so nothing goes stale. Draws come in
 the same order every frame, so last frame's entry at the same position is
 tried before the table, and entries unused for two seconds are dropped:
 with a table of 126,000 stale entries the lookups cost as much as the decode
-saved. The texture content hash is memoized for the frame too (keyed by the
-data's address and size, cleared on `GXInvalidateTexAll`, which now reaches
-the FIFO as `GX_AURORA_INVALIDATE_TEX`): HSD sets up a new `GXTexObj` for
-every draw, so the per-object cache never hit and every draw hashed its
-whole texture. `AURORA_VTX_CACHE_CHECK=1` and `AURORA_TEX_HASH_MEMO_CHECK=1`
+saved. The texture content hash is kept too, keyed by the data's address
+and size: HSD sets up a new `GXTexObj` for every draw, so the per-object
+cache never hit and every draw hashed its whole texture. Each texture's
+first use in a frame, and its first use after `GXInvalidateTexAll` (which now
+reaches the FIFO as `GX_AURORA_INVALIDATE_TEX`; Melee calls it several times
+a frame while drawing shadows), checks a fingerprint of 32 samples spread
+over the data and hashes in full only when that changed. `AURORA_VTX_CACHE_CHECK=1` and `AURORA_TEX_HASH_MEMO_CHECK=1`
 recompute every hit and warn on a mismatch (none on Mute City or Pokémon
 Stadium); `AURORA_VTX_CACHE_STATS=1` logs hits.
 
@@ -736,6 +738,19 @@ it about 3 ms after the tick and the FIFO thread finishes about 9 ms after,
 so the FIFO thread is the chain's first link. `AURORA_PASS_LOG=1` logs one
 frame's render passes every 10 s (the four 584x480 passes before the eyes
 are the fighters' shadows).
+
+Then (same day): the clip check that decides whether a draw can merge with
+the last one also tries the draw the cache expects next before the table,
+and hands its key on to the decode; triangle indices are written straight
+into their buffer instead of appended one u16 at a time. Four-CPU Mute City:
+FIFO thread 9.8 -> about 6.7 ms of CPU a frame over the day, the frame's
+recording done 8.2 ms after the tick (10.9 before). Forced to latency 3 it
+holds 60 with about 0.5 stale frames a second; the picker still takes 4,
+the frames finishing about 25-26 ms after the tick against latency 3's
+25 ms release. (Frames finishing a little after their release didn't stall
+the XR loop in one run, but taking the next display frame as the deadline
+flipped Mute City between latency 3 and 4 and put Battlefield at 2, both
+worse.)
 
 Quest 3, mixed reality, four CPUs, game fps, decode off -> on:
 
