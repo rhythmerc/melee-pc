@@ -289,6 +289,32 @@ static const ClipRule s_clips[] = {
     CLIP_RIGHT(0x08, 8, 125.f, 12.f),
     CLIP_FRONT(0x08, 8, 70.f, 15.f),
     CLIP_BEHIND(0x08, 8, -90.f, 15.f),
+    /* Brinstar Depths: Kraid (parts 1 and 4) rises from far below; cut
+     * just under the bottom blast zone (-128), fading. */
+    CLIP_BELOW(0x09, 1, -150.f, 40.f),
+    CLIP_BELOW(0x09, 4, -150.f, 40.f),
+    /* Poke Floats: the action stays put while the giant floats (parts 2 to
+     * 26, Squirtle first) drift through. Boxed solid to about the blast
+     * zones (x +-163, y -101 to 152) and 120 units either side of the
+     * fight in z, dissolving past that, so the floats drift in and out and
+     * their bodies end below the fight. */
+#define PF_BOX(part)                                                                                       \
+    CLIP_LEFT(0x11, part, -190.f, 60.f), CLIP_RIGHT(0x11, part, 190.f, 60.f), CLIP_BELOW(0x11, part, -110.f, 40.f), \
+        {0x11, part, {0.f, -1.f, 0.f, 190.f}, 50.f}, CLIP_BEHIND(0x11, part, -120.f, 60.f),                    \
+        CLIP_FRONT(0x11, part, 120.f, 60.f)
+    PF_BOX(2), PF_BOX(3), PF_BOX(4), PF_BOX(5), PF_BOX(6), PF_BOX(7), PF_BOX(8), PF_BOX(9), PF_BOX(10),
+    PF_BOX(11), PF_BOX(12), PF_BOX(13), PF_BOX(14), PF_BOX(15), PF_BOX(16), PF_BOX(17), PF_BOX(18),
+    PF_BOX(19), PF_BOX(20), PF_BOX(21), PF_BOX(22), PF_BOX(23), PF_BOX(24), PF_BOX(25), PF_BOX(26),
+#undef PF_BOX
+    /* Icicle Mountain: the action stays put while the mountain's segments
+     * (parts 1 to 7) stream down through it. Boxed solid to about the blast
+     * zones (x +-133, y -126 to 140), dissolving past that, so the climb
+     * streams in at the top and out at the bottom. */
+#define IM_BOX(part)                                                                                       \
+    CLIP_LEFT(0x16, part, -150.f, 40.f), CLIP_RIGHT(0x16, part, 150.f, 40.f), CLIP_BELOW(0x16, part, -140.f, 40.f), \
+        {0x16, part, {0.f, -1.f, 0.f, 160.f}, 40.f}
+    IM_BOX(1), IM_BOX(2), IM_BOX(3), IM_BOX(4), IM_BOX(5), IM_BOX(6), IM_BOX(7),
+#undef IM_BOX
 };
 #define CLIP_COUNT ((int)(sizeof s_clips / sizeof s_clips[0]))
 
@@ -316,6 +342,7 @@ static const StagePlacement s_placements[] = {
     {0x06, -10.f, 0.f, 0.f, 0.85f},  /* Great Bay: its floors reach further left */
     {0x07, 0.f, 0.f, 0.f, 0.55f},    /* Hyrule Temple: smaller than the rule gives, to fit in view */
     {0x08, 0.f, 0.f, 0.f, 1.1f},     /* Brinstar */
+    {0x09, 0.f, 0.f, 0.f, 0.95f},    /* Brinstar Depths */
     {0x0A, 0.f, 0.f, 0.f, 1.15f},    /* Yoshi's Story */
     {0x0B, 0.f, 0.f, 0.f, 0.9f},     /* Yoshi's Island */
     {0x0C, 0.f, 0.f, 0.f, 1.15f},    /* Fountain of Dreams */
@@ -323,13 +350,16 @@ static const StagePlacement s_placements[] = {
     {0x0E, -10.f, 285.f, 0.f, 0.8f}, /* Corneria: the Great Fox's deck, far above the origin */
     {0x0F, 0.f, 0.f, 0.f, 0.95f},    /* Venom */
     {0x10, 0.f, 0.f, 0.f, 1.f},      /* Pokemon Stadium */
+    {0x11, 0.f, 0.f, 0.f, 0.85f},    /* Poke Floats: its box is as wide as Big Blue's */
     {0x14, 0.f, 0.f, 0.f, 0.8f},     /* Onett */
     {0x15, 0.f, 0.f, 0.f, 0.8f},     /* Fourside */
     {0x13, 0.f, 0.f, 0.f, 0.85f},    /* Big Blue */
-    {0x12, 0.f, 0.f, 0.f, 0.8f},     /* Mute City: its box is wider than the blast zones */
+    {0x12, 0.f, 0.f, 40.f, 0.8f},    /* Mute City: its box is wider than the blast zones, and reaches 150
+                                      * toward the player; set back a little */
     {0x03, 0.f, 0.f, 0.f, 0.85f},    /* Rainbow Cruise: as wide a box as Big Blue's */
     {0x18, 0.f, 0.f, 0.f, 0.9f},     /* Mushroom Kingdom */
     {0x19, 0.f, 0.f, 0.f, 0.8f},     /* Mushroom Kingdom II: its cliffs reach the blast zones */
+    {0x16, 0.f, 0.f, 0.f, 0.8f},     /* Icicle Mountain: a tall box */
     {0x1B, 0.f, 0.f, 0.f, 1.1f},     /* Flat Zone */
     {0x1C, 0.f, 0.f, 0.f, 1.05f},    /* Dream Land */
     {0x1D, 0.f, 0.f, 0.f, 1.f},      /* Yoshi's Island 64 */

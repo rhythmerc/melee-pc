@@ -101,11 +101,13 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     - Venom: the canyon.
     - Kongo Jungle 64: the jungle and sky.
     - Yoshi's Island: the sky.
-    - Already fine: Temple, Brinstar Depths, Green Greens, Poké Floats,
-      Dream Land, Yoshi's Island 64, Battlefield, Final Destination.
+    - Already fine: Temple, Green Greens, Dream Land, Yoshi's Island 64,
+      Battlefield, Final Destination. (Brinstar Depths and Poké Floats got
+      their own treatment later, below.)
   - **Open questions** (left as they are):
     - Kongo Jungle: the waterfall shares a part with the plateau.
-    - Rainbow Cruise and Icicle Mountain: scrolling stages.
+    - Rainbow Cruise and Icicle Mountain: scrolling stages (both done
+      since, below).
     - Flat Zone: the Game & Watch frame.
     - Mute City and Big Blue: given their own treatment (below).
   - **Second pass (2026-10-02), after the first headset look:**
@@ -236,6 +238,22 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     and z ±90, dissolving past that: course pieces stream in and out, and the
     ship fades as it sinks out of the box. Hidden: the corner brackets around
     the action (part 3). Scale 0.85, as for Big Blue.
+  - **Brinstar Depths (2026-10-10):** Kraid (parts 1 and 4) is the stage's
+    mechanic (his swipes turn the rock), so he stays at his own size and
+    place, right behind and below the rock, where his swipes still meet
+    it. He reaches far below the fight, so he's cut 150 units down (the
+    bottom blast zone is −128), fading over 40. Scale 0.95.
+  - **Poké Floats (2026-10-10):** the action stays put while the giant
+    floats (parts 2 to 26, Squirtle first) drift through. Boxed solid to
+    about the blast zones (x ±163, y −101 to 152) and z ±120, dissolving
+    past that, so the floats drift in and out and their bodies end below
+    the fight. Scale 0.85, as for Big Blue.
+  - **Icicle Mountain (2026-10-10):** it doesn't scroll the camera. The
+    fight window stays put (blast zones x ±133, y −126 to 140) while the
+    mountain's segments (parts 1 and 2, with 3 to 7 covered too) stream
+    down through it. Boxed solid to about the blast zones, dissolving over
+    40 units past them, so the climb streams in at the top and out at the
+    bottom. Scale 0.8, for a tall box.
   - **To revisit: Fountain of Dreams.** It runs badly on the Quest even
     without the reflection render. Profile it, then build a proper 3D
     reflection: mirror the world draws about the water plane per eye,
@@ -694,8 +712,10 @@ Peach's Castle's roof), and its size against the default arena scale.
 Sizes meet halfway between the game's proportions and making every stage's
 floors as wide as Final Destination's, `sqrt(171 / floor width)` rounded
 (Fountain of Dreams at 1.15), except Temple, tuned down to 0.55 to fit in
-view. Big Blue, Mute City and Rainbow Cruise sit at the world origin, at
-0.85, 0.8 and 0.85 for their boxes. Other moving stages aren't listed and sit there at scale 1.
+view. Big Blue, Mute City, Rainbow Cruise, Poké Floats and Icicle Mountain
+sit at the world origin, at 0.85, 0.8, 0.85, 0.85 and 0.8 for their boxes;
+Mute City's is set back 40 units, since its box reaches 150 toward the
+player. Brinstar Depths is at 0.95. Unlisted stages sit there at scale 1.
 
 Pause the fight to move the arena. Put a controller down and that hand is
 tracked instead (`XR_EXT_hand_tracking`), and a pinch does what the grip
