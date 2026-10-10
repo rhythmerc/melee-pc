@@ -1615,16 +1615,27 @@ XrQuaternionf facing(XrVector3f pos, XrVector3f eye) {
   return quat_from_axes(x, vcross(z, x), z);
 }
 
+bool back_shown();
+
+// The Back button's radius (meters), for the screen's size.
+float back_radius(const ScreenPose& s) { return std::clamp(s.width * 0.018f, 0.012f, 0.02f); }
+
 // The grab bar under the screen, in the screen's frame (meters): its
 // center's height and half extents. It grows with the screen, within a
-// hand's reach of sizes.
+// hand's reach of sizes. While the Back button shows beside it, both sit
+// lower if need be, centered on one line, so the button stays 1.2 cm clear
+// of the picture.
 struct BarRect {
   float y, hw, hh;
 };
 BarRect bar_rect(const ScreenPose& s) {
   const float hw = std::clamp(s.width * 0.1f, 0.05f, 0.2f);
   const float hh = std::clamp(s.width * 0.008f, 0.005f, 0.012f);
-  return {-s.width * screen_aspect() * 0.5f - hh * 3.f, hw, hh};
+  const float bottom = -s.width * screen_aspect() * 0.5f;
+  float y = bottom - hh * 3.f;
+  if (back_shown())
+    y = std::min(y, bottom - 0.012f - back_radius(s));
+  return {y, hw, hh};
 }
 
 // A point in the screen's frame on (or near) the bar: 2 cm of slack around
@@ -1635,23 +1646,21 @@ bool on_bar(const ScreenPose& s, XrVector3f local) {
 }
 
 // The Back button left of the bar, for tracked hands (which have no B):
-// its center's x and its radius, in the screen's frame. It sits level
-// with the bar.
+// its center and radius, in the screen's frame, level with the bar.
 struct BackRect {
-  float x, r;
+  float x, y, r;
 };
 BackRect back_rect(const ScreenPose& s) {
   const BarRect b = bar_rect(s);
-  const float r = std::clamp(s.width * 0.025f, 0.015f, 0.03f);
-  return {-b.hw - r * 2.f, r};
+  const float r = back_radius(s);
+  return {-b.hw - r * 2.f, b.y, r};
 }
 
 // A point in the screen's frame on (or near) the Back button, with a
 // centimeter of slack.
 bool on_back(const ScreenPose& s, XrVector3f local) {
-  const BarRect b = bar_rect(s);
   const BackRect k = back_rect(s);
-  return std::hypot(local.x - k.x, local.y - b.y) <= k.r + 0.01f;
+  return std::hypot(local.x - k.x, local.y - k.y) <= k.r + 0.01f;
 }
 
 // Touching the bar: on it and within a few centimeters of its surface.
@@ -2325,7 +2334,7 @@ bool create_pointer_textures() {
         d = std::min(d, std::hypot(dx - (ax + t * (bx - ax)), dy - (ay + t * (by - ay))));
       }
       const float arrow = std::clamp((0.11f - d) / 0.04f, 0.f, 1.f);
-      texel(back, y * kBackSize + x, std::max(disc * 0.35f, arrow));
+      texel(back, y * kBackSize + x, std::max(disc * 0.18f, arrow));
     }
   return create_static_swapchain(B.beamSwapchain, kBeamW, kBeamH, beam) &&
          create_static_swapchain(B.dotSwapchain, kDotSize, kDotSize, dot) &&
@@ -2383,9 +2392,9 @@ void add_screen_bar(PointerLayers& out) {
   const bool pressing = std::any_of(G.hands.begin(), G.hands.end(), [](const Hand& h) { return h.backing; });
   const bool over = std::any_of(G.hands.begin(), G.hands.end(), [](const Hand& h) { return h.on == Hand::On::Back; });
   const XrColor4f backColor = pressing ? XrColor4f{0.45f, 0.85f, 1.f, 1.f}
-                              : over   ? XrColor4f{1.f, 1.f, 1.f, 0.95f}
-                                       : XrColor4f{0.85f, 0.88f, 0.92f, 0.5f};
-  add_pointer_quad(out, B.backSwapchain, kBackSize, kBackSize, s.pos + qrot(s.orientation, {k.x, b.y, 0.f}),
+                              : over   ? XrColor4f{1.f, 1.f, 1.f, 0.9f}
+                                       : XrColor4f{0.85f, 0.88f, 0.92f, 0.4f};
+  add_pointer_quad(out, B.backSwapchain, kBackSize, kBackSize, s.pos + qrot(s.orientation, {k.x, k.y, 0.f}),
                    s.orientation, {k.r * 2.f, k.r * 2.f}, backColor);
 }
 

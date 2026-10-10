@@ -825,8 +825,9 @@ is on it, the grips don't press Z and the triggers don't press L or R.
   and a click turns it on or off. A click on a word of Item Switch's
   frequency bar picks it.
 - **Back.** While hands are tracked (not controllers, which have B), a
-  Back button sits left of the bar under the screen. Pinching it presses B
-  for as long as the pinch is held.
+  Back button sits left of the bar under the screen, level with it (the
+  two drop a little to keep the button clear of the picture). Pinching it
+  presses B for as long as the pinch is held.
 - **The pad still steers.** Moving a stick or the D-pad takes the lead from
   the pointer, so a laser resting on the screen doesn't fight it. The
   pointer takes the lead back once it moves away (8 logical pixels) or
