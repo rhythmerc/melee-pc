@@ -248,6 +248,14 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     about the blast zones (x ±163, y −101 to 152) and z ±120, dissolving
     past that, so the floats drift in and out and their bodies end below
     the fight. Scale 0.85, as for Big Blue.
+    - **To polish: spawns and despawns.** Floats appear and vanish where the
+      flat camera can't see, which the box still shows: their roots about
+      ±205 beside the fight or about 200 below it (rising, with bodies
+      reaching some 170 above the root), leaving the same ways or up past
+      120, and a few vanish in place, flying off into the distance. A
+      tighter box (cut at x ±150, y −70 and 180) hid more of it but was too
+      awkward to play on. Next idea: our own fade on each float as the game
+      shows or hides it (its part's joints going hidden), instead of planes.
   - **Icicle Mountain (2026-10-10):** it doesn't scroll the camera. The
     fight window stays put (blast zones x ±133, y −126 to 140) while the
     mountain's segments (parts 1 and 2, with 3 to 7 covered too) stream
