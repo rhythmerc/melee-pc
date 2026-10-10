@@ -34,6 +34,10 @@
 #include <sysdolphin/baselib/sislib.h>
 #include <sysdolphin/baselib/tobj.h>
 
+#ifdef TARGET_PC
+#include "pc/xr_scene.h"
+#endif
+
 /* One declaration for one object.
  *
  * This scene's state was described by TWO partial structs that aliased the
@@ -949,6 +953,11 @@ void fn_80180630(int arg0, int arg1, int arg2, bool arg3, MatchEnd* arg4)
     coins = arg4->player_standings[0].xE;
     state = (data.state = &lbl_80472D28);
     memzero(state, sizeof(*state));
+#ifdef TARGET_PC
+    /* XR: the tally is drawn over the ended fight, flat; show the whole
+     * frame on the virtual screen instead of the 3D fight under it. */
+    pc_xr_flat_view(true);
+#endif
     state->xD4 = -1;
     state->xD8 = 0;
     state->xE0 = -1;

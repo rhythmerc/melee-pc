@@ -95,6 +95,10 @@ void aurora_xr_set_passthrough(bool on);
  * placement at this stage's size. Placing one stage never moves another.
  * Any thread. */
 void aurora_xr_set_stage(int stage, float x, float y, float z, float scale);
+/* Moves the current stage's center (the game point at the arena position)
+ * without touching where the arena is: for stages whose camera roams a
+ * course bigger than the arena, which then slides through it. Any thread. */
+void aurora_xr_set_stage_center(float x, float y, float z);
 
 /* The height (world units) of the stage's highest floor, so the HUD can
  * float clear of it. NaN: unknown (the HUD keeps a fixed height). Any

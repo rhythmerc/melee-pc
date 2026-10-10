@@ -5,6 +5,7 @@
 #include "pc/slp.h"
 #include "pc/widescreen.h"
 #include "pc/xr_place.h"
+#include "pc/xr_scene.h"
 #endif
 
 #include "gm_1A36.h"
@@ -392,6 +393,9 @@ void gm_801A4D34(void (*on_frame)(void), GameSceneInfo* info)
     gm_80479D58.unk_C = 0;
     HSD_PadFlushQueue(HSD_PAD_FLUSH_QUEUE_LEAVE1);
     lb_8001CF18();
+#ifdef TARGET_PC
+    pc_xr_flat_view(false);
+#endif
 
     while (temp_r25->unk_C == 0) {
         hsd_80392E80();

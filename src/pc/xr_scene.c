@@ -159,6 +159,10 @@ static const PartRule s_builtin_rules[] = {
     /* Rainbow Cruise: the corner brackets around the action (part 3). The
      * course and the ship are boxed in (s_clips). */
     {0x03, 3, -1, -1, false},
+    /* Race to the Finish: the dark red backdrop behind the whole course
+     * (part 1 joint 1, mesh 45). The course slides through a window
+     * (s_follows). */
+    {0x27, 1, 1, 45, false},
 };
 
 /* Joints moved in the 3D view only: the joint and everything under it are
@@ -297,7 +301,9 @@ static const ClipRule s_clips[] = {
      * 26, Squirtle first) drift through. Boxed solid to about the blast
      * zones (x +-163, y -101 to 152) and 120 units either side of the
      * fight in z, dissolving past that, so the floats drift in and out and
-     * their bodies end below the fight. */
+     * their bodies end below the fight. Floats still pop in and out where
+     * the box shows them (docs/quest-xr.md); a tighter box (2026-10-10)
+     * was too awkward to play on. */
 #define PF_BOX(part)                                                                                       \
     CLIP_LEFT(0x11, part, -190.f, 60.f), CLIP_RIGHT(0x11, part, 190.f, 60.f), CLIP_BELOW(0x11, part, -110.f, 40.f), \
         {0x11, part, {0.f, -1.f, 0.f, 190.f}, 50.f}, CLIP_BEHIND(0x11, part, -120.f, 60.f),                    \
@@ -365,9 +371,31 @@ static const StagePlacement s_placements[] = {
     {0x1D, 0.f, 0.f, 0.f, 1.f},      /* Yoshi's Island 64 */
     {0x1E, 0.f, 0.f, 0.f, 1.f},      /* Kongo Jungle 64 */
     {0x24, 0.f, 0.f, 0.f, 1.1f},     /* Battlefield */
+    {0x27, 0.f, 0.f, 0.f, 0.8f},     /* Race to the Finish: its window (s_follows) */
     {0x25, 0.f, 0.f, 0.f, 1.f},      /* Final Destination */
 };
 #define PLACEMENT_COUNT ((int)(sizeof s_placements / sizeof s_placements[0]))
+
+/* Stages whose camera roams a course far bigger than the arena (Race to the
+ * Finish follows player one across it). The arena shows a window of the
+ * course around a center that follows the fight camera's focus, and the
+ * course slides through it: the center stays put while the focus is within
+ * `slack` of it (game units, x and y) and is dragged along once it goes
+ * past, so the world doesn't move with every jump. In mixed reality a box
+ * `half` units either side of the center (x, y, z) clips everything the 3D
+ * view draws, fighters too, dissolving over `fade` units inside it.
+ * MELEE_XR_FOLLOW="hx,hy,hz,sx,sy,fade" overrides for the stage played. */
+typedef struct {
+    int grkind;
+    float half[3];
+    float slack[2];
+    float fade;
+} FollowRule;
+
+static const FollowRule s_follows[] = {
+    {0x27, {160.f, 110.f, 80.f}, {40.f, 30.f}, 25.f}, /* Race to the Finish */
+};
+#define FOLLOW_COUNT ((int)(sizeof s_follows / sizeof s_follows[0]))
 
 /* Stage parts hidden in the 3D view while one of their joints (by index in
  * a depth-first walk, as in PartRule) sits below a height (its translation,
@@ -549,7 +577,7 @@ static void load_rules(void) {
             if (*end == '.') {
                 spec = end + 1;
                 mesh = strtol(spec, &end, 0);
-                if (end == spec || mesh < 0 || mesh > 31) {
+                if (end == spec || mesh < 0 || mesh >= MAX_DOBJS) {
                     break;
                 }
             }
@@ -582,14 +610,105 @@ static bool part_visible(int grkind, int map_id, int layer) {
     return visible;
 }
 
+static bool s_flat_view;
+
+void pc_xr_flat_view(bool on) { s_flat_view = on; }
+
+/* The stage being followed (s_follows), for the stage last drawn; NULL when
+ * it isn't one. Its center, and whether that has been placed yet. */
+static FollowRule s_follow_rule;
+static const FollowRule* s_follow;
+static float s_follow_center[3];
+static bool s_follow_placed;
+static float s_focus[3];
+
+static void follow_stage(int grkind) {
+    s_follow = NULL;
+    s_follow_placed = false;
+    for (int i = 0; i < FOLLOW_COUNT; i++) {
+        if (s_follows[i].grkind == grkind) {
+            s_follow_rule = s_follows[i];
+            const char* env = getenv("MELEE_XR_FOLLOW");
+            if (env != NULL) {
+                FollowRule* r = &s_follow_rule;
+                sscanf(env, "%f,%f,%f,%f,%f,%f", &r->half[0], &r->half[1], &r->half[2], &r->slack[0],
+                    &r->slack[1], &r->fade);
+            }
+            s_follow = &s_follow_rule;
+        }
+    }
+}
+
+/* The window's box: kept inside all six planes (game world). */
+static int follow_planes(float planes[][4], float fades[]) {
+    const float* c = s_follow_center;
+    const float* h = s_follow->half;
+    const float box[6][4] = {
+        {1.f, 0.f, 0.f, -(c[0] - h[0])}, {-1.f, 0.f, 0.f, c[0] + h[0]},
+        {0.f, 1.f, 0.f, -(c[1] - h[1])}, {0.f, -1.f, 0.f, c[1] + h[1]},
+        {0.f, 0.f, 1.f, -(c[2] - h[2])}, {0.f, 0.f, -1.f, c[2] + h[2]},
+    };
+    memcpy(planes, box, sizeof box);
+    for (int i = 0; i < 6; i++) {
+        fades[i] = s_follow->fade;
+    }
+    return 6;
+}
+
+/* The clip everything in the 3D view gets between stage parts: the
+ * window's box while following in mixed reality, else none. */
+static void base_clip(void) {
+    if (s_follow != NULL && s_follow_placed && pc_xr_mixed_reality()) {
+        float planes[AURORA_XR_MAX_CLIPS][4], fades[AURORA_XR_MAX_CLIPS];
+        const int n = follow_planes(planes, fades);
+        aurora_xr_world_clips4((const float(*)[4])planes, fades, n);
+    } else {
+        aurora_xr_world_clip(NULL);
+    }
+}
+
+void pc_xr_camera_focus(const float interest[3]) { memcpy(s_focus, interest, sizeof s_focus); }
+
+/* Drags the window's center after the focus, past the slack. */
+static void follow_update(void) {
+    if (s_follow == NULL) {
+        return;
+    }
+    if (!s_follow_placed) {
+        memcpy(s_follow_center, s_focus, sizeof s_follow_center);
+        s_follow_center[2] = 0.f;
+        s_follow_placed = true;
+    }
+    for (int k = 0; k < 2; k++) {
+        const float d = s_focus[k] - s_follow_center[k];
+        const float slack = s_follow->slack[k];
+        if (d > slack) {
+            s_follow_center[k] = s_focus[k] - slack;
+        } else if (d < -slack) {
+            s_follow_center[k] = s_focus[k] + slack;
+        }
+    }
+    aurora_xr_set_stage_center(s_follow_center[0], s_follow_center[1], s_follow_center[2]);
+}
+
 void pc_xr_world_camera(const float view[3][4]) {
+    if (s_flat_view) {
+        pc_xr_mono_camera();
+        return;
+    }
     /* Pause flags 1 and 2: a player paused the match (gm_DoPauseChecksAndRoutine). */
     aurora_xr_set_paused(gm_GetDbPauseFlag(1) || gm_GetDbPauseFlag(2));
     s_category = AURORA_XR_WORLD;
     aurora_xr_camera(AURORA_XR_WORLD, view);
+    follow_update();
+    base_clip();
 }
 
 void pc_xr_hud_camera(void) {
+    if (s_flat_view) {
+        pc_xr_mono_camera();
+        return;
+    }
     s_category = AURORA_XR_HUD;
     aurora_xr_camera(AURORA_XR_HUD, NULL);
 }
@@ -619,11 +738,13 @@ bool pc_xr_fighter_offscreen_begin(void) {
     /* 1.5 pulses a second, from 30% to 85% (dithered). */
     const double t = (double)SDL_GetTicksNS() * 1e-9;
     const float opacity = 0.575f + 0.275f * (float)sin(t * 2.0 * 3.14159265 * 1.5);
-    aurora_xr_world_clips4_fade(NULL, NULL, 0, opacity);
+    float planes[AURORA_XR_MAX_CLIPS][4], fades[AURORA_XR_MAX_CLIPS];
+    const int n = s_follow != NULL && s_follow_placed && pc_xr_mixed_reality() ? follow_planes(planes, fades) : 0;
+    aurora_xr_world_clips4_fade((const float(*)[4])planes, fades, n, opacity);
     return true;
 }
 
-void pc_xr_fighter_offscreen_end(void) { aurora_xr_world_clip(NULL); }
+void pc_xr_fighter_offscreen_end(void) { base_clip(); }
 
 /* The magnifier bubble (and its arrow) goes to the flat frame only: in XR
  * the fighter itself stays in view. Its game state is untouched, including
@@ -841,7 +962,10 @@ void pc_xr_poll_control(void) {
  * file isn't built to read on every platform (clang on Android). */
 static int s_top_grkind = -1;
 
-void pc_xr_stage_load(void) { s_top_grkind = -1; }
+void pc_xr_stage_load(void) {
+    s_top_grkind = -1;
+    s_follow_placed = false; /* the next fight's window starts on its focus */
+}
 
 static float stage_top(void) {
     float top, min_x, max_x;
@@ -882,11 +1006,14 @@ bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {
         }
         aurora_xr_set_stage(grkind, c[0], c[1], c[2], scale);
         s_top_grkind = -1;
+        follow_stage(grkind);
     }
     if (grkind != s_top_grkind) {
-        /* Until the stage's collision is in (then once per fight). */
+        /* Until the stage's collision is in (then once per fight). A
+         * followed stage's floors pass through the window: the HUD keeps
+         * its fixed height there. */
         const float top = stage_top();
-        aurora_xr_set_stage_top(top);
+        aurora_xr_set_stage_top(s_follow != NULL ? NAN : top);
         if (!isnan(top)) {
             s_top_grkind = grkind;
             pc_xr_place_stage_ready(grkind);
@@ -904,7 +1031,7 @@ bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {
     }
     float planes[AURORA_XR_MAX_CLIPS][4];
     float fades[AURORA_XR_MAX_CLIPS];
-    int n_planes = 0;
+    int n_planes = s_follow != NULL && s_follow_placed ? follow_planes(planes, fades) : 0;
     for (int i = 0; i < CLIP_COUNT && n_planes < AURORA_XR_MAX_CLIPS; i++) {
         if (s_clips[i].grkind == grkind && s_clips[i].map_id == map_id && grkind != 0) {
             memcpy(planes[n_planes], s_clips[i].plane, sizeof planes[0]);
@@ -985,7 +1112,7 @@ bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, HSD_JObj* root) {
 void pc_xr_stage_part_end(bool hidden) {
     s_joint_mode = false;
     if (s_clip_active) {
-        aurora_xr_world_clip(NULL);
+        base_clip();
         s_clip_active = false;
     }
     if (hidden) {

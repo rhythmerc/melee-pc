@@ -76,7 +76,7 @@ only; none of them fixes anything. User-facing knobs (`MELEE_BACKEND`,
 | `MELEE_ZTEX_BIAS=<n>` | Z-texture bias for the sobj tile pass (0 = retail; separates an empty Z capture from a missing draw). |
 | `MELEE_CAM_BONE=1` | Report camera-bone inputs where the value is produced, so the first bad frame is logged. |
 | `MELEE_INSTANT_WIN=1` | End a VS match after 60 frames (test fixture). |
-| `MELEE_CLASSIC_STAGE_OVERRIDE=<1-11>`, `MELEE_CLASSIC_TEAM=kirby\|jiggly` | Force a Classic stage / team fight (test fixture). |
+| `MELEE_CLASSIC_STAGE_OVERRIDE=<1-11>`, `MELEE_CLASSIC_TEAM=kirby\|jiggly` | Force a Classic stage / team fight (test fixture); with `MELEE_BOOT_SCENE=classic` it boots straight into that stage (9 is Race to the Finish). |
 | `AURORA_LOG_UNTEX=1` | Report draws that bind no texture. |
 | `AURORA_SKIP_UNTEX=1` | Drop every untextured draw. |
 | `AURORA_SKIP_UNTEX_VTX=n`, `AURORA_ONLY_UNTEX_VTX=n` | Drop, or keep only, untextured draws with exactly n vertices. |

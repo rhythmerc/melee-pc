@@ -4472,6 +4472,12 @@ extern "C" void aurora_xr_set_stage(int stage, float x, float y, float z, float 
     g_arenaToHead = true;
 }
 
+extern "C" void aurora_xr_set_stage_center(float x, float y, float z) {
+  using namespace aurora::xr;
+  std::lock_guard lock{g_arenaMutex};
+  g_arenaCenter = {x, y, z};
+}
+
 extern "C" bool aurora_xr_pace(void) {
   using namespace aurora::xr;
   if (g_displayPerGameFrame <= 0 || !g_sessionRunning)

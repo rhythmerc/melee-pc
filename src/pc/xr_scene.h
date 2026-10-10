@@ -14,11 +14,20 @@ extern "C" {
 #endif
 
 #ifdef AURORA_ENABLE_OPENXR
+/* Just before pc_xr_world_camera: where the fight camera looks (its eased
+ * interest point, game units). Stages whose camera roams a course too big
+ * for the arena follow it (s_follows). */
+void pc_xr_camera_focus(const float interest[3]);
 /* After HSD_CObjSetCurrent of the main fight camera (cm/camera.c); `view` is
  * its view matrix (cobj->view_mtx). */
 void pc_xr_world_camera(const float view[3][4]);
 /* After HSD_CObjSetCurrent of the HUD camera (if/ifall.c). */
 void pc_xr_hud_camera(void);
+/* While on, the fight and HUD cameras draw only the flat frame, so XR shows
+ * the virtual screen: for screens the game draws over a fight that has
+ * ended (Stage Clear's bonus tally, gm/gmregclear.c). Each scene starts
+ * with it off. */
+void pc_xr_flat_view(bool on);
 /* After the camera's HSD_CObjEndCurrent. */
 void pc_xr_mono_camera(void);
 struct HSD_JObj;
@@ -74,7 +83,9 @@ void pc_xr_magnify_end(void);
 static inline bool pc_xr_presenting(void) { return false; }
 static inline void pc_xr_stage_load(void) {}
 static inline void pc_xr_world_camera(const float view[3][4]) { (void)view; }
+static inline void pc_xr_camera_focus(const float interest[3]) { (void)interest; }
 static inline void pc_xr_hud_camera(void) {}
+static inline void pc_xr_flat_view(bool on) { (void)on; }
 static inline void pc_xr_mono_camera(void) {}
 struct HSD_JObj;
 static inline bool pc_xr_stage_part_begin(int grkind, int map_id, int layer, struct HSD_JObj* root) {

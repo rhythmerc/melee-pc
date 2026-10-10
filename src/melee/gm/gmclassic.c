@@ -735,6 +735,16 @@ void gm_Mode_Classic_OnLoad(void)
         data->x0.x0.nametag = pick->nametag;
         gmClassic_801B2D54(gmClassic_803DDEC8.x00);
         gm_SetGameModeStateId(0);
+        /* MELEE_CLASSIC_STAGE_OVERRIDE=<1-11> starts at that stage instead,
+         * as it does from the character select. */
+        {
+            const char* stage_ovr = getenv("MELEE_CLASSIC_STAGE_OVERRIDE");
+            const int stg = stage_ovr != NULL ? atoi(stage_ovr) : 0;
+            if (stg >= 1 && stg <= 11) {
+                pick->x5 = stg - 1;
+                gm_SetGameModeStateId((u8) ((stg - 1) << 3));
+            }
+        }
     }
 #endif
     gm_80172174();

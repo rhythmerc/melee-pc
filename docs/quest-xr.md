@@ -254,6 +254,27 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     down through it. Boxed solid to about the blast zones, dissolving over
     40 units past them, so the climb streams in at the top and out at the
     bottom. Scale 0.8, for a tall box.
+  - **Race to the Finish (2026-10-10), the first moving camera.** The
+    game's camera follows player one along a course thousands of units
+    long (`grPushOn_802186C8`), so no fixed box holds it. The arena instead
+    shows a window of the course that follows the fight camera's eased
+    focus (`pc_xr_camera_focus`, from `cm/camera.c`): the window's center
+    stays put while the focus is within 40 units of it across and 30 up and
+    down, and is dragged along past that, so the course slides through the
+    arena without moving on every jump (`aurora_xr_set_stage_center` moves
+    the center and leaves the player's placement alone). In mixed reality a
+    box 160 units either side of the center across, 110 up and down and 80
+    in depth clips everything in the 3D view, fighters and the polygons
+    too, dissolving over 25 units inside it. Hidden: the dark red backdrop
+    behind the whole course (part 1 joint 1, mesh 45). The HUD keeps its
+    fixed height. Table: `s_follows` in `xr_scene.c`;
+    `MELEE_XR_FOLLOW="hx,hy,hz,sx,sy,fade"` tries other sizes. Scale 0.8.
+- **Screens over an ended fight.** Stage Clear (Classic, Adventure, All-Star
+  and the other 1P modes, `gm/gmregclear.c`) draws its bonus tally flat over
+  the fight, which goes on drawing behind it. While it's up, the fight and
+  HUD cameras draw only the flat frame (`pc_xr_flat_view`), so XR shows the
+  virtual screen with the whole picture. Each scene starts with that off,
+  so the next fight is 3D again.
   - **To revisit: Fountain of Dreams.** It runs badly on the Quest even
     without the reflection render. Profile it, then build a proper 3D
     reflection: mirror the world draws about the water plane per eye,

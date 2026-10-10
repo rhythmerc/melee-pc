@@ -4049,6 +4049,7 @@ static void fn_800301D0(HSD_GObj* gobj, intptr_t arg1)
          * Not the erase above: it fills the screen with the stage's
          * background colour, which in 3D became a card behind the arena
          * (Green Greens' blue sky). */
+        pc_xr_camera_focus(&game_camera.transform.interest.x);
         pc_xr_world_camera((const float(*)[4]) cobj->view_mtx);
 #endif
         Ground_801C4FAC(cobj);
