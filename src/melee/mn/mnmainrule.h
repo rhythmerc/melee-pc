@@ -45,4 +45,9 @@ struct mn_802307F8_t {
 /* 231804 */ void mn_80231804(HSD_Archive*, int);
 /* 231F80 */ bool mn_80231F80(u8);
 
+#ifdef TARGET_PC
+bool mn_PcRuleRows(HSD_JObj* const* roots, int n, int enter_from, int* row,
+                   u32* click);
+#endif
+
 #endif

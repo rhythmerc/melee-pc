@@ -678,6 +678,51 @@ static struct {
     s8 selection; /* -1: none */
 } mn_PcPointer;
 
+HSD_CObj* mn_PcMenuCamera(void)
+{
+    return mn_804D6BAC != NULL ? GET_COBJ(mn_804D6BAC) : NULL;
+}
+bool mn_PcListPointer(HSD_JObj* left0, HSD_JObj* left1, HSD_JObj* right0, float* u, float* v,
+                      bool* leads)
+{
+    HSD_CObj* cobj = mn_PcMenuCamera();
+    HSD_JObj* joints[3] = { left0, left1, right0 };
+    float px, py, x[3], y[3];
+    int i;
+    if (cobj == NULL || !pc_xr_pointer_at(&px, &py, leads)) {
+        return false;
+    }
+    pc_xr_pointer_target(false);
+    for (i = 0; i < 3; i++) {
+        Vec3 w;
+        if (joints[i] == NULL) {
+            return false;
+        }
+        lb_8000B1CC(joints[i], NULL, &w);
+        if (!pc_xr_pointer_project(cobj, &w.x, &x[i], &y[i])) {
+            return false;
+        }
+    }
+    if (x[2] - x[0] <= 1.f || y[1] - y[0] <= 1.f) {
+        return false;
+    }
+    *u = (px - x[0]) / (x[2] - x[0]);
+    *v = (py - y[0]) / (y[1] - y[0]);
+    return true;
+}
+
+int mn_PcListEntry(float u, float v, int left_n, int right_n)
+{
+    const int row = (int) floorf(v + 0.5f);
+    if (row < 0 || u < -0.05f || u >= 1.95f) {
+        return -1;
+    }
+    if (u < 0.95f) {
+        return row < left_n ? row : -1;
+    }
+    return row < right_n ? left_n + row : -1;
+}
+
 static void mn_PcPointerHover(void)
 {
     float x, y;

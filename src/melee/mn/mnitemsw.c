@@ -23,6 +23,8 @@
 #include <sysdolphin/baselib/memory.h>
 #include <sysdolphin/baselib/sislib.h>
 
+#include <math.h>
+
 u8 mnItemSw_804D6BEC;
 HSD_GObj* mnItemSw_804D6BE8;
 
@@ -213,6 +215,58 @@ static inline void mnItemSw_CommitItems(MnItemSwData* data, s32 i, u8* order)
     gmMainLib_GetGamePrefs()->item_freq = data->x21 - 1;
 }
 
+#ifdef TARGET_PC
+#include "pc/xr_pointer.h"
+/* Pointing at Item Switch (mn_PcListPointer): the highlight follows the
+ * pointer onto an item, where a click (A) turns it on or off as always.
+ * The frequency bar above the lists sits two rows above the first, a
+ * column spacing and three quarters wide from 0.12 in; a click on one of
+ * its six words picks it (Very High is 5, down to None, 0). */
+static u32 mnItemSw_PcPointer(MnItemSwData* data, u32 buttons)
+{
+    float u, v;
+    bool leads;
+    int entry, word = -1;
+    if (!mn_PcListPointer(mnItemSw_8023405C(data, 0),
+                          mnItemSw_8023405C(data, 1),
+                          mnItemSw_8023405C(data, 16), &u, &v, &leads))
+    {
+        return buttons;
+    }
+    entry = mn_PcListEntry(u, v, 16, 15);
+    if (entry < 0 && fabsf(v + 2.03f) < 0.75f && u > 0.12f && u < 1.85f) {
+        word = (int) ((u - 0.12f) / ((1.85f - 0.12f) / 6.f));
+        word = word > 5 ? 5 : word;
+    }
+    pc_xr_pointer_target(entry >= 0 || word >= 0);
+    if (!leads) {
+        return buttons;
+    }
+    if (entry >= 0 && entry != mn_804A04F0.hovered_selection) {
+        sfxMove();
+        mn_804A04F0.hovered_selection = entry;
+        mn_804A04F0.confirmed_selection = data->items[entry];
+    } else if (word >= 0) {
+        if (mn_804A04F0.hovered_selection != 0x1F &&
+            mn_804A04F0.hovered_selection != 0x20)
+        {
+            sfxMove();
+            /* The bar's halves, as Up reaches it from each column. */
+            mn_804A04F0.hovered_selection = u < 1.f ? 0x1F : 0x20;
+            mn_804A04F0.confirmed_selection = data->x21;
+        }
+        if ((buttons & MenuInput_AButton) &&
+            mn_804A04F0.confirmed_selection != 5 - word)
+        {
+            sfxMove();
+            mn_804A04F0.confirmed_selection = 5 - word;
+        }
+        buttons &= ~MenuInput_AButton;
+    }
+    return buttons;
+}
+#endif
+
 void fn_80233E10(HSD_GObj* gobj)
 {
     MnItemSwData* data;
@@ -241,6 +295,9 @@ void fn_80233E10(HSD_GObj* gobj)
     if (mnItemSw_804D6BEC != 0) {
         return;
     }
+#ifdef TARGET_PC
+    buttons = mn_804A04F0.buttons = mnItemSw_PcPointer(data, buttons);
+#endif
 
     if (buttons & MenuInput_AButton) {
         if (mn_804A04F0.hovered_selection < 0x1Fu) {

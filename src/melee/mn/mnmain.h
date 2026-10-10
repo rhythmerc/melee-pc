@@ -76,6 +76,21 @@ typedef struct _MenuInputState {
 /* 22BD8C */ void mn_8022BD8C(void);
 /* 22BDB4 */ void fn_8022BDB4(HSD_GObj*, intptr_t);
 /* 22BE34 */ HSD_GObj* mn_8022BE34(void);
+#ifdef TARGET_PC
+/* The main menus' camera (also the rules screen's), for pointing at them
+ * (pc/xr_pointer.h); NULL before it exists. */
+struct HSD_CObj* mn_PcMenuCamera(void);
+/* Pointing at a two-column list (Item Switch, Random Stage): where the
+ * pointer is, measured from the first row's joint on the left (`left0`):
+ * `u` across in column spacings (to `right0`, the right column's first
+ * row), `v` down in rows (to `left1`, the left column's second). False
+ * while no pointer is on the picture. */
+bool mn_PcListPointer(struct HSD_JObj* left0, struct HSD_JObj* left1,
+                      struct HSD_JObj* right0, float* u, float* v,
+                      bool* leads);
+/* The entry at (u, v): the left column's rows, then the right's, or -1. */
+int mn_PcListEntry(float u, float v, int left_n, int right_n);
+#endif
 /* 22BEDC */ void mn_8022BEDC(HSD_GObj*);
 /* 22BFBC */ GXColor* mn_8022BFBC(int);
 /* 22C010 */ int mn_8022C010(int, int);

@@ -4,7 +4,8 @@
  * A laser on the virtual screen's picture is a pointer (aurora_xr_screen_
  * pointer). Menus that follow it move their highlight, or their cursor, to
  * what it points at, and a click (trigger or pinch) presses A on port 1
- * while it is held. A click on a following menu presses A only when it
+ * while it is held. The Back button beside the screen's bar, shown for
+ * tracked hands, presses B the same way (aurora_xr_screen_back). A click on a following menu presses A only when it
  * starts over something to select; on any other menu it always does.
  *
  * The pointer leads until the pad steers (a stick or the D-pad), then the
@@ -15,7 +16,7 @@
  * the pad's input as always; the highlight a menu moves is menu state that
  * no fight reads. Off in netplay, whose menus run on the exchanged pads.
  * MELEE_POINTER_MOUSE=1 drives it with the mouse in the window instead,
- * for testing on a desktop without a headset. */
+ * for testing on a desktop without a headset, its right button as Back. */
 #ifndef PC_XR_POINTER_H
 #define PC_XR_POINTER_H
 
@@ -30,7 +31,7 @@ struct HSD_CObj;
 
 #ifdef AURORA_ENABLE_OPENXR
 /* Once a frame as port 1's pad is put together (keyboard.c), with what the
- * other sources gave it. Returns the buttons the pointer adds. */
+ * other sources gave it. Returns the buttons the pointer adds (A, B). */
 u16 pc_xr_pointer_frame(const PADStatus* pad);
 /* The pointer, in the frame's logical pixels (640 x 480, as GameCube
  * viewports and scissors measure it); false while no laser is on the

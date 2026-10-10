@@ -316,6 +316,9 @@ struct ScreenPointer {
   float x = 0.f, y = 0.f;
 };
 ScreenPointer g_screenPointer;
+// A hand is pressing the screen's Back button (aurora_xr_screen_back).
+// Under g_padMutex.
+bool g_screenBack = false;
 // The frame's size as the game draws it: the picture is letterboxed on the
 // screen when its aspect differs from the screen's.
 std::atomic<uint32_t> g_contentW{0}, g_contentH{0};
@@ -409,6 +412,7 @@ struct Bridge {
   // Laser layers: static textures, drawn as quads at display rate.
   XrSwapchain beamSwapchain = XR_NULL_HANDLE, dotSwapchain = XR_NULL_HANDLE;
   XrSwapchain barSwapchain = XR_NULL_HANDLE; // the screen's grab bar
+  XrSwapchain backSwapchain = XR_NULL_HANDLE; // the Back button beside it
   bool hasColorScaleBias = false;
 
   uint64_t framesShown = 0, fightFrames = 0;
@@ -1451,8 +1455,10 @@ void publish_views(XrTime displayTime) {
 // while one hand holds it a press of the other with its laser anywhere on
 // the screen joins in. It always turns to face the head; one controller
 // dragging it also pushes and pulls it with its stick, and two hands resize
-// it about its center. The arena and the screen keep separate poses: moving
-// one never moves the other.
+// it about its center. While hands are tracked, a Back button left of the
+// bar presses B for as long as a pinch on it is held (aurora_xr_screen_back).
+// The arena and the screen keep separate poses: moving one never moves the
+// other.
 
 XrVector3f operator+(XrVector3f a, XrVector3f b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
 XrVector3f operator-(XrVector3f a, XrVector3f b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
@@ -1628,6 +1634,26 @@ bool on_bar(const ScreenPose& s, XrVector3f local) {
   return std::abs(local.x) <= b.hw + 0.02f && std::abs(local.y - b.y) <= b.hh + 0.02f;
 }
 
+// The Back button left of the bar, for tracked hands (which have no B):
+// its center's x and its radius, in the screen's frame. It sits level
+// with the bar.
+struct BackRect {
+  float x, r;
+};
+BackRect back_rect(const ScreenPose& s) {
+  const BarRect b = bar_rect(s);
+  const float r = std::clamp(s.width * 0.025f, 0.015f, 0.03f);
+  return {-b.hw - r * 2.f, r};
+}
+
+// A point in the screen's frame on (or near) the Back button, with a
+// centimeter of slack.
+bool on_back(const ScreenPose& s, XrVector3f local) {
+  const BarRect b = bar_rect(s);
+  const BackRect k = back_rect(s);
+  return std::hypot(local.x - k.x, local.y - b.y) <= k.r + 0.01f;
+}
+
 // Touching the bar: on it and within a few centimeters of its surface.
 bool in_bar_box(const ScreenPose& s, XrVector3f p) {
   const XrVector3f l = qrot(qconj(s.orientation), p - s.pos);
@@ -1667,9 +1693,10 @@ struct Hand {
   float hit = -1.f;                   // outside the box: meters along the laser to the arena, -1 = none
   // The screen only: what the laser is on, where on the picture (0..1,
   // x right, y down), and whether this hand is clicking the picture.
-  enum class On { None, Picture, Bar } on = On::None;
+  enum class On { None, Picture, Bar, Back } on = On::None;
   float u = 0.f, v = 0.f;
   bool clicking = false;
+  bool backing = false; // pressing the Back button
 };
 
 struct Grab {
@@ -1685,6 +1712,12 @@ struct Grab {
   float span0 = 1.f, heading0 = 0.f;
 };
 Grab G;
+
+// The Back button shows while a hand, rather than a controller, is seen:
+// controllers have B.
+bool back_shown() {
+  return std::any_of(G.hands.begin(), G.hands.end(), [](const Hand& h) { return h.tracked; });
+}
 
 // Thumb and index tips closer than kPinchClose (meters) close a pinch;
 // farther than kPinchOpen open it.
@@ -1903,6 +1936,7 @@ bool picture_to_frame(float u, float v, float& x, float& y) {
 void update_screen(bool active) {
   const ScreenPose& screen = screen_pose();
   const float hw = screen.width * 0.5f, hh = screen.width * screen_aspect() * 0.5f;
+  const bool back = back_shown();
   for (Hand& hand : G.hands) {
     hand.inside = hand.valid && in_bar_box(screen, hand.touch);
     hand.hit = -1.f;
@@ -1916,6 +1950,8 @@ void update_screen(bool active) {
         hand.v = 0.5f - l.y / (2.f * hh);
       } else if (on_bar(screen, l)) {
         hand.on = Hand::On::Bar;
+      } else if (back && on_back(screen, l)) {
+        hand.on = Hand::On::Back;
       }
       if (hand.on != Hand::On::None)
         hand.hit = t;
@@ -1935,6 +1971,7 @@ void update_screen(bool active) {
   for (Hand& hand : G.hands) {
     hand.engaged &= active && down(hand);
     hand.clicking &= active && clickDown(hand);
+    hand.backing &= active && back && clickDown(hand);
   }
   if (active) {
     for (Hand& hand : G.hands)
@@ -1949,6 +1986,8 @@ void update_screen(bool active) {
         engage(hand);
       } else if (hand.on == Hand::On::Picture && clickPressed(hand)) {
         hand.clicking = true;
+      } else if (hand.on == Hand::On::Back && clickPressed(hand)) {
+        hand.backing = true;
       }
     }
   }
@@ -1981,6 +2020,7 @@ void update_screen(bool active) {
     }
     std::lock_guard lock{g_padMutex};
     g_screenPointer = p;
+    g_screenBack = std::any_of(G.hands.begin(), G.hands.end(), [](const Hand& h) { return h.backing; });
   }
   if (!active) {
     end_grab();
@@ -2000,6 +2040,7 @@ void update_grab(Target target, bool active) {
     for (Hand& hand : G.hands) {
       hand.engaged = false;
       hand.clicking = false;
+      hand.backing = false;
       hand.on = Hand::On::None;
     }
     end_grab();
@@ -2012,6 +2053,7 @@ void update_grab(Target target, bool active) {
   {
     std::lock_guard lock{g_padMutex};
     g_screenPointer = {};
+    g_screenBack = false;
   }
   ArenaPose a = arena_pose();
   for (Hand& hand : G.hands) {
@@ -2232,7 +2274,7 @@ bool create_static_swapchain(XrSwapchain& out, uint32_t w, uint32_t h, const std
   return ok;
 }
 
-constexpr uint32_t kBeamW = 16, kBeamH = 4, kDotSize = 64, kBarW = 256, kBarH = 32;
+constexpr uint32_t kBeamW = 16, kBeamH = 4, kDotSize = 64, kBarW = 256, kBarH = 32, kBackSize = 64;
 
 // White, premultiplied, soft-edged: a beam (alpha across its width) and a
 // round dot. The lasers tint them per frame (color scale/bias layers).
@@ -2267,12 +2309,32 @@ bool create_pointer_textures() {
       const float d = std::hypot(x + 0.5f - px, y + 0.5f - py);
       texel(bar, y * kBarW + x, std::clamp(r - d, 0.f, 1.5f) / 1.5f);
     }
+  // Back: a see-through disc with a solid left chevron on it.
+  std::vector<uint8_t> back(kBackSize * kBackSize * 4);
+  for (uint32_t y = 0; y < kBackSize; ++y)
+    for (uint32_t x = 0; x < kBackSize; ++x) {
+      const float dx = (x + 0.5f) / kBackSize * 2.f - 1.f, dy = (y + 0.5f) / kBackSize * 2.f - 1.f;
+      const float disc = std::clamp((1.f - std::hypot(dx, dy)) / 0.06f, 0.f, 1.f);
+      // Two strokes from the tip (-0.3, 0) out to (0.15, +-0.4).
+      float d = 1e9f;
+      for (const float sy : {-1.f, 1.f}) {
+        const float ax = -0.3f, ay = 0.f, bx = 0.15f, by = 0.4f * sy;
+        const float t = std::clamp(((dx - ax) * (bx - ax) + (dy - ay) * (by - ay)) /
+                                       ((bx - ax) * (bx - ax) + (by - ay) * (by - ay)),
+                                   0.f, 1.f);
+        d = std::min(d, std::hypot(dx - (ax + t * (bx - ax)), dy - (ay + t * (by - ay))));
+      }
+      const float arrow = std::clamp((0.11f - d) / 0.04f, 0.f, 1.f);
+      texel(back, y * kBackSize + x, std::max(disc * 0.35f, arrow));
+    }
   return create_static_swapchain(B.beamSwapchain, kBeamW, kBeamH, beam) &&
          create_static_swapchain(B.dotSwapchain, kDotSize, kDotSize, dot) &&
-         create_static_swapchain(B.barSwapchain, kBarW, kBarH, bar);
+         create_static_swapchain(B.barSwapchain, kBarW, kBarH, bar) &&
+         create_static_swapchain(B.backSwapchain, kBackSize, kBackSize, back);
 }
 
-constexpr size_t kMaxPointerLayers = 5; // a beam and a dot per hand, and the screen's bar
+// a beam and a dot per hand, and the screen's bar and Back button
+constexpr size_t kMaxPointerLayers = 6;
 
 struct PointerLayers {
   std::array<XrCompositionLayerQuad, kMaxPointerLayers> quads;
@@ -2315,6 +2377,16 @@ void add_screen_bar(PointerLayers& out) {
                                   : XrColor4f{0.85f, 0.88f, 0.92f, 0.55f};
   add_pointer_quad(out, B.barSwapchain, kBarW, kBarH, s.pos + qrot(s.orientation, {0.f, b.y, 0.f}), s.orientation,
                    {b.hw * 2.f, b.hh * 2.f}, color);
+  if (!B.backSwapchain || !back_shown())
+    return;
+  const BackRect k = back_rect(s);
+  const bool pressing = std::any_of(G.hands.begin(), G.hands.end(), [](const Hand& h) { return h.backing; });
+  const bool over = std::any_of(G.hands.begin(), G.hands.end(), [](const Hand& h) { return h.on == Hand::On::Back; });
+  const XrColor4f backColor = pressing ? XrColor4f{0.45f, 0.85f, 1.f, 1.f}
+                              : over   ? XrColor4f{1.f, 1.f, 1.f, 0.95f}
+                                       : XrColor4f{0.85f, 0.88f, 0.92f, 0.5f};
+  add_pointer_quad(out, B.backSwapchain, kBackSize, kBackSize, s.pos + qrot(s.orientation, {k.x, b.y, 0.f}),
+                   s.orientation, {k.r * 2.f, k.r * 2.f}, backColor);
 }
 
 // `onTargetOnly`: skip the hands that neither point at the target nor hold
@@ -2829,7 +2901,7 @@ void teardown() {
       B.destroyHandTracker(ht);
     ht = XR_NULL_HANDLE;
   }
-  for (XrSwapchain* sc : {&B.beamSwapchain, &B.dotSwapchain, &B.barSwapchain}) {
+  for (XrSwapchain* sc : {&B.beamSwapchain, &B.dotSwapchain, &B.barSwapchain, &B.backSwapchain}) {
     if (*sc)
       xrDestroySwapchain(*sc);
     *sc = XR_NULL_HANDLE;
@@ -4306,6 +4378,11 @@ extern "C" bool aurora_xr_screen_pointer(float* x, float* y, bool* pressed) {
   *y = p.y;
   *pressed = p.pressed;
   return true;
+}
+
+extern "C" bool aurora_xr_screen_back(void) {
+  std::lock_guard lock{aurora::xr::g_padMutex};
+  return aurora::xr::g_screenBack;
 }
 
 extern "C" void aurora_xr_set_paused(bool paused) { aurora::xr::g_fightPaused = paused; }

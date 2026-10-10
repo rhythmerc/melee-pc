@@ -300,6 +300,40 @@ static inline void saveSettings(void)
     lbCardGame_SaveChanges();
 }
 
+#ifdef TARGET_PC
+#include "pc/xr_pointer.h"
+static HSD_JObj* mnStageSw_802364A0(MnStageSwData* data, u8 idx);
+/* Pointing at Random Stage (mn_PcListPointer): the highlight follows the
+ * pointer onto a stage that is unlocked, where a click (A) turns it on or
+ * off as always. */
+static u32 mnStageSw_PcPointer(u8* user_data, u32 buttons)
+{
+    MnStageSwData* data = (MnStageSwData*) user_data;
+    float u, v;
+    bool leads;
+    int entry;
+    if (!mn_PcListPointer(mnStageSw_802364A0(data, 0),
+                          mnStageSw_802364A0(data, 1),
+                          mnStageSw_802364A0(data, 15), &u, &v, &leads))
+    {
+        return buttons;
+    }
+    entry = mn_PcListEntry(u, v, 15, NUM_STAGES - 15);
+    if (entry >= 0 &&
+        gm_80164430(gm_801641CC(mnStageSw_803ED4C4[entry])) == 0)
+    {
+        entry = -1;
+    }
+    pc_xr_pointer_target(entry >= 0);
+    if (leads && entry >= 0 && entry != mn_804A04F0.hovered_selection) {
+        sfxMove();
+        mn_804A04F0.hovered_selection = entry;
+        mn_804A04F0.confirmed_selection = user_data[entry + 2];
+    }
+    return buttons;
+}
+#endif
+
 static void fn_80235F80(HSD_GObj* gobj)
 {
     s32 enabled;
@@ -322,6 +356,9 @@ static void fn_80235F80(HSD_GObj* gobj)
         return;
     }
     if ((u8) mnStageSw_804D6BF4 == 0) {
+#ifdef TARGET_PC
+        buttons = mn_804A04F0.buttons = mnStageSw_PcPointer(user_data, buttons);
+#endif
         if (buttons & 0x200) {
             if (mn_804A04F0.hovered_selection < NUM_STAGES) {
                 if (*(confirmed = &mn_804A04F0.confirmed_selection) != 0) {

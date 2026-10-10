@@ -175,6 +175,42 @@ static inline s32 mnRulePlus_IsOptionVisible(u8 sel)
     }
 }
 
+#ifdef TARGET_PC
+/* Pointing at Additional Rules (mn_PcRuleRows): the highlight follows the
+ * pointer, as Up and Down move it, and a click is the row's arrow, or
+ * enters Random Stage Select. */
+static u32 mnRulePlus_PcPointer(MenuRulesPlusData* data, u32 buttons)
+{
+    HSD_JObj* roots[6];
+    int sel, vis = 0, row;
+    u32 click;
+    for (sel = 0; sel < 6; sel++) {
+        HSD_JObj* root;
+        if (!mnRulePlus_IsOptionVisible((u8) sel)) {
+            roots[sel] = NULL;
+            continue;
+        }
+        root = data->xC[mn_803ED1D0.x0[vis++]];
+        if (root == NULL || root->child == NULL) {
+            return buttons;
+        }
+        roots[sel] = root->child;
+    }
+    if (!mn_PcRuleRows(roots, 6, 5, &row, &click)) {
+        return buttons;
+    }
+    if (row >= 0 && row != mn_804A04F0.hovered_selection) {
+        sfxMove();
+        mn_804A04F0.hovered_selection = row;
+        mn_804A04F0.confirmed_selection = data->rule_values.values[row];
+    }
+    if (buttons & 0x200) {
+        buttons = (buttons & ~0x200) | click;
+    }
+    return buttons;
+}
+#endif
+
 void fn_8023201C(HSD_GObj* gobj)
 {
     MenuRulesPlusData* data = mn_804D6BE0->user_data;
@@ -182,6 +218,9 @@ void fn_8023201C(HSD_GObj* gobj)
     PAD_STACK(0x30);
 
     buttons = mn_80229624(4);
+#ifdef TARGET_PC
+    buttons = mnRulePlus_PcPointer(data, buttons);
+#endif
     mn_804A04F0.buttons = buttons;
 
     if (buttons & 0x200) {

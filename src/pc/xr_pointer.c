@@ -28,14 +28,20 @@ static unsigned s_frame;       /* pc_xr_pointer_frame calls */
 static unsigned s_target_frame; /* the last frame a menu followed the pointer */
 static bool s_target_over;
 
-/* MELEE_POINTER_MOUSE=1: the mouse over the window, in the frame's 0..1. */
-static bool mouse_pointer(float* x, float* y, bool* pressed)
+static bool mouse_on(void)
 {
     static int on = -1;
     if (on < 0) {
         const char* v = getenv("MELEE_POINTER_MOUSE");
         on = v != NULL && *v == '1';
     }
+    return on;
+}
+
+/* MELEE_POINTER_MOUSE=1: the mouse over the window, in the frame's 0..1. */
+static bool mouse_pointer(float* x, float* y, bool* pressed)
+{
+    const bool on = mouse_on();
     /* The global state over the game's window: synthetic test input
      * (xdotool) never gives the window mouse focus. */
     SDL_Window* win = NULL;
@@ -77,12 +83,21 @@ u16 pc_xr_pointer_frame(const PADStatus* pad)
     const bool was_valid = s_valid, was_pressed = s_pressed;
     float x = 0.f, y = 0.f;
     bool pressed = false;
+    u16 back = 0;
     ++s_frame;
+    /* The Back button beside the screen's bar (hands), or the right mouse
+     * button standing in for it. */
+    if (!pc_net_active() &&
+        (aurora_xr_screen_back() ||
+         (mouse_on() && (SDL_GetGlobalMouseState(NULL, NULL) & SDL_BUTTON_RMASK))))
+    {
+        back = PAD_BUTTON_B;
+    }
     s_valid = !pc_net_active() && (aurora_xr_screen_pointer(&x, &y, &pressed) ||
                                    mouse_pointer(&x, &y, &pressed));
     if (!s_valid) {
         s_pressed = s_armed = false;
-        return 0;
+        return back;
     }
     s_x = x * rmode->fbWidth;
     s_y = y * rmode->efbHeight;
@@ -109,7 +124,7 @@ u16 pc_xr_pointer_frame(const PADStatus* pad)
     } else if (!s_pressed) {
         s_armed = false;
     }
-    return s_armed ? PAD_BUTTON_A : 0;
+    return back | (s_armed ? PAD_BUTTON_A : 0);
 }
 
 bool pc_xr_pointer_at(float* x, float* y, bool* leads)

@@ -159,6 +159,114 @@ static inline u8 mn_8022F538_GetHoveredSelection(void)
     return mn_804A04F0.hovered_selection;
 }
 
+#ifdef TARGET_PC
+#include "pc/xr_pointer.h"
+#include <melee/lb/lb_00B0.h>
+#include <math.h>
+/* Pointing at a rules-style list (pc/xr_pointer.h): this screen and
+ * Additional Rules. `roots` holds each selection's row root, NULL for a row
+ * the mode hides. A root sits at its row's value box's left edge, halfway
+ * up; the rows are measured in the menu's own units (a box is about 10
+ * wide, its label 11 more to the left), so they follow the camera.
+ * `*row`: the row under the pointer, or -1. `*click`: what a click there
+ * presses: Left or Right on the left or right half of a value box (the
+ * arrows there), A on rows from `enter_from` (which open another screen),
+ * nothing elsewhere. False while the pointer doesn't lead, with the menu's
+ * own input left alone. */
+bool mn_PcRuleRows(HSD_JObj* const* roots, int n, int enter_from, int* row, u32* click)
+{
+    HSD_CObj* cobj = mn_PcMenuCamera();
+    float px, py, rx[8], ry[8], unit = 0.f, half = 0.f;
+    bool leads;
+    int sel, last = -1;
+    *row = -1;
+    *click = 0;
+    if (cobj == NULL || n > 8 || !pc_xr_pointer_at(&px, &py, &leads)) {
+        return false;
+    }
+    pc_xr_pointer_target(false);
+    for (sel = 0; sel < n; sel++) {
+        Vec3 w;
+        float x1, y1;
+        if (roots[sel] == NULL) {
+            continue;
+        }
+        lb_8000B1CC(roots[sel], NULL, &w);
+        if (!pc_xr_pointer_project(cobj, &w.x, &rx[sel], &ry[sel])) {
+            return false;
+        }
+        if (last < 0) {
+            /* Pixels per menu unit, across. */
+            w.x += 1.f;
+            if (!pc_xr_pointer_project(cobj, &w.x, &x1, &y1)) {
+                return false;
+            }
+            unit = x1 - rx[sel];
+        } else if (half == 0.f) {
+            /* Rows reach halfway to the next, at most a unit up and down. */
+            half = fminf((ry[sel] - ry[last]) * 0.5f, unit);
+        }
+        last = sel;
+    }
+    if (unit <= 0.f || half <= 0.f) {
+        return false;
+    }
+    for (sel = 0; sel < n; sel++) {
+        const float u = roots[sel] != NULL ? (px - rx[sel]) / unit : 0.f;
+        if (roots[sel] != NULL && fabsf(py - ry[sel]) < half && u > -11.f && u < 10.3f) {
+            *row = sel;
+            if (sel >= enter_from) {
+                *click = 0x200;
+            } else if (u > -0.3f) {
+                *click = u < 5.f ? 4 : 8;
+            }
+            break;
+        }
+    }
+    pc_xr_pointer_target(*click != 0);
+    return leads;
+}
+
+/* The rules screen: the highlight follows the pointer, as Up and Down move
+ * it, and a click is the row's arrow, or enters Item Switch or Additional
+ * Rules. */
+static u32 mn_PcRulesPointer(union mn_802307F8_value_view* data, u32 buttons)
+{
+    struct mn_802307F8_t* d = (struct mn_802307F8_t*) data;
+    HSD_JObj* roots[7];
+    int sel, vis = 0, row;
+    u32 click;
+    for (sel = 0; sel < 7; sel++) {
+        HSD_JObj* root;
+        if (gm_GetCurrentGameMode() == GM_TOURNAMENT && sel == 4) {
+            roots[sel] = NULL;
+            continue;
+        }
+        root = d->xC[mn_803EC600[vis++]];
+        if (root == NULL || root->child == NULL) {
+            return buttons;
+        }
+        roots[sel] = root->child;
+    }
+    if (!mn_PcRuleRows(roots, 7, 5, &row, &click)) {
+        return buttons;
+    }
+    if (row >= 0 && row != mn_804A04F0.hovered_selection) {
+        sfxMove();
+        mn_804A04F0.hovered_selection = row;
+        if (row == 1 && data->fields.x2 == 1) {
+            mn_804A04F0.confirmed_selection = data->fields.x9;
+        } else {
+            mn_804A04F0.confirmed_selection = data->indexed.values[row];
+        }
+    }
+    if (buttons & 0x200) {
+        buttons = (buttons & ~0x200) | click;
+    }
+    return buttons;
+}
+#endif
+
 void fn_8022F538(HSD_GObj* arg0)
 {
     union mn_802307F8_value_view* data;
@@ -175,6 +283,9 @@ void fn_8022F538(HSD_GObj* arg0)
 
     data = HSD_GObjGetUserData(mn_804D6BD0);
     buttons = mn_80229624(4);
+#ifdef TARGET_PC
+    buttons = mn_PcRulesPointer(data, buttons);
+#endif
     mn_804A04F0.buttons = buttons;
     if ((buttons & 0x200) != 0) {
         if (mn_804A04F0.hovered_selection == 5 ||

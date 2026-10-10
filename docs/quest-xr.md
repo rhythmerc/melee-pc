@@ -794,8 +794,19 @@ is on it, the grips don't press Z and the triggers don't press L or R.
   VS., Trophies, Options, Data and their lists) highlight the option under
   it, and the character and stage select cursors follow it. A trigger pull or
   a pinch clicks, which holds A while it's held. On those menus a click on
-  nothing presses nothing. Every other menu (rules, name entry, results) takes
-  a click as plain A, wherever it lands.
+  nothing presses nothing. Every other menu (name entry, results) takes a
+  click as plain A, wherever it lands.
+- **Rules.** The rules screen (the banner at the top of character select)
+  and Additional Rules highlight the row under the pointer. A click on the
+  left or right half of a row's value box steps it like the arrows there
+  (time to stock, the time limit, and so on). A click on Item Switch,
+  Additional Rules or Random Stage enters it. On Item Switch and Random
+  Stage the highlight follows the pointer onto an item or an unlocked stage,
+  and a click turns it on or off. A click on a word of Item Switch's
+  frequency bar picks it.
+- **Back.** While hands are tracked (not controllers, which have B), a
+  Back button sits left of the bar under the screen. Pinching it presses B
+  for as long as the pinch is held.
 - **The pad still steers.** Moving a stick or the D-pad takes the lead from
   the pointer, so a laser resting on the screen doesn't fight it. The
   pointer takes the lead back once it moves away (8 logical pixels) or
@@ -818,12 +829,13 @@ The bar is faint until a laser or hand is on it, then bright, then cyan while
 the screen is held.
 
 The game side is `src/pc/xr_pointer.c`, with a hook in each menu that
-follows the pointer: `mnmain.c`, `mncharsel.c` and `mnstagesel.c`. The main
-menus place each option's joint through the menu camera
+follows the pointer: `mnmain.c`, `mncharsel.c`, `mnstagesel.c`,
+`mnmainrule.c`, `mnruleplus.c`, `mnitemsw.c` and `mnstagesw.c`. The main
+menus and the rules screens place each option's joint through the menu camera
 (`pc_xr_pointer_project`). The two select screens put their cursor where
 the pointer meets the cursor's plane (`pc_xr_pointer_unproject`).
-`MELEE_POINTER_MOUSE=1` drives the pointer with the mouse in the window, so
-these hooks can be tried flat on a desktop.
+`MELEE_POINTER_MOUSE=1` drives the pointer with the mouse in the window (the
+right button is Back), so these hooks can be tried flat on a desktop.
 
 The screen always turns to face the head. Its pose is separate from the
 arena's: moving or resizing one leaves the other alone. It lasts for the
@@ -1063,7 +1075,7 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_HUD_HEIGHT` | 0.3 | Lowest HUD plane height (center) above the arena in meters; set, it's fixed there |
 | `AURORA_XR_HUD_CLEARANCE` | 40 | Game units between the stage's highest floor and the HUD's bottom edge |
 | `AURORA_XR_HUD_BACKDROP` | 0 | Minimum HUD alpha, as a translucent panel behind it |
-| `MELEE_POINTER_MOUSE` | 0 | 1: the mouse in the window is the screen's pointer (testing the menu hooks flat) |
+| `MELEE_POINTER_MOUSE` | 0 | 1: the mouse in the window is the screen's pointer, its right button Back (testing the menu hooks flat) |
 | `AURORA_XR_HUD_ON_TOP` | 0 | 1: the HUD draws over the fighters in mixed reality too (it always does in full VR) |
 | `AURORA_XR_DUMP` | unset | Directory to write each stream's image once (PPM, plus alpha as PGM) |
 | `MELEE_XR_STAGE_LAYERS` | `0xB` | Stage layers shown in 3D, as a bitmask |

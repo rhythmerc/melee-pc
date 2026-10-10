@@ -26,6 +26,11 @@ bool aurora_xr_get_pad(PADStatus* out);
  * untouched. Any thread. */
 bool aurora_xr_screen_pointer(float* x, float* y, bool* pressed);
 
+/* Whether a hand is pressing the Back button beside the virtual screen's
+ * bar (shown while hands, not controllers, are tracked): B, for menus. Any
+ * thread. */
+bool aurora_xr_screen_back(void);
+
 /* Draw categories for 3D fights (docs/xr-3d-plan.md). Everything drawn after
  * this call, until the next one, is tagged with the category.
  *   AURORA_XR_MONO   only the normal flat frame (the default every frame)
