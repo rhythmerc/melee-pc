@@ -832,8 +832,9 @@ is on it, the grips don't press Z and the triggers don't press L or R.
   pointer takes the lead back once it moves away (8 logical pixels) or
   clicks.
 - **Netplay.** The pointer is off there, because those menus run on the pads
-  both peers exchange. Its clicks only ever reach the game as port 1's A,
-  and the highlight it moves is menu state that no fight reads.
+  both peers exchange. Its clicks only ever reach the game as port 1's A
+  (or B, from Back), and the highlight it moves is menu state that no fight
+  reads.
 
 The bar under the screen is its handle:
 
