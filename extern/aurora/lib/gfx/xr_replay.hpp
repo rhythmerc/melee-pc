@@ -49,7 +49,27 @@ struct XrReplayTarget {
   // 2D-array attachments with one layer per view, using each world draw's
   // multiview twin pipeline (gx::DrawData::xrPipeline). Use one view then.
   uint32_t viewMask = 0;
+  // The passes to replay (null: all the frame's sealed passes).
+  const std::vector<const detail::RenderPass*>* passes = nullptr;
 };
+
+// XR early eyes: when a frame's world ends (the first switch from world or
+// hidden draws to others in the EFB pass), the pass is split there and the
+// render worker, right after encoding the world part, calls the early hook
+// with the passes so far. If it encoded the eyes into `cmd` (true), the frame
+// submits `cmd` at once, calls `submitted`, and goes on in a new encoder: the
+// eyes reach the GPU before the rest of the frame is recorded and translated.
+// Frames split only while set_xr_early_eyes is on, which also makes their
+// uploads skip the staging buffer (FramePacket::directUploads).
+using XrEarlyHook = bool (*)(const wgpu::CommandEncoder& cmd, detail::FramePacket& frame,
+                             const detail::XrEarlyEyes& early);
+using XrEarlySubmitted = void (*)(detail::FramePacket& frame);
+void set_xr_early_hooks(XrEarlyHook hook, XrEarlySubmitted submitted) noexcept;
+void set_xr_early_eyes(bool on) noexcept;
+bool xr_early_eyes() noexcept;
+// Render worker: the early eyes' step, queued by recording.cpp after the
+// world part's pass.
+void run_xr_early(detail::FramePacket& frame, const detail::XrEarlyEyes& early);
 
 // Render worker only. Encodes the frame's draws tagged `category`, in
 // recording order, into `target` as one render pass.

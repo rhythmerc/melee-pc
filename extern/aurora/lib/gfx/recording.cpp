@@ -7,6 +7,7 @@
 #include "clear.hpp"
 #include "pipeline_cache.hpp"
 #include "render_worker.hpp"
+#include "xr_replay.hpp"
 #include "tex_copy_conv.hpp"
 #include "tex_palette_conv.hpp"
 #include "texture.hpp"
@@ -1266,6 +1267,43 @@ uint32_t align_uniform(uint32_t value) {
   return AURORA_ALIGN(value, detail::resources().limits.minUniformBufferOffsetAlignment);
 }
 
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+// XR early eyes (xr_replay.hpp): at the world's end, the first switch from
+// world or hidden draws to others in the EFB pass (a fight frame draws its
+// world and hidden parts in runs, then the HUD), the pass is split there: the
+// world part is sealed and queued at once, the eyes are queued after it, and
+// the frame goes on in a continuation pass. World draws after that are
+// missing from the early eyes (xrWorldResumed): the eyes are drawn again at
+// the end of the frame.
+static void split_for_early_eyes(XrCategory next) {
+  auto& frame = g_recorder.frame();
+  const bool fromWorld = g_recorder.xrCategory == XrCategory::World || g_recorder.xrCategory == XrCategory::Hidden;
+  if (frame.xrEarlySplit) {
+    if (next == XrCategory::World)
+      frame.xrWorldResumed = true;
+    return;
+  }
+  if (!frame.directUploads || !frame.xrHasWorld || !fromWorld || next == XrCategory::World ||
+      next == XrCategory::Hidden || g_recorder.inOffscreen || g_recorder.currentRenderPass == UINT32_MAX ||
+      g_recorder.suppressRenderWorker)
+    return;
+  const uint32_t worldPass = g_recorder.currentRenderPass;
+  enqueue_pass(frame, worldPass);
+  const RenderPass& world = current_render_passes()[worldPass];
+  resume_efb_pass_loading(world);
+  current_render_passes()[g_recorder.currentRenderPass].splitFrom = &world;
+  XrEarlyEyes early;
+  early.passes.reserve(worldPass + 1);
+  for (uint32_t i = 0; i <= worldPass; ++i)
+    early.passes.push_back(&current_render_passes()[i]);
+  early.transforms = frame.xrTransforms;
+  frame.xrEarlySplit = true;
+  render_worker::enqueue_encode_pass(frame.frameId, static_cast<uint32_t>(frame.ops.size()),
+                                     [packet = &frame, early = std::move(early)] { run_xr_early(*packet, early); });
+}
+
+#endif
+
 void xr_set_category(XrCategory category, const float* view3x4) {
   if (!g_recorder.active()) {
     return;
@@ -1276,6 +1314,9 @@ void xr_set_category(XrCategory category, const float* view3x4) {
       g_recorder.frame().xrWorldEndNs = std::chrono::steady_clock::now().time_since_epoch().count();
     else if (category == XrCategory::World)
       g_recorder.frame().xrWorldEndNs = 0;
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+    split_for_early_eyes(category);
+#endif
     g_recorder.xrCategory = category;
     // A non-draw command between draws keeps them from merging across the
     // boundary (get_last_draw_command only merges into a trailing draw).

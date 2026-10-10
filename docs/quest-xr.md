@@ -667,6 +667,44 @@ every image is shown exactly two display frames (600 of 600 per 10 s,
 against 188 to 480 without it). The XR log line reports the histogram and
 the latency.
 
+### Early eyes
+
+A fight frame's eyes used to start only once the whole frame was recorded,
+and to reach the GPU only after Dawn had translated the whole frame at its
+submit. Four CPUs on Mute City: the game issued the frame 3 ms after the
+tick, the FIFO thread finished it at about 8, the eyes were submitted at
+about 12.5 and done on the GPU at about 25-26, right at latency 3's release.
+
+Now (`AURORA_XR_EARLY_EYES`, on by default on Android; `lib/gfx/xr_replay.hpp`)
+the eyes go as soon as the world is recorded. A fight frame draws its world
+and hidden parts in runs in the EFB pass, then the HUD (Mute City: world,
+hidden, world, hidden, world, hidden, world, mono, HUD, mono). At the first
+switch from world or hidden draws to others, recording splits the EFB pass
+(`resume_efb_pass_loading`): the world part is sealed and queued, then an
+early-eyes item, then the frame goes on in a continuation pass. On the
+render worker the item replays the world draws of the passes up to then into
+the 3D image, submits everything so far, hands the image to the XR thread,
+and starts a new encoder for the rest of the frame. If world draws come
+after the split, the eyes are drawn again at the frame's end (counted as
+"redrawn"; none seen).
+
+- **Uploads:** the frame's data reaches the GPU buffers by copies from a
+  staging buffer that stays mapped until the frame ends, and Dawn rejects a
+  submit that copies from a mapped buffer. Early-eyes frames upload with
+  `WriteBuffer`/`WriteTexture` from the mapped memory instead
+  (`FramePacket::directUploads`, set when the frame begins).
+- **Copies of the EFB:** the world part drops its world draws like any flat
+  pass nobody reads. If the continuation is then read (Pokémon Stadium's
+  jumbotron zoom copies it), it draws the world part's world draws again
+  first (`RenderPass::splitFrom`).
+- **Results** (four CPUs, latency 3 forced): Mute City GPU done 20.4-22.8 ms
+  after the tick (median), 24.5-25.7 at 95% (24.7-26 and 26-27 before);
+  eyes submitted at about 11 ms. At latency 4 the early eyes wait for a
+  swapchain image instead and nothing changes. Stale frames on the heavy
+  stages now come from spikes (GPU done up to 40-60 ms) more than from the
+  typical frame: Stadium rock 2.9 a second at latency 3, 4.4 at 4; Brinstar
+  Depths 1.5 and 1.4. The XR stats line counts early eyes and redraws.
+
 ### CPU level
 
 Light scenes let the CPU drop to its lowest clock, and the XR thread then
@@ -1221,6 +1259,7 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_DYNRES_BAND_MS` | 0.5 | How far past the aim a frame goes before the scale is cut |
 | `AURORA_XR_FIXED_LATENCY` | adaptive | Display frames from tick to release; 0 turns fixed-latency presentation off |
 | `AURORA_XR_RELEASE_DONE` | 0 | Hand 3D images to the runtime only once their GPU work is done (Android; drops frames) |
+| `AURORA_XR_EARLY_EYES` | 1 (Android) | Submit the eyes as soon as a fight frame's world is recorded |
 | `AURORA_VTX_CACHE` | 1 | Keep decoded vertices across frames (with `AURORA_VTX_DECODE`) |
 | `AURORA_TEX_HASH_MEMO` | 1 | Reuse texture content hashes within a frame |
 | `AURORA_PIPELINE_INLINE` | 0 | Compile pipelines on the render thread instead of the compile thread |

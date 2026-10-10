@@ -692,6 +692,9 @@ bool begin_frame() {
 #if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
   frame.xrTickFrame = xr_game_frame_tick();
   frame.xrRecordStartNs = std::chrono::steady_clock::now().time_since_epoch().count();
+  // Early eyes: decided for the whole frame, since a pass's uploads are
+  // encoded with it (xr_replay.hpp).
+  frame.directUploads = xr_early_eyes();
 #endif
   frame.stagingBuffer = *stagingSlot;
   size_t bufferOffset = 0;

@@ -1254,6 +1254,10 @@ struct Presentation {
   uint64_t held = 0; // images held for their slot (logged)
 } g_present;
 
+// Frames whose eyes went early, and of those, drawn again at the frame's end
+// (world draws after the split); logged with the frame stats.
+std::atomic<uint32_t> g_earlyEyes{0}, g_earlyResumed{0};
+
 // Pacing probe (Android): where each 3D frame's time goes after its tick,
 // and when its GPU work finishes against the display time it's due for. A
 // watcher thread polls a dup of Dawn's sync fd, so the finish time is exact.
@@ -3148,12 +3152,14 @@ bool render_xr_frame() {
     Log.info("{:.1f} display fps ({:.0f}% 3D); frames/s released: screen {:.1f}, 3D {:.1f}, HUD {:.1f}; "
              "3D images shown 1/2/3/4+ display frames: {}/{}/{}/{}; presented {} display frames after the tick "
              "({} held); XR loop: wait to end {:.1f} ms at most, {} over 4 ms; gaps {:.1f} ms at most, {} over 10 ms; "
-             "{:.1f} ms least before display; slow loops' sections (most ms, times largest): {}{}",
+             "{:.1f} ms least before display; slow loops' sections (most ms, times largest): {}; "
+             "early eyes {} ({} redrawn){}",
              B.framesShown / secs, 100.0 * B.fightFrames / std::max<uint64_t>(B.framesShown, 1),
              B.releasedSinceStats[kScreen] / secs, B.releasedSinceStats[kStereo] / secs,
              B.releasedSinceStats[kHud] / secs, B.shownHistogram[0], B.shownHistogram[1], B.shownHistogram[2],
              B.shownHistogram[3], g_present.latency, g_present.held, B.loopMaxNs / 1e6, B.loopOver4,
-             B.gapMaxNs / 1e6, B.gapOver10, B.leadMinNs / 1e6, sections, pace_summary());
+             B.gapMaxNs / 1e6, B.gapOver10, B.leadMinNs / 1e6, sections, g_earlyEyes.exchange(0),
+             g_earlyResumed.exchange(0), pace_summary());
     B.sectionMaxNs = {};
     B.sectionWorst = {};
     B.loopMaxNs = B.gapMaxNs = 0;
@@ -4369,36 +4375,44 @@ void update_dynamic_resolution(bool missed) {
 // A missed 3D image counts too: drawing the flat world then made the next
 // frame heavier and the next miss likelier, so slow stages kept sliding.
 void render_3d(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame) {
-  R.renderedStereo = false;
-  R.missedStereo = false;
-  R.renderedRect = {};
-  R.renderedTick = frame.xrTickFrame;
-  pace_frame(frame.xrRecordStartNs, frame.xrWorldEndNs, frame.xrGameDoneNs, frame.xrRecordEndNs);
+  // After early eyes, R describes their image (already released).
+  if (frame.xrEyesDone && frame.xrWorldResumed)
+    ++g_earlyResumed;
+  if (!frame.xrEyesDone || frame.xrWorldResumed) {
+    R.renderedStereo = false;
+    R.missedStereo = false;
+    R.renderedRect = {};
+    R.renderedTick = frame.xrTickFrame;
+    pace_frame(frame.xrRecordStartNs, frame.xrWorldEndNs, frame.xrGameDoneNs, frame.xrRecordEndNs);
+  }
   render_3d_frame(cmd, frame);
   gfx::set_xr_drop_flat_world((R.renderedStereo || R.missedStereo) && g_skipPresent &&
                               !env_flag("AURORA_XR_FLAT_WORLD", false));
 }
 
-void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame) {
-  if (g_phase != Phase::Imported || !g_sessionRunning || !frame.xrHasWorld ||
-      !env_flag("AURORA_XR_3D", true))
-    return;
+// The eyes: the frame's world draws (only `passes`, when given) replayed per
+// eye into the shared 3D image, with `transforms` as the world placements.
+// False where nothing was encoded (no views, renderer, or the fallback
+// compose can't apply); R says whether a 3D image was rendered or missed.
+bool render_eyes(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame,
+                 const std::vector<std::array<float, 12 + gfx::XrClipFloats>>& worldTransforms,
+                 const std::vector<const gfx::detail::RenderPass*>* passes) {
   std::array<XrView, 2> views;
   {
     std::lock_guard lock{g_viewMutex};
     if (!g_viewsValid)
-      return;
+      return false;
     views = g_latestViews;
   }
   const auto layout = gfx::scene_render_target_layout();
   if (!ensure_renderer(layout))
-    return;
+    return false;
 
   // C = P_eye · V_eye · A · T · V_game⁻¹, with T a draw's extra placement
   // (aurora_xr_world_transform; identity for index 0).
   const Mat4 cameraToWorld = inverse_affine(frame.xrWorldView);
   const Mat4 arena = arena_transform();
-  const size_t transforms = std::min<size_t>(frame.xrTransforms.size() + 1, gfx::XrMaxTransforms);
+  const size_t transforms = std::min<size_t>(worldTransforms.size() + 1, gfx::XrMaxTransforms);
   struct {
     std::array<Mat4, 2> m;
     uint32_t enabled[4];
@@ -4416,7 +4430,7 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
       for (auto& c : clipCam)
         c = {0.f, 0.f, 0.f, 1.f};
       if (t > 0) {
-        const auto& m = frame.xrTransforms[t - 1];
+        const auto& m = worldTransforms[t - 1];
         world = mul(Mat4{m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], 0.f, 0.f, 0.f, 1.f},
                     cameraToWorld);
         for (int k = 0; k < gfx::XrMaxClipPlanes; ++k)
@@ -4437,10 +4451,10 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
         // The clipped geometry's dissolve, as 1 - opacity (0: solid).
         // The entry's layout: move 3x4, planes, fades, opacity.
         constexpr int kFades = 12 + gfx::XrMaxClipPlanes * 4, kOpacity = kFades + gfx::XrMaxClipPlanes;
-        mv[t].enabled[1] = std::bit_cast<uint32_t>(t > 0 ? 1.f - frame.xrTransforms[t - 1][kOpacity] : 0.f);
+        mv[t].enabled[1] = std::bit_cast<uint32_t>(t > 0 ? 1.f - worldTransforms[t - 1][kOpacity] : 0.f);
         for (int k = 0; k < gfx::XrMaxClipPlanes; ++k) {
           std::copy(clipCam[k].begin(), clipCam[k].end(), mv[t].clip[k]);
-          mv[t].fade[k] = t > 0 ? frame.xrTransforms[t - 1][kFades + k] : 0.f;
+          mv[t].fade[k] = t > 0 ? worldTransforms[t - 1][kFades + k] : 0.f;
         }
       } else {
         webgpu::g_queue.WriteBuffer(R.eyeUniforms[eye][t], 0, &u, sizeof(u));
@@ -4467,11 +4481,11 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
     R.loggedPath = true;
   }
   if (!direct && (stereoFormat != wgpu::TextureFormat::RGBA8Unorm || g_multiview)) {
-    return; // fallback compose writes side-by-side RGBA8 only (MSAA switched on mid-session)
+    return false; // fallback compose writes side-by-side RGBA8 only (MSAA switched on mid-session)
   }
   if (direct) {
     if (!ensure_direct(layout))
-      return;
+      return false;
     // A frame released `latency` display frames after its tick needn't have
     // its image until one display frame before then: waiting only the usual
     // 10 ms, a stage that records quickly (Battlefield, done 5 ms after the
@@ -4533,6 +4547,7 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
       t.drawCount = &draws;
       t.finish = &draw_coverage;
       t.timestampWrites = zone_writes(kZone3D);
+      t.passes = passes;
       gfx::encode_xr_replay(cmd, frame, gfx::XrCategory::World, t);
       R.timing.worldDraws += draws;
       ++R.timing.worldFrames;
@@ -4550,7 +4565,9 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
   } else {
     for (int eye = 0; eye < 2; ++eye) {
       R.targets[eye].target.timestampWrites = zone_writes(eye == 0 ? kZone3D : kZone3DRight);
+      R.targets[eye].target.passes = passes;
       gfx::encode_xr_replay(cmd, frame, gfx::XrCategory::World, R.targets[eye].target);
+      R.targets[eye].target.passes = nullptr;
     }
     if (auto dst = acquire_slot(stereo)) {
       compose(cmd, dst, {0, 1}, kZoneCompose3D);
@@ -4561,6 +4578,40 @@ void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& 
       R.missedStereo = true;
       g_skipPresent = !env_flag("AURORA_XR_FIGHT_SCREEN", false);
     }
+  }
+  return true;
+}
+
+// Early eyes (gfx::run_xr_early): the eyes, once the frame's world is
+// recorded, from the passes and transforms up to then. True if they were
+// encoded into a 3D image; the frame then submits `cmd` at once and
+// early_submitted hands the image over.
+bool early_eyes(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame,
+                const gfx::detail::XrEarlyEyes& early) {
+  if (g_phase != Phase::Imported || !g_sessionRunning || !frame.xrHasWorld || !env_flag("AURORA_XR_3D", true))
+    return false;
+  R.renderedStereo = false;
+  R.missedStereo = false;
+  R.renderedRect = {};
+  R.renderedTick = frame.xrTickFrame;
+  pace_frame(frame.xrRecordStartNs, frame.xrWorldEndNs, 0, 0); // recording goes on
+  return render_eyes(cmd, frame, early.transforms, &early.passes) && R.renderedStereo;
+}
+
+void early_submitted(gfx::detail::FramePacket&) {
+  release_slot(g_streams[kStereo], &R.renderedViews, R.renderedRect, R.renderedTick);
+  ++g_earlyEyes;
+}
+
+void render_3d_frame(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame) {
+  if (g_phase != Phase::Imported || !g_sessionRunning || !frame.xrHasWorld ||
+      !env_flag("AURORA_XR_3D", true))
+    return;
+  // The early eyes already went (gfx::run_xr_early), unless world draws came
+  // after them.
+  if (!frame.xrEyesDone || frame.xrWorldResumed) {
+    if (!render_eyes(cmd, frame, frame.xrTransforms, nullptr))
+      return;
   }
   if (frame.xrHasHud) {
     R.targets[2].target.timestampWrites = zone_writes(kZoneHud);
@@ -4701,6 +4752,17 @@ wgpu::Texture begin_frame(uint32_t width, uint32_t height) noexcept {
       return {};
     }
     gfx::set_xr_frame_hook(&render_3d);
+    // The eyes go to the GPU as soon as the frame's world is recorded
+    // (xr_replay.hpp), multiview only; on by default on Android, where it's
+    // measured (AURORA_XR_EARLY_EYES=0|1 overrides). Four-CPU Mute City: GPU
+    // done about 2.5 ms sooner after the tick.
+#ifdef __ANDROID__
+    constexpr bool kEarlyEyesDefault = true;
+#else
+    constexpr bool kEarlyEyesDefault = false;
+#endif
+    gfx::set_xr_early_hooks(&early_eyes, &early_submitted);
+    gfx::set_xr_early_eyes(g_multiview && env_flag("AURORA_XR_EARLY_EYES", kEarlyEyesDefault));
     g_phase = Phase::Imported;
     phase = Phase::Imported;
   }

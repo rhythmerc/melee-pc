@@ -236,7 +236,23 @@ void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, Render
   pass.SetBindGroup(3, xrGroup);
 #endif
 
-  for (auto& cmd : passInfo.commands) {
+  // An early-eyes continuation that something reads (an EFB copy or a
+  // snapshot): the world part it was split from dropped its world draws, so
+  // they go first here, where the reader will find them.
+  std::vector<Command*> replayed;
+#if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
+  if (passInfo.splitFrom != nullptr && !dropWorld) {
+    for (auto& c : const_cast<RenderPass*>(passInfo.splitFrom)->commands) {
+      const bool world = c.xrCategory == XrCategory::World || c.xrCategory == XrCategory::Hidden;
+      if (c.type == CommandType::SetViewport || c.type == CommandType::SetScissor ||
+          (c.type == CommandType::Draw && world))
+        replayed.push_back(&c);
+    }
+  }
+#endif
+  const size_t commandCount = replayed.size() + passInfo.commands.size();
+  for (size_t ci = 0; ci < commandCount; ++ci) {
+    auto& cmd = ci < replayed.size() ? *replayed[ci] : passInfo.commands[ci - replayed.size()];
 #ifdef AURORA_GFX_DEBUG_GROUPS
     {
       size_t firstDiff = lastDebugGroupStack.size();
@@ -500,12 +516,20 @@ constexpr uint32_t align_down_copy_offset(uint32_t value) noexcept { return valu
 
 #ifndef __EMSCRIPTEN__
 void copy_staging_buffer_range(wgpu::CommandEncoder& cmd, const FramePacket& frame, uint32_t& copied,
-                               uint32_t highWater, uint64_t stagingOffset, const wgpu::Buffer& dst) {
+                               uint32_t highWater, uint64_t stagingOffset, const wgpu::Buffer& dst,
+                               const ByteBuffer& mapped) {
   if (highWater <= copied) {
     return;
   }
   const uint32_t copyStart = align_down_copy_offset(copied);
   const uint32_t copyEnd = AURORA_ALIGN(highWater, 4);
+  if (frame.directUploads) {
+    // XR early eyes: straight from the mapped staging memory (written up to
+    // the high water; later recording only appends past it).
+    g_queue.WriteBuffer(dst, copyStart, mapped.data() + copyStart, copyEnd - copyStart);
+    copied = highWater;
+    return;
+  }
   cmd.CopyBufferToBuffer(staging_buffer(frame.stagingBuffer), stagingOffset + copyStart, dst, copyStart,
                          copyEnd - copyStart);
   copied = highWater;
@@ -537,17 +561,34 @@ void copy_staging_to_high_water(wgpu::CommandEncoder& cmd, FramePacket& frame, c
   frame.copied.indices = highWater.indices;
   frame.copied.storage = highWater.storage;
 #else
-  copy_staging_buffer_range(cmd, frame, frame.copied.verts, highWater.verts, VertexStagingOffset, res.vertexBuffer);
+  copy_staging_buffer_range(cmd, frame, frame.copied.verts, highWater.verts, VertexStagingOffset, res.vertexBuffer,
+                            frame.verts);
   copy_staging_buffer_range(cmd, frame, frame.copied.uniforms, highWater.uniforms, UniformStagingOffset,
-                            res.uniformBuffer);
-  copy_staging_buffer_range(cmd, frame, frame.copied.indices, highWater.indices, IndexStagingOffset, res.indexBuffer);
+                            res.uniformBuffer, frame.uniforms);
+  copy_staging_buffer_range(cmd, frame, frame.copied.indices, highWater.indices, IndexStagingOffset, res.indexBuffer,
+                            frame.indices);
   copy_staging_buffer_range(cmd, frame, frame.copied.storage, highWater.storage, StorageStagingOffset,
-                            res.storageBuffer);
+                            res.storageBuffer, frame.storage);
 #endif
 
   if constexpr (UseTextureBuffer) {
     for (size_t i = frame.copied.textureUploadCount; i < op.textureUploads.size(); ++i) {
       const auto& item = *op.textureUploads[i];
+#ifndef __EMSCRIPTEN__
+      if (frame.directUploads && !item.buffer) {
+        const uint32_t rowBytes = AURORA_ALIGN(item.layout.bytesPerRow, 256);
+        const uint32_t rows = item.layout.rowsPerImage != 0 ? item.layout.rowsPerImage : item.size.height;
+        const wgpu::TexelCopyBufferLayout layout{
+            .offset = 0,
+            .bytesPerRow = rowBytes,
+            .rowsPerImage = rows,
+        };
+        g_queue.WriteTexture(&item.tex, frame.textureUpload.data() + item.layout.offset,
+                             static_cast<size_t>(rowBytes) * rows * std::max(item.size.depthOrArrayLayers, 1u), &layout,
+                             &item.size);
+        continue;
+      }
+#endif
       const wgpu::TexelCopyBufferInfo buf{
           .layout =
               wgpu::TexelCopyBufferLayout{
@@ -629,6 +670,34 @@ uint64_t xr_game_frame_tick() noexcept { return g_xrGameFrameTick; }
 void set_xr_drop_flat_world(bool drop) noexcept { g_xrDropFlatWorld = drop; }
 XrFrameHook xr_frame_hook() noexcept { return g_xrFrameHook; }
 
+namespace {
+XrEarlyHook g_xrEarlyHook = nullptr;
+XrEarlySubmitted g_xrEarlySubmitted = nullptr;
+std::atomic<bool> g_xrEarlyEyes{false};
+} // namespace
+
+void set_xr_early_hooks(XrEarlyHook hook, XrEarlySubmitted submitted) noexcept {
+  g_xrEarlyHook = hook;
+  g_xrEarlySubmitted = submitted;
+}
+void set_xr_early_eyes(bool on) noexcept { g_xrEarlyEyes.store(on, std::memory_order_relaxed); }
+bool xr_early_eyes() noexcept { return g_xrEarlyEyes.load(std::memory_order_relaxed) && g_xrEarlyHook != nullptr; }
+
+void run_xr_early(FramePacket& frame, const XrEarlyEyes& early) {
+  ZoneScoped;
+  if (g_xrEarlyHook == nullptr || !frame.encoder || !g_xrEarlyHook(frame.encoder, frame, early))
+    return;
+  // Everything so far goes now; the rest of the frame continues in a new
+  // encoder (frame.cpp submits it at the end as usual).
+  const wgpu::CommandBuffer commands = frame.encoder.Finish();
+  g_queue.Submit(1, &commands);
+  constexpr wgpu::CommandEncoderDescriptor EncoderDescriptor{.label = "Redraw encoder (after the eyes)"};
+  frame.encoder = g_device.CreateCommandEncoder(&EncoderDescriptor);
+  frame.xrEyesDone = true;
+  if (g_xrEarlySubmitted != nullptr)
+    g_xrEarlySubmitted(frame);
+}
+
 void encode_xr_replay(const wgpu::CommandEncoder& cmd, FramePacket& frame, XrCategory category,
                       const XrReplayTarget& target) {
   ZoneScoped;
@@ -700,7 +769,15 @@ void encode_xr_replay(const wgpu::CommandEncoder& cmd, FramePacket& frame, XrCat
       pass.SetScissorRect(static_cast<uint32_t>(vx), static_cast<uint32_t>(vy), static_cast<uint32_t>(vw),
                           static_cast<uint32_t>(vh));
     }
-    for (auto& src : frame.renderPasses) {
+    // The early eyes name their passes: the frame's list is still growing.
+    std::vector<const RenderPass*> all;
+    if (target.passes == nullptr) {
+      all.reserve(frame.renderPasses.size());
+      for (const auto& p : frame.renderPasses)
+        all.push_back(&p);
+    }
+    for (const RenderPass* srcPass : target.passes != nullptr ? *target.passes : all) {
+      auto& src = const_cast<RenderPass&>(*srcPass); // draw encoders take their payload mutable
       if (!src.sealed || src.discardable || !same_formats(src.target_layout(), target.layout)) {
         continue;
       }

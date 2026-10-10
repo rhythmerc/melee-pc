@@ -111,6 +111,11 @@ struct RenderPass {
   bool discardable = false;
   bool captureDepthSnapshot = false;
   bool sealed = false;
+  // XR early eyes: this EFB pass continues `splitFrom`, the frame's world
+  // part, split off when the world ended so the eyes could go early. If this
+  // pass is read (a copy or snapshot), it draws that part's world draws again
+  // first: the split part was encoded without them.
+  const RenderPass* splitFrom = nullptr;
   std::vector<tex_palette_conv::ConvRequest> paletteConvs;
 
   RenderTargetLayout target_layout() const noexcept;
@@ -234,6 +239,23 @@ struct FramePacket {
   // Then XrMaxClipPlanes clip planes (all must pass; 0,0,0,1 always passes),
   // their fade bands (game units; 0 = a hard cut) and the draw's opacity.
   std::vector<std::array<float, 12 + XrClipFloats>> xrTransforms; // move 3x4, clip planes 8x4, fades 8, opacity
+  // XR early eyes (set_xr_early_eyes): the frame's uploads go through
+  // WriteBuffer/WriteTexture, not copies from the staging buffer (mapped until
+  // the frame ends, so no command buffer copying from it can be submitted
+  // early); the world was split off and its eyes queued (xrEarlySplit);
+  // world draws came after that (xrWorldResumed: the early eyes lack them);
+  // the eyes went in their own submit (xrEyesDone, render worker).
+  bool directUploads = false;
+  bool xrEarlySplit = false;
+  bool xrWorldResumed = false;
+  bool xrEyesDone = false;
+};
+
+// What the early eyes replay: the frame's passes up to the world's end, and
+// its world transforms then (both still growing on the FIFO thread).
+struct XrEarlyEyes {
+  std::vector<const RenderPass*> passes;
+  std::vector<std::array<float, 12 + XrClipFloats>> transforms;
 };
 
 } // namespace aurora::gfx::detail
