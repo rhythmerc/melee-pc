@@ -327,6 +327,7 @@ bool begin_frame() noexcept {
 void end_frame() noexcept {
   ZoneScoped;
 #ifdef AURORA_ENABLE_GX
+  gfx::mark_game_frame_done();
   gx::fifo::drain();
   gx::fifo::end_frame();
   gx::texture::end_frame();

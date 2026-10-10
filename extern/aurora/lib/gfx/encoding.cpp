@@ -173,11 +173,43 @@ void log_kept_flat_pass(const RenderPass& passInfo) {
 } // namespace
 #endif
 
+// AURORA_PASS_LOG=1: every 10 s, each render pass of one frame: its size,
+// its draws by XR category, and what reads it.
+void log_pass(const FramePacket& frame, const RenderPass& passInfo, bool dropWorld) {
+  static const bool enabled = std::getenv("AURORA_PASS_LOG") != nullptr;
+  if (!enabled)
+    return;
+  static auto last = std::chrono::steady_clock::now();
+  static uint32_t loggingFrame = UINT32_MAX;
+  const auto now = std::chrono::steady_clock::now();
+  if (frame.frameIndex != loggingFrame) {
+    if (now - last < std::chrono::seconds(10))
+      return;
+    last = now;
+    loggingFrame = frame.frameIndex;
+  }
+  std::array<uint32_t, 4> draws{};
+  uint32_t custom = 0;
+  for (const auto& cmd : passInfo.commands) {
+    if (cmd.type == CommandType::Draw)
+      ++draws[static_cast<size_t>(cmd.xrCategory) & 3];
+    custom += cmd.type == CommandType::CustomDraw ? 1 : 0;
+  }
+  const auto& c0 = passInfo.colorAttachments[0];
+  Log.info("pass frame {} '{}': {}x{} x{} depth {}; draws mono {} world {} hud {} hidden {} custom {}; "
+           "resolve {} ({}x{}), snapshots c{} d{} n{}; {}",
+           frame.frameIndex, passInfo.label, c0.size.width, c0.size.height, passInfo.msaaSamples, passInfo.hasDepth,
+           draws[0], draws[1], draws[2], draws[3], custom, passInfo.resolveTarget ? 1 : 0, passInfo.resolveRect.width,
+           passInfo.resolveRect.height, passInfo.snapshotColorDst ? 1 : 0, passInfo.snapshotDepthDst ? 1 : 0,
+           passInfo.snapshotNormalDst ? 1 : 0, dropWorld ? "world dropped" : "world kept");
+}
+
 void render_pass(const wgpu::RenderPassEncoder& pass, FramePacket& frame, RenderPass& passInfo) {
   ZoneScoped;
   g_currentPipeline = UINTPTR_MAX;
 #if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
   const bool dropWorld = g_xrDropFlatWorld && !passInfo.has_consumer();
+  log_pass(frame, passInfo, dropWorld);
   if (g_xrDropFlatWorld && !dropWorld)
     log_kept_flat_pass(passInfo);
   // A flat pass kept only for an EFB copy needs its world and hidden draws

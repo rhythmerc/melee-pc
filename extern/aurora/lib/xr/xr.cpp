@@ -1266,7 +1266,7 @@ struct PaceProbe {
     uint64_t frame = 0;
     int64_t waitNs = 0, displayNs = 0, wakeNs = 0; // xrWaitFrame's return; its predicted display; game woken
   };
-  enum Mark { Wake, RecordStart, WorldEnd, RecordEnd, RenderStart, Submit, Done, Margin, Marks };
+  enum Mark { Wake, RecordStart, WorldEnd, GameDone, RecordEnd, RenderStart, Submit, Done, Margin, Marks };
   std::mutex mutex;
   std::condition_variable cv;
   std::array<Display, 256> displays{};
@@ -1279,7 +1279,7 @@ struct PaceProbe {
   };
   std::deque<Pending> pending;
   std::array<std::vector<float>, Marks> ms; // since the last log, by Mark
-  std::array<int64_t, 4> next{};            // render worker: record start, world end, record end, render start
+  std::array<int64_t, 5> next{};            // render worker: record start, world end, game done, record end, render start
   int64_t slotWaitNs = 0;                   // render worker: this frame's wait for a 3D image
   std::vector<uint8_t> doneLatency;          // display frames from tick to GPU done, for g_present
   std::vector<float> idealMargins;           // ns from GPU done to the ideal latency's slot, for g_dynres
@@ -1357,8 +1357,9 @@ int64_t pace_wait_ns(uint64_t frame) {
 }
 
 // Render worker: the frame about to be replayed for the eyes.
-void pace_frame(int64_t recordStartNs, int64_t worldEndNs, int64_t recordEndNs) {
-  g_pace.next = {recordStartNs, worldEndNs != 0 ? worldEndNs : recordEndNs, recordEndNs, monotonic_ns()};
+void pace_frame(int64_t recordStartNs, int64_t worldEndNs, int64_t gameDoneNs, int64_t recordEndNs) {
+  g_pace.next = {recordStartNs, worldEndNs != 0 ? worldEndNs : recordEndNs, gameDoneNs, recordEndNs,
+                 monotonic_ns()};
   g_pace.slotWaitNs = 0;
 }
 
@@ -1374,8 +1375,9 @@ void pace_submit(uint64_t tickFrame, int fd) {
   PaceProbe::Pending p{tickFrame, std::max(g_present.latency, g_displayPerGameFrame.load()), g_pace.slotWaitNs, {}, fd};
   p.ns[PaceProbe::RecordStart] = g_pace.next[0];
   p.ns[PaceProbe::WorldEnd] = g_pace.next[1];
-  p.ns[PaceProbe::RecordEnd] = g_pace.next[2];
-  p.ns[PaceProbe::RenderStart] = g_pace.next[3];
+  p.ns[PaceProbe::GameDone] = g_pace.next[2];
+  p.ns[PaceProbe::RecordEnd] = g_pace.next[3];
+  p.ns[PaceProbe::RenderStart] = g_pace.next[4];
   p.ns[PaceProbe::Submit] = monotonic_ns();
   g_pace.pending.push_back(p);
   g_pace.cv.notify_one();
@@ -1395,8 +1397,8 @@ std::string pace_summary() {
   };
   if (g_pace.ms[PaceProbe::Done].empty())
     return {};
-  static constexpr const char* kNames[] = {"woken",     "recording", "world recorded", "recorded",
-                                           "replaying", "submitted", "GPU done"};
+  static constexpr const char* kNames[] = {"woken",    "recording", "world recorded", "game done",
+                                           "recorded", "replaying", "submitted",      "GPU done"};
   std::string s = "; pacing (ms after the tick, median/95%/max):";
   for (int m = 0; m < PaceProbe::Margin; ++m) {
     auto& v = g_pace.ms[m];
@@ -4371,7 +4373,7 @@ void render_3d(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame)
   R.missedStereo = false;
   R.renderedRect = {};
   R.renderedTick = frame.xrTickFrame;
-  pace_frame(frame.xrRecordStartNs, frame.xrWorldEndNs, frame.xrRecordEndNs);
+  pace_frame(frame.xrRecordStartNs, frame.xrWorldEndNs, frame.xrGameDoneNs, frame.xrRecordEndNs);
   render_3d_frame(cmd, frame);
   gfx::set_xr_drop_flat_world((R.renderedStereo || R.missedStereo) && g_skipPresent &&
                               !env_flag("AURORA_XR_FLAT_WORLD", false));

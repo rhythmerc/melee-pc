@@ -43,6 +43,9 @@ void initialize();
 void shutdown();
 bool begin_frame();
 void end_frame(EndFrameCallback callback);
+// Game thread: the frame's commands are all issued (before the FIFO drains);
+// the next end_frame's packet carries the time (XR pacing probe).
+void mark_game_frame_done() noexcept;
 uint32_t current_frame() noexcept;
 void after_submit() noexcept;
 void gpu_synchronize();

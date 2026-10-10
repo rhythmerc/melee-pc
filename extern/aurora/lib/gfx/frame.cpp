@@ -727,6 +727,14 @@ bool begin_frame() {
   return true;
 }
 
+namespace {
+int64_t g_gameDoneNs = 0;
+} // namespace
+
+void mark_game_frame_done() noexcept {
+  g_gameDoneNs = std::chrono::steady_clock::now().time_since_epoch().count();
+}
+
 void end_frame(EndFrameCallback callback) {
   ZoneScoped;
   if (g_cpuFrameStart.time_since_epoch().count() != 0) {
@@ -739,6 +747,7 @@ void end_frame(EndFrameCallback callback) {
   auto& frame = *recorded.packet;
 #if defined(AURORA_ENABLE_OPENXR) && !defined(__EMSCRIPTEN__)
   frame.xrRecordEndNs = std::chrono::steady_clock::now().time_since_epoch().count();
+  frame.xrGameDoneNs = g_gameDoneNs;
 #endif
   const size_t frameSlot = recorded.frameSlot;
   const uint64_t frameId = frame.frameId;

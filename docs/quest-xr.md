@@ -723,6 +723,20 @@ vertex cache (decode from 31% of it to 4%), and the frame's recording ends
 9.8 ms after the tick instead of 10.9. At latency 3 that took it from 2.7
 stale frames a second to 1.1, every image on its two display frames.
 
+More off the FIFO thread (2026-10-10). The cache tries last frame's draw
+after its previous match before the table, so one draw more or fewer (a
+particle) no longer sends every later draw to the table. Each entry keeps
+the draw's model-space bounds per position matrix, and a clipped world draw
+whose box is wholly inside every plane's fade, or wholly past one plane, is
+classed without reading its vertices: on Mute City nine in ten clipped draws
+are wholly outside (the far track). A GX pipeline already built is found
+from one hash of its config, not two and a mutex. The pacing probe now also
+marks when the game thread had issued the frame: four-CPU Mute City issues
+it about 3 ms after the tick and the FIFO thread finishes about 9 ms after,
+so the FIFO thread is the chain's first link. `AURORA_PASS_LOG=1` logs one
+frame's render passes every 10 s (the four 584x480 passes before the eyes
+are the fighters' shadows).
+
 Quest 3, mixed reality, four CPUs, game fps, decode off -> on:
 
 | Stage | Off | On |

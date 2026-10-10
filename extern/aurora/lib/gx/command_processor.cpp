@@ -591,10 +591,18 @@ struct DecodeKey {
 struct DecodeKeyHash {
   size_t operator()(const DecodeKey& k) const noexcept { return static_cast<size_t>(k.lo); }
 };
+struct ClipBox {
+  u8 mtx; // position matrix (GX_DIRECT matrix indices; else the current one)
+  float lo[3], hi[3];
+};
 struct DecodeEntry {
   DecodeKey key{};
   std::vector<u8> bytes;
   u32 lastFrame = 0;
+  std::array<u32, 2> ordinal{}; // its position in DecodeCache::order, by frame parity
+  // The draw's model-space bounds per position matrix, for classify_xr_clip.
+  std::vector<ClipBox> boxes;
+  bool haveBoxes = false;
 };
 struct DecodeCache {
   std::unordered_map<DecodeKey, DecodeEntry, DecodeKeyHash> entries;
@@ -603,13 +611,23 @@ struct DecodeCache {
   // or two each, thousands a frame) were half the FIFO thread's cost of a
   // hit. Cleared when entries are erased (they point into the table).
   std::vector<DecodeEntry*> order, lastOrder;
+  size_t cursor = 0; // where in lastOrder the next draw is expected
   u32 orderFrame = 0;
+  u64 predicted = 0, looked = 0; // logged with the hits
   size_t bytes = 0;
   u32 sweptFrame = 0;
   u64 hits = 0, misses = 0, hitBytes = 0, mismatches = 0;
   u32 loggedFrame = 0;
 };
 DecodeCache sDecodeCache;
+// The entry push_decoded_vertices last used, and the draw it was for: the
+// clip classification of the same draw follows it (push_gx_draw).
+struct LastDecode {
+  const u8* raw = nullptr;
+  u16 vtxCount = 0;
+  u32 frame = 0;
+  DecodeEntry* entry = nullptr;
+} sLastDecode;
 #ifdef __ANDROID__
 constexpr size_t kDecodeCacheBytes = 24u << 20;
 #else
@@ -642,7 +660,14 @@ DecodeKey decode_key(const ShaderConfig& config, const u8* raw, u16 vtxCount) no
     u8 vtxStride = 0, decodedAll = 0, decodedPos = 0, pad = 0;
   } parts;
   parts.raw = XXH3_64bits(raw, static_cast<size_t>(vtxCount) * config.vtxStride);
-  parts.attrs = XXH3_64bits(config.attrs.data(), sizeof(config.attrs));
+  // The formats change only with the vertex format: hashed when they do.
+  static decltype(config.attrs) lastAttrs{};
+  static u64 lastAttrsHash = XXH3_64bits(lastAttrs.data(), sizeof(lastAttrs));
+  if (std::memcmp(lastAttrs.data(), config.attrs.data(), sizeof(lastAttrs)) != 0) {
+    lastAttrs = config.attrs;
+    lastAttrsHash = XXH3_64bits(lastAttrs.data(), sizeof(lastAttrs));
+  }
+  parts.attrs = lastAttrsHash;
   for (int a = GX_VA_POS; a <= GX_VA_TEX7; ++a) {
     const u8 type = config.attrs[a].attrType;
     if (type != GX_INDEX8 && type != GX_INDEX16)
@@ -669,6 +694,7 @@ void sweep_decode_cache() noexcept {
   c.sweptFrame = now;
   c.order.clear();
   c.lastOrder.clear();
+  sLastDecode = {};
   for (u32 age : {120u, 1u}) {
     for (auto it = c.entries.begin(); it != c.entries.end();) {
       if (now - it->second.lastFrame >= age) {
@@ -706,15 +732,25 @@ static gfx::Range push_decoded_vertices(const ShaderConfig& config, const u8* ra
     c.orderFrame = now;
     c.lastOrder.swap(c.order);
     c.order.clear();
+    c.cursor = 0;
   }
-  const size_t ordinal = c.order.size();
+  // Last frame's next draw after the previous match; on a miss the table,
+  // and the prediction picks up after where that entry stood last frame, so
+  // one draw more or less doesn't throw off every draw after it.
   DecodeEntry* entry = nullptr;
-  if (ordinal < c.lastOrder.size() && c.lastOrder[ordinal] != nullptr && c.lastOrder[ordinal]->key == key) {
-    entry = c.lastOrder[ordinal];
+  if (c.cursor < c.lastOrder.size() && c.lastOrder[c.cursor] != nullptr && c.lastOrder[c.cursor]->key == key) {
+    entry = c.lastOrder[c.cursor++];
+    ++c.predicted;
   } else if (auto it = c.entries.find(key); it != c.entries.end()) {
     entry = &it->second;
+    ++c.looked;
+    const u32 was = entry->ordinal[(now - 1) & 1];
+    if (entry->lastFrame + 1 == now && was < c.lastOrder.size() && c.lastOrder[was] == entry)
+      c.cursor = was + 1;
   }
   if (entry != nullptr && entry->bytes.size() == size) {
+    sLastDecode = {raw, vtxCount, now, entry};
+    entry->ordinal[now & 1] = static_cast<u32>(c.order.size());
     c.order.push_back(entry);
     std::memcpy(base, entry->bytes.data(), size);
     entry->lastFrame = now;
@@ -739,7 +775,9 @@ static gfx::Range push_decoded_vertices(const ShaderConfig& config, const u8* ra
     e.key = key;
     e.bytes.assign(base, base + size);
     e.lastFrame = now;
+    e.ordinal[now & 1] = static_cast<u32>(c.order.size());
     c.order.push_back(&e);
+    sLastDecode = {raw, vtxCount, now, &e};
   }
   static const bool stats = [] {
     const char* v = std::getenv("AURORA_VTX_CACHE_STATS");
@@ -747,10 +785,11 @@ static gfx::Range push_decoded_vertices(const ShaderConfig& config, const u8* ra
   }();
   if (stats && now - c.loggedFrame >= 600) {
     c.loggedFrame = now;
-    Log.info("Decoded-vertex cache: {} hits ({:.1f} MiB), {} misses, {} mismatches; {} entries, {:.1f} MiB",
-             c.hits, static_cast<double>(c.hitBytes) / (1 << 20), c.misses, c.mismatches, c.entries.size(),
-             static_cast<double>(c.bytes) / (1 << 20));
-    c.hits = c.misses = c.hitBytes = 0;
+    Log.info("Decoded-vertex cache: {} hits ({:.1f} MiB; {} predicted, {} looked up), {} misses, {} mismatches; "
+             "{} entries, {:.1f} MiB",
+             c.hits, static_cast<double>(c.hitBytes) / (1 << 20), c.predicted, c.looked, c.misses, c.mismatches,
+             c.entries.size(), static_cast<double>(c.bytes) / (1 << 20));
+    c.hits = c.misses = c.hitBytes = c.predicted = c.looked = 0;
   }
   return range;
 }
@@ -798,6 +837,64 @@ static XrClipClass classify_xr_clip(const ShaderConfig& config, const u8* raw, u
   if (planeCount == 0) {
     return dissolving ? XrClipClass::Straddle : XrClipClass::Inside;
   }
+  // A plane in matrix `mtx`'s model space.
+  const auto to_model = [&](u32 mtx, int n, float* q) {
+    const f32* m = reinterpret_cast<const f32*>(&g_gxState.pnMtx[mtx].pos);
+    const auto& pl = clip->planes[planes[n]];
+    for (int j = 0; j < 4; ++j)
+      q[j] = pl[0] * m[j] + pl[1] * m[4 + j] + pl[2] * m[8 + j];
+    q[3] += pl[3];
+  };
+  // The draw's bounds, kept with its decoded vertices: a box wholly inside
+  // every plane's fade, or wholly past one plane, settles it without reading
+  // a vertex. Reading them all every frame was 15% of the FIFO thread (Mute
+  // City, four CPUs).
+  DecodeEntry* entry = nullptr;
+  if (decode_cache_on() && config.decodedAll) {
+    // Used once: a later draw's data could land at the same address.
+    if (sLastDecode.raw == raw && sLastDecode.vtxCount == vtxCount && sLastDecode.frame == g_gxState.frameSerial) {
+      entry = sLastDecode.entry;
+      sLastDecode = {};
+    } else if (auto it = sDecodeCache.entries.find(decode_key(config, raw, vtxCount)); it != sDecodeCache.entries.end())
+      entry = &it->second;
+  }
+  static const bool checkBoxes = [] {
+    const char* v = std::getenv("AURORA_VTX_CACHE_CHECK");
+    return v != nullptr && *v == '1';
+  }();
+  auto boxResult = XrClipClass::Straddle;
+  if (entry != nullptr && entry->haveBoxes) {
+    float blo[gfx::XrMaxClipPlanes], bhi[gfx::XrMaxClipPlanes];
+    std::fill_n(blo, gfx::XrMaxClipPlanes, INFINITY);
+    std::fill_n(bhi, gfx::XrMaxClipPlanes, -INFINITY);
+    for (const auto& b : entry->boxes) {
+      const u32 mtx = idx.attrType == GX_DIRECT ? b.mtx : std::min<u32>(g_gxState.currentPnMtx, MaxPnMtx - 1);
+      for (int n = 0; n < planeCount; ++n) {
+        float q[4];
+        to_model(mtx, n, q);
+        float dlo = q[3], dhi = q[3];
+        for (int j = 0; j < 3; ++j) {
+          const float a = q[j] * b.lo[j], c = q[j] * b.hi[j];
+          dlo += std::min(a, c);
+          dhi += std::max(a, c);
+        }
+        blo[n] = std::min(blo[n], dlo);
+        bhi[n] = std::max(bhi[n], dhi);
+      }
+    }
+    bool inside = !dissolving, out = false;
+    for (int n = 0; n < planeCount; ++n) {
+      out |= bhi[n] < -kXrClipEps;
+      inside &= blo[n] > clip->fades[planes[n]] + kXrClipEps;
+    }
+    boxResult = out ? XrClipClass::Outside : inside ? XrClipClass::Inside : XrClipClass::Straddle;
+    if (boxResult != XrClipClass::Straddle && !checkBoxes)
+      return boxResult;
+    // Straddling, or a loose box: the vertices decide.
+  }
+  ClipBox boxes[MaxPnMtx];
+  u8 boxOf[MaxPnMtx];
+  u32 boxCount = 0;
   // Each plane in a position matrix's model space, made when first used.
   float model[MaxPnMtx][gfx::XrMaxClipPlanes][4];
   u16 made = 0;
@@ -812,13 +909,10 @@ static XrClipClass classify_xr_clip(const ShaderConfig& config, const u8* raw, u
                                               : std::min<u32>(g_gxState.currentPnMtx, MaxPnMtx - 1);
     if ((made & (1u << mtx)) == 0) {
       made |= 1u << mtx;
-      const f32* m = reinterpret_cast<const f32*>(&g_gxState.pnMtx[mtx].pos);
-      for (int n = 0; n < planeCount; ++n) {
-        const auto& pl = clip->planes[planes[n]];
-        for (int j = 0; j < 4; ++j)
-          model[mtx][n][j] = pl[0] * m[j] + pl[1] * m[4 + j] + pl[2] * m[8 + j];
-        model[mtx][n][3] += pl[3];
-      }
+      for (int n = 0; n < planeCount; ++n)
+        to_model(mtx, n, model[mtx][n]);
+      boxOf[mtx] = static_cast<u8>(boxCount);
+      boxes[boxCount++] = {static_cast<u8>(mtx), {INFINITY, INFINITY, INFINITY}, {-INFINITY, -INFINITY, -INFINITY}};
     }
     bool le = false;
     const u8* src = decoded_source(pos, GX_VA_POS, 0, vtx, le);
@@ -828,6 +922,11 @@ static XrClipClass classify_xr_clip(const ShaderConfig& config, const u8* raw, u
     float p[3] = {0.f, 0.f, 0.f};
     for (u32 c = 0; c < comps; ++c)
       p[c] = decode_component(src + c * compSize, pos.compType, pos.frac, le);
+    auto& box = boxes[boxOf[mtx]];
+    for (int j = 0; j < 3; ++j) {
+      box.lo[j] = std::min(box.lo[j], p[j]);
+      box.hi[j] = std::max(box.hi[j], p[j]);
+    }
     u8 past = 0;
     for (int n = 0; n < planeCount; ++n) {
       const float* q = model[mtx][n];
@@ -841,14 +940,28 @@ static XrClipClass classify_xr_clip(const ShaderConfig& config, const u8* raw, u
   }
   if (masked != nullptr)
     *masked = outside != nullptr;
+  if (entry != nullptr && !entry->haveBoxes) {
+    entry->boxes.assign(boxes, boxes + boxCount);
+    entry->haveBoxes = true;
+  }
   bool inside = !dissolving;
+  auto result = XrClipClass::Straddle;
   for (int n = 0; n < planeCount; ++n) {
     if (hi[n] < -kXrClipEps) {
-      return XrClipClass::Outside;
+      result = XrClipClass::Outside;
+      break;
     }
     inside &= lo[n] > clip->fades[planes[n]] + kXrClipEps;
   }
-  return inside ? XrClipClass::Inside : XrClipClass::Straddle;
+  if (result != XrClipClass::Outside && inside)
+    result = XrClipClass::Inside;
+  if (checkBoxes && boxResult != XrClipClass::Straddle && boxResult != result) {
+    static u32 warned = 0;
+    if (++warned <= 8)
+      Log.warn("Clip bounds classed a draw {} but its vertices say {}", static_cast<int>(boxResult),
+               static_cast<int>(result));
+  }
+  return result;
 }
 
 // The multiview twin of the current pipeline for `layout`, cached per

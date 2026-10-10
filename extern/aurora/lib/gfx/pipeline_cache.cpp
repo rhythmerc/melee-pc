@@ -1354,10 +1354,34 @@ PipelineRef find_pipeline(const clear::PipelineConfig& config, const RenderTarge
  * Classic team-intro splash, ten fresh variants in about a second) lost all
  * its tiles; the worker pool makes that window a few frames wide. MELEE_PIPELINE_SYNC
  * restores the blocking behaviour for A/B. */
+// Bumped when every pipeline is dropped, which empties find_pipeline's
+// per-thread set of ready ones.
+std::atomic<uint32_t> g_pipelinesGeneration{0};
+
 PipelineRef find_pipeline(const gx::PipelineConfig& config, const RenderTargetLayout& layout) {
+  // A pipeline already built needs neither remembering nor resolving again:
+  // both hashed the whole config, took the mutex, and resolving copied the
+  // config into a creation callback it then threw away. That was about 5% of
+  // the FIFO thread (Mute City, four CPUs).
+  thread_local absl::flat_hash_set<PipelineRef> ready;
+  thread_local uint32_t readyGeneration = 0;
+  if (const uint32_t gen = g_pipelinesGeneration.load(std::memory_order_acquire); gen != readyGeneration) {
+    ready.clear();
+    readyGeneration = gen;
+  }
+  const auto cacheKey = xxh3_hash(config, static_cast<HashType>(ShaderType::GX));
+  const PipelineRef runtimeKey = xxh3_hash(layout.key, cacheKey);
+  if (ready.contains(runtimeKey))
+    return runtimeKey;
   remember_pipeline_config(ShaderType::GX, config, current_frame(), true);
-  return resolve_pipeline(ShaderType::GX, config, layout,
-                          g_pipelineSync ? PipelinePriority::Blocking : PipelinePriority::Normal);
+  const PipelineRef ref = resolve_pipeline(ShaderType::GX, config, layout,
+                                           g_pipelineSync ? PipelinePriority::Blocking : PipelinePriority::Normal);
+  {
+    std::scoped_lock guard{g_pipelineMutex};
+    if (g_pipelines.contains(ref))
+      ready.insert(ref);
+  }
+  return ref;
 }
 
 #ifdef AURORA_ENABLE_RMLUI
@@ -1467,6 +1491,7 @@ void shutdown_pipeline_cache() {
   g_pipelinesPerFrame = 0;
   g_gpuCachePrunePending = false;
   g_pipelines.clear();
+  g_pipelinesGeneration.fetch_add(1, std::memory_order_release);
   g_knownPipelines.clear();
   g_pipelineLayoutKey.reset();
   g_pipelineQueue.clear();
