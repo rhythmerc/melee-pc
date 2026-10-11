@@ -1,4 +1,5 @@
 #include "render_worker.hpp"
+#include "atrace.hpp"
 
 #include "../thread.hpp"
 
@@ -46,6 +47,7 @@ void worker_main(std::stop_token token) {
 
     if (item->work) {
       ZoneScopedN("QueueItem work");
+      AtraceScope trace{"Render worker item"};
       item->work();
     }
     complete_sync(item->sync);

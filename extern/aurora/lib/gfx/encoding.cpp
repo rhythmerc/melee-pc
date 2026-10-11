@@ -1,4 +1,5 @@
 #include "encoding.hpp"
+#include "atrace.hpp"
 #ifdef AURORA_ENABLE_OPENXR
 #include "xr_replay.hpp"
 #endif
@@ -666,12 +667,14 @@ XrFrameHook xr_frame_hook() noexcept { return g_xrFrameHook; }
 namespace {
 XrEarlyHook g_xrEarlyHook = nullptr;
 XrEarlySubmitted g_xrEarlySubmitted = nullptr;
+XrEarlyAroundSubmit g_xrEarlyAround = nullptr;
 std::atomic<bool> g_xrEarlyEyes{false};
 } // namespace
 
-void set_xr_early_hooks(XrEarlyHook hook, XrEarlySubmitted submitted) noexcept {
+void set_xr_early_hooks(XrEarlyHook hook, XrEarlySubmitted submitted, XrEarlyAroundSubmit around) noexcept {
   g_xrEarlyHook = hook;
   g_xrEarlySubmitted = submitted;
+  g_xrEarlyAround = around;
 }
 void set_xr_early_eyes(bool on) noexcept { g_xrEarlyEyes.store(on, std::memory_order_relaxed); }
 bool xr_early_eyes() noexcept { return g_xrEarlyEyes.load(std::memory_order_relaxed) && g_xrEarlyHook != nullptr; }
@@ -689,18 +692,29 @@ void run_xr_early(FramePacket& frame, const XrEarlyEyes& early) {
   if (presubmit) {
     unmap_first_staging(frame);
     const wgpu::CommandBuffer before = frame.encoder.Finish();
+    AtraceScope trace{"Submit before eyes"};
     g_queue.Submit(1, &before);
     constexpr wgpu::CommandEncoderDescriptor EyesDescriptor{.label = "Eyes encoder"};
     frame.encoder = g_device.CreateCommandEncoder(&EyesDescriptor);
   }
-  if (!g_xrEarlyHook(frame.encoder, frame, early))
-    return;
+  {
+    AtraceScope trace{"Eyes: image + encode"};
+    if (!g_xrEarlyHook(frame.encoder, frame, early))
+      return;
+  }
   // Everything so far goes now; the rest of the frame continues in a new
   // encoder (frame.cpp submits it at the end as usual). Its copies come from
   // the first staging buffer, which recording no longer writes.
   unmap_first_staging(frame);
   const wgpu::CommandBuffer commands = frame.encoder.Finish();
-  g_queue.Submit(1, &commands);
+  if (g_xrEarlyAround != nullptr)
+    g_xrEarlyAround(true);
+  {
+    AtraceScope trace{"Submit eyes"};
+    g_queue.Submit(1, &commands);
+  }
+  if (g_xrEarlyAround != nullptr)
+    g_xrEarlyAround(false);
   constexpr wgpu::CommandEncoderDescriptor EncoderDescriptor{.label = "Redraw encoder (after the eyes)"};
   frame.encoder = g_device.CreateCommandEncoder(&EncoderDescriptor);
   frame.xrEyesDone = true;

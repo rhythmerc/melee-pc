@@ -566,9 +566,13 @@ practice](https://martinfullerblog.wordpress.com/2023/10/11/dynamic-resolution-s
   done (less any wait for a swapchain image) and the release slot of the
   ideal latency, a game frame plus one display frame after its tick (25 ms
   at 120 Hz). The target is the frame's GPU time plus what the 5th
-  percentile of recent margins has beyond `AURORA_XR_DYNRES_MARGIN_MS` (1),
-  or less what it lacks. Steps up wait for fresh margins at the new step.
-  Cut only past target + `AURORA_XR_DYNRES_BAND_MS` (0.5).
+  percentile of recent margins has beyond `AURORA_XR_DYNRES_MARGIN_MS` (3;
+  1 until the deferred eyes, below), or less what it lacks. Steps up wait
+  for fresh margins at the new step. Cut only past target +
+  `AURORA_XR_DYNRES_BAND_MS` (0.5). The brake: more than 2 frames done over a
+  millisecond after their release within 2 s, above the lowest step, and the
+  scale drops a step and stays at or under it for 15 s (30, then 60 if it
+  brakes again meanwhile); the stats line counts brakes.
   `AURORA_XR_DYNRES_TARGET_MS` pins the target. Before margins come in, the
   target is the game frame's GPU share: 1000/60 ms less the compositor's GPU
   time over the display frames it spans (`XR_META_performance_metrics`)
@@ -778,6 +782,42 @@ What changed instead:
 - **Spike log:** frames done after the slot they're released in are logged
   on their own line, "Frames done after their slot", each hop in ms after
   the tick; the pacing summary counts those over a millisecond late.
+- **Deferred eyes** (`AURORA_XR_DEFER_EYES`, on on Android with early eyes):
+  the eyes' encoding and Dawn's translation (about 2.5 ms) no longer wait
+  for the image. Acquiring an image needn't wait for the last one's release,
+  only waiting on it does, so the XR thread acquires the next 3D image as
+  soon as it may. The render worker draws the eyes into it, Dawn translates
+  them with its flush held (`HoldQueueFlush`, in our Dawn fork), and the
+  flush goes once the XR thread has waited the image, after the last
+  frame's release, so the release order above holds. Eyes now reach the GPU
+  at about 17.2 ms after the tick at latency 4 (19-20 before) and are done
+  1.5-4 ms sooner.
+
+  The first runs got worse, not better: dynamic resolution spent the margin
+  at once (scale 1.06-1.20) and frames spiked past their slots (four-CPU
+  Stadium rock 2.23 stale frames a second against 1.28 without). With 3 ms
+  wanted and the brake (dynamic resolution, above), one run each, stale
+  frames a second (late frames per 40 s, scale):
+
+  | Stage | Before | Deferred, old DR | Deferred, new DR |
+  |---|---|---|---|
+  | Stadium rock, 4 CPUs | 1.28 (18, 1.05) | 2.23 (53, 1.20) | 0.68 (15, 1.10) |
+  | Mute City, 4 CPUs | 0.76 (28, 1.02) | 1.03 (18, 1.12) | 0.67 (29, 1.06) |
+  | Brinstar Depths, 4 CPUs | 0.59 (78, 1.00) | 0.82 (37, 1.06) | 0.38 (5, 1.01) |
+  | Battlefield, 2 CPUs | | | 0.28 (1, 1.30) |
+
+  Mute City ran at latency 3 for half its run (GPU done 18-20 ms after the
+  tick) and Battlefield's frames are done at 18.
+- **Trace markers:** the render worker's steps ("Submit before eyes",
+  "Eyes: image + encode", "Submit eyes", "Flush eyes", "Submit frame"), the
+  XR thread's frame calls and image waits, and counters for ticks, 3D
+  releases and each frame's GPU done after its tick show up in a Perfetto
+  trace with `atrace_apps: "dev.melee.game:xr"` (the process's name). A
+  trace of four-CPU Stadium rock showed Dawn's submits at 1-1.5 ms with
+  nearly no time waiting for a CPU; the stale frames came from the runtime
+  holding `xrWaitFrame` for a display frame (about 8 times in 30 s, half
+  with no late frame near) and from frames whose image came after the
+  render worker gave up waiting (the eyes then drawn at the frame's end).
 
 ### CPU level
 
@@ -1262,7 +1302,8 @@ build uses the same package id as the flat build, so it replaces it on the
 device.
 
 `MELEE_XR=1` builds Dawn from source, from the fork at
-[rhythmerc/dawn](https://github.com/rhythmerc/dawn), branch `melee-xr`.
+[rhythmerc/dawn](https://github.com/rhythmerc/dawn), branch `melee-xr`
+(`HoldQueueFlush` since b93f0f2c).
 - **Which checkout:** `MELEE_DAWN_SOURCE` if set, else `~/projects/dawn` if
   it exists, else the pinned commit (`MELEE_DAWN_REF`), cloned into
   `build/dawn-src` with its dependencies.
@@ -1328,13 +1369,14 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_LOG_PERIOD` | 10 | Seconds between the GPU timing and dynamic resolution log lines |
 | `AURORA_XR_DYNRES_TARGET_MS` | deadline-derived | Pins dynamic resolution's frame GPU aim (Android) |
 | `AURORA_XR_DYNRES_MIN` / `_MAX` | 1.0 / 1.3 | Dynamic resolution's scale range |
-| `AURORA_XR_DYNRES_MARGIN_MS` | 1 | Margin dynamic resolution keeps before the ideal latency's slot |
+| `AURORA_XR_DYNRES_MARGIN_MS` | 3 | Margin dynamic resolution keeps before the ideal latency's slot |
 | `AURORA_XR_DYNRES_HEADROOM_MS` | 1.2 | Margin left under the game frame's GPU share |
 | `AURORA_XR_DYNRES_BAND_MS` | 0.5 | How far past the aim a frame goes before the scale is cut |
 | `AURORA_XR_FIXED_LATENCY` | adaptive | Display frames from tick to release; 0 turns fixed-latency presentation off |
 | `AURORA_XR_RELEASE_DONE` | 0 | Hand 3D images to the runtime only once their GPU work is done (Android; drops frames) |
 | `AURORA_XR_EARLY_EYES` | 1 (Android) | Submit the eyes as soon as a fight frame's world is recorded |
 | `AURORA_XR_PRESUBMIT` | 1 | Early eyes: submit the work before the eyes (shadows, copies) before waiting for the 3D image |
+| `AURORA_XR_DEFER_EYES` | 1 (Android) | Early eyes: draw into the next 3D image before it's waited on, translate with Dawn's flush held, flush once it's waited |
 | `AURORA_VTX_CACHE` | 1 | Keep decoded vertices across frames (with `AURORA_VTX_DECODE`) |
 | `AURORA_TEX_HASH_MEMO` | 1 | Reuse texture content hashes within a frame |
 | `AURORA_PIPELINE_INLINE` | 0 | Compile pipelines on the render thread instead of the compile thread |

@@ -64,7 +64,11 @@ struct XrReplayTarget {
 using XrEarlyHook = bool (*)(const wgpu::CommandEncoder& cmd, detail::FramePacket& frame,
                              const detail::XrEarlyEyes& early);
 using XrEarlySubmitted = void (*)(detail::FramePacket& frame);
-void set_xr_early_hooks(XrEarlyHook hook, XrEarlySubmitted submitted) noexcept;
+// Around the eyes' submit: `true` just before, `false` just after. The XR
+// side may hold Dawn's flush there, so the eyes are translated before their
+// image is free and reach the GPU once it is.
+using XrEarlyAroundSubmit = void (*)(bool before);
+void set_xr_early_hooks(XrEarlyHook hook, XrEarlySubmitted submitted, XrEarlyAroundSubmit around) noexcept;
 void set_xr_early_eyes(bool on) noexcept;
 bool xr_early_eyes() noexcept;
 // Render worker: the early eyes' step, queued by recording.cpp after the

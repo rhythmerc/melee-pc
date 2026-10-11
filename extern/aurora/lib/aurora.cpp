@@ -4,6 +4,7 @@
 
 #ifdef AURORA_ENABLE_GX
 #include "gfx/resources.hpp"
+#include "gfx/atrace.hpp"
 #include "gfx/frame.hpp"
 #include "gfx/recording.hpp"
 #include "gfx/render_worker.hpp"
@@ -489,6 +490,7 @@ void end_frame() noexcept {
     const auto buffer = encoder.Finish(&cmdBufDescriptor);
     {
       ZoneScopedN("Queue Submit");
+      gfx::AtraceScope trace{"Submit frame"};
       g_queue.Submit(1, &buffer);
     }
     webgpu::gpu_prof::after_submit();

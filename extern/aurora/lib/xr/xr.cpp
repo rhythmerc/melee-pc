@@ -16,6 +16,8 @@
 #define VK_USE_PLATFORM_ANDROID_KHR
 #define XR_USE_PLATFORM_ANDROID
 #include <android/hardware_buffer.h>
+#include <android/trace.h>
+#include <dlfcn.h>
 #include <jni.h>
 #endif
 #define XR_USE_GRAPHICS_API_VULKAN
@@ -119,6 +121,7 @@ struct Slot {
   std::array<int32_t, 2> rect{};  // Stereo, dynamic resolution: the rendered size (0: all)
   uint64_t tickFrame = 0;         // lock-step: the display frame of the tick that started its game frame
   uint64_t readySeen = 0;         // XR thread: the display frame it was first seen Ready (0: not yet)
+  bool claimed = false;           // Acquired, and the render worker took it before it was waited (g_deferEyes)
 
   // XR thread only.
   VkCommandBuffer cmd = VK_NULL_HANDLE;
@@ -164,6 +167,15 @@ std::atomic<bool> g_sessionRunning{false};
 std::thread g_thread;
 std::array<Stream, kStreamCount> g_streams;
 
+// Early eyes translated before their image is free (AURORA_XR_DEFER_EYES,
+// on on Android): the XR thread acquires the next 3D image as soon as one
+// may be, before it may be waited on; the render worker draws into it, Dawn
+// translates the eyes with its flush held, and they reach the GPU once the
+// XR thread has waited the image (after the last frame's release). At
+// latency 4 the eyes' encoding and translation (about 2.5 ms) had come
+// after the image, in the 16.7 ms the eyes have between two releases.
+std::atomic<bool> g_deferEyes{false};
+
 // Dynamic resolution (AURORA_XR_DYNRES=1, multiview only): the stereo
 // swapchain is made at the largest scale, and each frame renders a corner of
 // it at `scale` times the runtime's recommended eye size, reported to the
@@ -206,7 +218,7 @@ struct DynamicResolution {
   double bandNs = 0.5e6;    // hysteresis: down only past target + band, up to the target
   double emaNs = 0;         // frame GPU time at the current step, this visit
   double spanNs = 0;        // frame GPU time, running across steps
-  double wantMarginNs = 1.0e6;             // AURORA_XR_DYNRES_MARGIN_MS
+  double wantMarginNs = 3.0e6;             // AURORA_XR_DYNRES_MARGIN_MS
   std::array<float, 120> margins{};       // ns before the ideal slot, this step
   size_t marginCount = 0, marginNext = 0;
   double marginNs = 0;                    // their 5th percentile (with 30 or more)
@@ -220,6 +232,13 @@ struct DynamicResolution {
   uint32_t pipelinesSeen = 0; // gfx::pipelines_created() last frame
   int compileQuiet = 0;       // frames since a pipeline was last created
   std::array<uint64_t, 4> recentMisses{};
+  // The brake: frames done late (g_lateFrames), by frameCount; too many and
+  // the scale goes down a step and stays at or under it for a while.
+  std::array<uint64_t, 4> recentLate{};
+  uint32_t recentLateIndex = 0, lateFramesSeen = 0;
+  int ceiling = INT32_MAX;          // highest step allowed until ceilingUntil
+  std::chrono::steady_clock::time_point ceilingUntil{};
+  int brakes = 0, brakesSinceLog = 0; // in a row (for the hold's length); logged
   uint32_t recentIndex = 0;
   uint64_t frameCount = 0;
   std::chrono::steady_clock::time_point lastFrame{};
@@ -837,7 +856,7 @@ bool size_stereo_stream() {
 #endif
   if (dr.on) {
     dr.minScale = std::clamp(env_float("AURORA_XR_DYNRES_MIN", 1.f), 0.5f, 1.f);
-    dr.wantMarginNs = std::clamp(env_float("AURORA_XR_DYNRES_MARGIN_MS", 1.f), 0.f, 8.f) * 1.0e6;
+    dr.wantMarginNs = std::clamp(env_float("AURORA_XR_DYNRES_MARGIN_MS", 3.f), 0.f, 8.f) * 1.0e6;
     dr.maxScale = std::clamp(env_float("AURORA_XR_DYNRES_MAX", 1.3f), 1.f, 1.6f);
     // The target follows the display and the compositor (DynamicResolution);
     // AURORA_XR_DYNRES_TARGET_MS pins it instead.
@@ -1183,6 +1202,25 @@ void retire_slot(Stream& st, Slot& s, int index) {
   }
 }
 
+#ifdef __ANDROID__
+// A systrace counter (ATrace_setCounter: Android 29, past the app's minimum).
+void trace_counter(const char* name, int64_t value) {
+  using SetCounter = void (*)(const char*, int64_t);
+  static const auto set = reinterpret_cast<SetCounter>(dlsym(RTLD_DEFAULT, "ATrace_setCounter"));
+  if (set != nullptr)
+    set(name, value);
+}
+struct TraceSection {
+  explicit TraceSection(const char* name) { ATrace_beginSection(name); }
+  ~TraceSection() { ATrace_endSection(); }
+};
+#else
+void trace_counter(const char*, int64_t) {}
+struct TraceSection {
+  explicit TraceSection(const char*) {}
+};
+#endif
+
 // Keeps one waited-on image ready for the render worker. OpenXR allows one
 // waited image per swapchain until it is released, so the next is waited on
 // only once the last went back. The wait is short: an image the compositor
@@ -1202,28 +1240,36 @@ bool acquire_ahead(Stream& st) {
         ++held;
     }
   }
-  if (haveWaited)
-    return true;
-  if (pending < 0) {
-    if (held >= st.slots.size())
-      return true;
+  // Acquiring needn't wait for the last image's release, only waiting on
+  // it does; deferred eyes draw into it in between.
+  const bool preAcquire = g_deferEyes && &st == &g_streams[kStereo];
+  if (pending < 0 && held < st.slots.size() && (!haveWaited || preAcquire)) {
     uint32_t index = 0;
     XR_TRY(xrAcquireSwapchainImage(st.swapchain, nullptr, &index));
     std::lock_guard lock{g_mutex};
     st.slots[index].state = SlotState::Acquired;
     st.slots[index].acquireSeq = ++st.acquireSeq;
+    st.slots[index].claimed = false;
     pending = static_cast<int>(index);
+    g_slotFreeCv.notify_all();
   }
+  if (haveWaited || pending < 0)
+    return true;
   XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
   wi.timeout = 2'000'000; // 2 ms
+  TraceSection trace{&st == &g_streams[kStereo] ? "Wait 3D image" : "Wait image"};
   const XrResult r = xrWaitSwapchainImage(st.swapchain, &wi);
+  if (r == XR_SUCCESS && &st == &g_streams[kStereo])
+    trace_counter("XR 3D image waited", static_cast<int64_t>(st.acquireSeq & 1));
   if (r == XR_TIMEOUT_EXPIRED)
     return true;
   XR_TRY(r);
   retire_slot(st, st.slots[pending], pending);
   {
     std::lock_guard lock{g_mutex};
-    st.slots[pending].state = SlotState::Free;
+    auto& sl = st.slots[pending];
+    sl.state = sl.claimed ? SlotState::Rendering : SlotState::Free;
+    sl.claimed = false;
   }
   g_slotFreeCv.notify_all();
   return true;
@@ -1265,6 +1311,9 @@ struct Presentation {
 // Frames whose eyes went early, and of those, drawn again at the frame's end
 // (world draws after the split); logged with the frame stats.
 std::atomic<uint32_t> g_earlyEyes{0}, g_earlyResumed{0};
+// 3D frames done over 1 ms after the slot they're released in, so far
+// (pacing probe; dynamic resolution's brake).
+std::atomic<uint32_t> g_lateFrames{0};
 // Render worker: the longest wait for a swapchain image, and waits over 2 ms,
 // per stream (read racily by the frame stats).
 std::array<int64_t, 3> g_acquireWaitMaxNs{};
@@ -1305,6 +1354,7 @@ struct PaceProbe {
   bool started = false;
 } g_pace;
 
+
 int64_t monotonic_ns() { return std::chrono::steady_clock::now().time_since_epoch().count(); }
 
 void pace_display(uint64_t frame, XrTime displayTime) {
@@ -1344,6 +1394,7 @@ void pace_watch() {
       if (p.ns[m] != 0)
         g_pace.ms[m].push_back(static_cast<float>(p.ns[m] - tick.waitNs) / 1e6f);
     g_pace.ms[PaceProbe::Done].push_back(static_cast<float>(doneNs - tick.waitNs) / 1e6f);
+    trace_counter("XR 3D done after tick (us)", (doneNs - tick.waitNs) / 1000);
     // The first display frame whose loop could release it finished (half a
     // millisecond of slack): fixed-latency presentation's sample. Less the
     // render worker's wait for a free image, which the latency itself
@@ -1367,6 +1418,8 @@ void pace_watch() {
           std::min(slot - static_cast<double>(doneNs - p.slotWaitNs), releaseSlot - static_cast<double>(doneNs))));
     const bool late = static_cast<double>(doneNs) > releaseSlot + 1e6;
     g_pace.lateFrames += late ? 1 : 0;
+    if (late)
+      g_lateFrames.fetch_add(1, std::memory_order_relaxed);
     if (g_pace.lateness.size() < 256)
       g_pace.lateness.emplace_back(static_cast<uint8_t>(p.latency), late);
     // A spike: done after the slot it's released in. Each hop, ms after the tick.
@@ -1671,6 +1724,8 @@ bool release_ready(Stream& st, bool& released) {
     si.pCommandBuffers = &s.cmd;
     VK_TRY(vkQueueSubmit(B.queue, 1, &si, s.fence));
     s.inFlight = true;
+    if (&st == &g_streams[kStereo])
+      trace_counter("XR 3D released", static_cast<int64_t>(st.releases & 1));
     XR_TRY(xrReleaseSwapchainImage(st.swapchain, nullptr));
     {
       std::lock_guard lock{g_mutex};
@@ -2994,7 +3049,10 @@ void sync_boundary() {
 
 bool render_xr_frame() {
   XrFrameState fs{XR_TYPE_FRAME_STATE};
-  XR_TRY(xrWaitFrame(B.session, nullptr, &fs));
+  {
+    TraceSection trace{"xrWaitFrame"};
+    XR_TRY(xrWaitFrame(B.session, nullptr, &fs));
+  }
   B.loopWaitNs = monotonic_ns();
   if (B.loopLastWaitNs != 0) {
     const int64_t gap = B.loopWaitNs - B.loopLastWaitNs;
@@ -3008,6 +3066,9 @@ bool render_xr_frame() {
       std::lock_guard lock{g_paceMutex};
       ++g_paceTick;
       g_lastTickFrame = B.displayFrame;
+#ifdef __ANDROID__
+      trace_counter("XR tick", static_cast<int64_t>(B.displayFrame & 1)); // lines traces up with ticks
+#endif
     }
     g_paceCv.notify_all();
   }
@@ -3044,7 +3105,10 @@ bool render_xr_frame() {
     mark = t;
   };
   B.sectionNs = {};
-  XR_TRY(xrBeginFrame(B.session, nullptr));
+  {
+    TraceSection trace{"xrBeginFrame"};
+    XR_TRY(xrBeginFrame(B.session, nullptr));
+  }
   section(0);
 
   const auto now = std::chrono::steady_clock::now();
@@ -3195,7 +3259,10 @@ bool render_xr_frame() {
     B.loopOver4 += now - B.loopWaitNs > 4000000 ? 1 : 0;
     B.leadMinNs = std::min(B.leadMinNs, static_cast<int64_t>(fs.predictedDisplayTime) - now);
   }
-  XR_TRY(xrEndFrame(B.session, &fei));
+  {
+    TraceSection trace{"xrEndFrame"};
+    XR_TRY(xrEndFrame(B.session, &fei));
+  }
   section(8);
   if (monotonic_ns() - B.loopWaitNs > 4000000) {
     int worst = 0;
@@ -3500,24 +3567,34 @@ bool wrap_swapchains_into_dawn() {
 
 // The oldest image the XR thread has ready, so images come back in the
 // order they were acquired.
-int take_slot_locked(Stream& st) {
+int take_slot_locked(Stream& st, bool unwaited = false) {
   int best = -1;
   for (int i = 0; i < static_cast<int>(st.slots.size()); ++i)
     if (st.slots[i].state == SlotState::Free &&
         (best < 0 || st.slots[i].acquireSeq < st.slots[best].acquireSeq))
       best = i;
+  if (best < 0 && unwaited)
+    for (int i = 0; i < static_cast<int>(st.slots.size()); ++i)
+      if (st.slots[i].state == SlotState::Acquired && !st.slots[i].claimed)
+        best = i;
   return best;
 }
 
 // Waits up to `wait` for the XR thread to line up an image: it releases the
 // previous one and acquires the next on its display-frame loop, which can
 // land just after the render worker asks.
-wgpu::Texture acquire_slot(Stream& st, std::chrono::milliseconds wait = std::chrono::milliseconds(10)) {
+// `unwaited`: may take an image acquired but not yet waited (g_deferEyes);
+// its contents may be written by the GPU only after await_slot_waited.
+bool g_slotUnwaited = false; // render worker: the slot just taken wasn't waited
+
+wgpu::Texture acquire_slot(Stream& st, std::chrono::milliseconds wait = std::chrono::milliseconds(10),
+                           bool unwaited = false) {
   int index;
   {
     const int64_t start = monotonic_ns();
     std::unique_lock lock{g_mutex};
-    g_slotFreeCv.wait_for(lock, wait, [&] { return take_slot_locked(st) >= 0 || g_phase != Phase::Imported; });
+    g_slotFreeCv.wait_for(lock, wait,
+                          [&] { return take_slot_locked(st, unwaited) >= 0 || g_phase != Phase::Imported; });
     const int64_t waited = monotonic_ns() - start;
     if (&st == &g_streams[kStereo])
       g_pace.slotWaitNs = waited;
@@ -3526,10 +3603,14 @@ wgpu::Texture acquire_slot(Stream& st, std::chrono::milliseconds wait = std::chr
     most = std::max<int64_t>(most, waited);
     if (waited > 2000000)
       ++g_acquireWaitsOver2[&st - g_streams.data()];
-    index = take_slot_locked(st);
+    index = take_slot_locked(st, unwaited);
     if (index < 0)
       return {};
-    st.slots[index].state = SlotState::Rendering;
+    g_slotUnwaited = st.slots[index].state == SlotState::Acquired;
+    if (g_slotUnwaited)
+      st.slots[index].claimed = true;
+    else
+      st.slots[index].state = SlotState::Rendering;
   }
   Slot& s = st.slots[index];
   // xrWaitSwapchainImage already returned: no fences. The contents are not
@@ -3550,6 +3631,27 @@ wgpu::Texture acquire_slot(Stream& st, std::chrono::milliseconds wait = std::chr
   }
   st.renderingSlot = index;
   return s.texture;
+}
+
+// Render worker: until the XR thread has waited the image it took unwaited
+// (acquire_slot), counted as this frame's wait for an image.
+void await_slot_waited(Stream& st) {
+  if (!g_slotUnwaited || st.renderingSlot < 0)
+    return;
+  const int64_t start = monotonic_ns();
+  std::unique_lock lock{g_mutex};
+  g_slotFreeCv.wait(lock, [&] {
+    return st.slots[st.renderingSlot].state != SlotState::Acquired || g_phase != Phase::Imported;
+  });
+  g_slotUnwaited = false;
+  const int64_t waited = monotonic_ns() - start;
+  if (&st == &g_streams[kStereo]) {
+    g_pace.slotWaitNs += waited;
+    auto& most = g_acquireWaitMaxNs[kStereo];
+    most = std::max<int64_t>(most, waited);
+    if (waited > 2000000)
+      ++g_acquireWaitsOver2[kStereo];
+  }
 }
 
 void release_slot(Stream& st, const std::array<XrView, 2>* views, std::array<int32_t, 2> rect = {},
@@ -3773,6 +3875,7 @@ struct Renderer3D {
   // A fight frame that found no free 3D image: the headset keeps the last
   // one, and the flat frame is still nobody's to see.
   bool missedStereo = false;
+  bool early = false; // render_eyes runs for the early eyes (early_eyes)
   uint32_t directSamples = 0; // g_xrSamples the direct attachments were made for
   std::array<int32_t, 2> renderedRect{}; // dynamic resolution: this frame's eye size (0: all)
   uint64_t renderedTick = 0;              // the frame's pacing tick (FramePacket::xrTickFrame)
@@ -4383,8 +4486,35 @@ void update_dynamic_resolution(bool missed) {
       if (!panic)
         ++dr.loneMisses;
     }
+    // The brake. Wanting 1 ms of margin at the 5th percentile, the scale
+    // climbed into the frames' tail: with eyes deferred on four-fighter
+    // Stadium rock it went to 1.20 and stale frames rose from 1.3 a second
+    // to 2.2. More than 2 frames over a millisecond late within 2 s, above
+    // the lowest step, and the scale goes down a step and holds there for
+    // 15 s (30, 60 if it brakes again within that).
+    bool brake = false;
+    if (const uint32_t lateNow = g_lateFrames.load(std::memory_order_relaxed); lateNow != dr.lateFramesSeen) {
+      for (uint32_t i = dr.lateFramesSeen; i != lateNow; ++i)
+        dr.recentLate[dr.recentLateIndex++ % dr.recentLate.size()] = dr.frameCount;
+      dr.lateFramesSeen = lateNow;
+      int recent = 0;
+      for (uint64_t f : dr.recentLate)
+        recent += f != 0 && dr.frameCount - f < 240 ? 1 : 0;
+      if (recent > 2 && dr.level > 0) {
+        brake = true;
+        std::fill(dr.recentLate.begin(), dr.recentLate.end(), 0);
+        const int held = now < dr.ceilingUntil ? std::min(dr.brakes + 1, 2) : 0;
+        dr.brakes = held;
+        dr.ceiling = dr.level - 1;
+        dr.ceilingUntil = now + std::chrono::seconds(15 << held);
+        ++dr.brakesSinceLog;
+      }
+    }
+    const int ceiling = now < dr.ceilingUntil ? dr.ceiling : INT32_MAX;
     int next = dr.level;
-    if (panic) {
+    if (brake) {
+      next = dr.level - 1;
+    } else if (panic) {
       // This step is dearer than it measured: remembered past the band.
       auto& c = costs[dr.level];
       c.ns = std::max(c.ns, dr.targetNs + dr.bandNs - dr.restNs) + 0.5e6;
@@ -4412,6 +4542,8 @@ void update_dynamic_resolution(bool missed) {
         next = dr.level + 1;
       }
     }
+    if (next > dr.level)
+      next = std::min(next, std::max(ceiling, dr.level));
     next = std::clamp(next, 0, levels - 1);
     if (next != dr.level) {
       dr.level = next;
@@ -4449,15 +4581,16 @@ void update_dynamic_resolution(bool missed) {
       }
       Log.info("Dynamic resolution: scale {:.2f} average ({:.2f}-{:.2f}); frame GPU {:.1f} ms average against "
                "{:.1f} (margin to the ideal slot {:.1f} ms at 5%), {:.1f} of it outside the eyes; {} panics, "
-               "{} lone misses; {} images held long; {} timings ({} settling, {} compiling, {} spikes or bogus left out); "
+               "{} lone misses; {} brakes for late frames; {} images held long; {} timings ({} settling, {} compiling, {} spikes or bogus left out); "
                "eye pass costs{}",
                dr.scaleSum / dr.frames, dr.lowest, dr.highest, dr.nsFrames ? dr.nsSum / dr.nsFrames / 1.0e6 : 0.0,
                dr.targetNs / 1.0e6, dr.haveMargin ? dr.marginNs / 1.0e6 : 0.0, dr.restNs / 1.0e6,
-               dr.panics, dr.loneMisses, dr.lateImages, dr.readings, dr.skipSettle, dr.skipCompile, dr.skipSpike,
+               dr.panics, dr.loneMisses, dr.brakesSinceLog, dr.lateImages, dr.readings, dr.skipSettle, dr.skipCompile, dr.skipSpike,
                table);
     }
     dr.scaleSum = dr.nsSum = 0;
     dr.frames = dr.nsFrames = dr.panics = dr.loneMisses = dr.lateImages = 0;
+    dr.brakesSinceLog = 0;
     dr.readings = dr.skipSettle = dr.skipCompile = dr.skipSpike = 0;
     dr.lowest = 99.f;
     dr.highest = 0.f;
@@ -4593,7 +4726,7 @@ bool render_eyes(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& fram
       const int64_t deadline = tickNs + static_cast<int64_t>((g_present.latency - 1) * 1e9 / hz);
       wait = std::max(wait, std::chrono::milliseconds((deadline - monotonic_ns()) / 1000000));
     }
-    if (auto dst = acquire_slot(stereo, wait)) {
+    if (auto dst = acquire_slot(stereo, wait, R.early && g_deferEyes)) {
       gfx::XrReplayTarget t;
       t.layout = layout;
       t.size = {stereo.width, stereo.height, 1};
@@ -4690,10 +4823,30 @@ bool early_eyes(const wgpu::CommandEncoder& cmd, gfx::detail::FramePacket& frame
   R.renderedRect = {};
   R.renderedTick = frame.xrTickFrame;
   pace_frame(frame.xrRecordStartNs, frame.xrWorldEndNs, 0, 0); // recording goes on
-  return render_eyes(cmd, frame, early.transforms, &early.passes) && R.renderedStereo;
+  R.early = true;
+  const bool drawn = render_eyes(cmd, frame, early.transforms, &early.passes) && R.renderedStereo;
+  R.early = false;
+  return drawn;
+}
+
+// Around the early eyes' submit: with their image taken before it was
+// waited (g_deferEyes), Dawn translates them with its flush held, and the
+// flush goes once the XR thread has waited the image.
+void early_around_submit(bool before) {
+  if (!g_slotUnwaited)
+    return;
+  if (before) {
+    dawn::native::vulkan::HoldQueueFlush(webgpu::g_device.Get(), true);
+    return;
+  }
+  await_slot_waited(g_streams[kStereo]);
+  TraceSection trace{"Flush eyes"};
+  if (!dawn::native::vulkan::HoldQueueFlush(webgpu::g_device.Get(), false))
+    Log.error("Submitting the held eyes failed");
 }
 
 void early_submitted(gfx::detail::FramePacket&) {
+  await_slot_waited(g_streams[kStereo]); // not held after all: never release an image not waited
   release_slot(g_streams[kStereo], &R.renderedViews, R.renderedRect, R.renderedTick);
   ++g_earlyEyes;
 }
@@ -4856,8 +5009,10 @@ wgpu::Texture begin_frame(uint32_t width, uint32_t height) noexcept {
 #else
     constexpr bool kEarlyEyesDefault = false;
 #endif
-    gfx::set_xr_early_hooks(&early_eyes, &early_submitted);
-    gfx::set_xr_early_eyes(g_multiview && env_flag("AURORA_XR_EARLY_EYES", kEarlyEyesDefault));
+    gfx::set_xr_early_hooks(&early_eyes, &early_submitted, &early_around_submit);
+    const bool earlyEyes = g_multiview && env_flag("AURORA_XR_EARLY_EYES", kEarlyEyesDefault);
+    gfx::set_xr_early_eyes(earlyEyes);
+    g_deferEyes = earlyEyes && env_flag("AURORA_XR_DEFER_EYES", kEarlyEyesDefault);
     g_phase = Phase::Imported;
     phase = Phase::Imported;
   }
