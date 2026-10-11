@@ -313,8 +313,10 @@ and the investigation behind it are in docs/xr-3d-plan.md.
       slack's edge, which felt stiff; the Mushroom Kingdom course also has
       more slack (60 x 35). Not the Home-Run Contest's: the bag outran the
       easing into the window's dissolving sides.
-    - **Underground Maze:** its window is lower (80 units up and down), so
-      the corridor above doesn't float over the one you're in. In its
+    - **Underground Maze:** its window is low (65 units up and down,
+      fading over 10) and sits 20 units below the camera's focus while
+      following (`drop`), so no sliver of the corridor above floats over the
+      one you're in. In its
       platform fights the game locks its camera on the platform
       (`grshrineroute.c`: `Camera_80030AE0(0)` and the camera's target on
       the platform); the window then sits still on that target and zooms in

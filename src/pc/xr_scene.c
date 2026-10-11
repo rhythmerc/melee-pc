@@ -436,6 +436,7 @@ typedef struct {
      * its box shrunk to match so its footprint stays. 0: never. */
     float lock_zoom;
     bool hud_on_top; /* scenery reaches the HUD's height (aurora_xr_set_hud_on_top) */
+    float drop;      /* the window's center this far below where it follows (not when locked) */
 } FollowRule;
 
 static const FollowRule s_follows[] = {
@@ -445,8 +446,9 @@ static const FollowRule s_follows[] = {
     {.grkind = 0x1F, /* Mushroom Kingdom */
      .half = {160.f, 110.f, 80.f}, .slack = {60.f, 35.f}, .fade = {25.f, 25.f, 25.f}, .ease = 0.35f},
     {.grkind = 0x20, /* Underground Maze: the scenery reaches the HUD. Low,
-                      * so the corridor above doesn't float over this one. */
-     .half = {160.f, 80.f, 80.f}, .slack = {40.f, 30.f}, .fade = {25.f, 25.f, 25.f}, .ease = 0.3f,
+                      * and cut close top and bottom, so no sliver of the
+                      * corridor above floats over this one. */
+     .half = {160.f, 65.f, 80.f}, .slack = {40.f, 30.f}, .fade = {25.f, 10.f, 25.f}, .ease = 0.3f, .drop = 20.f,
      .lock_zoom = 1.4f, .hud_on_top = true},
     {.grkind = 0x21, /* Escape from Brinstar */
      .half = {160.f, 110.f, 80.f}, .slack = {40.f, 30.f}, .fade = {25.f, 25.f, 25.f}, .ease = 0.25f},
@@ -840,8 +842,9 @@ static void follow_update(void) {
     }
     /* Eased toward the target, at 60 frames a second. */
     const float step = s_follow->ease > 0.f ? 1.f - expf(-1.f / (60.f * s_follow->ease)) : 1.f;
+    const float goal[2] = {s_follow_target[0], s_follow_target[1] - (locked ? 0.f : s_follow->drop)};
     for (int k = 0; k < 2; k++) {
-        s_follow_center[k] += (s_follow_target[k] - s_follow_center[k]) * step;
+        s_follow_center[k] += (goal[k] - s_follow_center[k]) * step;
     }
     const float zoom = locked ? s_follow->lock_zoom : 1.f;
     if (s_follow_zoom != zoom) {
