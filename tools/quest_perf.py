@@ -18,6 +18,13 @@ the launcher's own launcher.cfg (debug builds only: run-as), or MELEE_DISC.
 With more than one adb device and no ANDROID_SERIAL, the first device listed
 by address is used: a wireless headset shows up under both its address and
 its mDNS name.
+
+Headset power: a run wakes the headset (reconnecting wireless adb if it
+dropped while asleep), reports proximity closed and sets a 30-minute screen
+timeout, so it stays on unworn. When the run ends, failed or not, it stops the
+game, deletes the run files, hands proximity back to the sensor and sets the
+usual 60-second timeout, so the headset sleeps until the next run wakes it.
+--keep skips that.
 """
 import argparse
 import os
@@ -49,6 +56,42 @@ def pick_device():
         sys.exit("no adb device")
     by_addr = [d for d in devs if re.match(r"^\d+\.\d+\.\d+\.\d+:\d+$", d)]
     os.environ["ANDROID_SERIAL"] = (by_addr or devs)[0]
+
+
+RUN_SCREEN_TIMEOUT_MS = 1800000  # during a run: the display stays on unworn
+IDLE_SCREEN_TIMEOUT_MS = 60000   # after it: the headset's usual
+
+
+def wake_headset(tries=24):
+    """Reconnects wifi adb if it dropped while the headset slept, then wakes
+    it (proximity reported closed, a wake key) until it says it's awake."""
+    serial = os.environ.get("ANDROID_SERIAL", "")
+    for _ in range(tries):
+        state = subprocess.run(["adb", "get-state"], text=True, capture_output=True)
+        if state.stdout.strip() != "device":
+            if ":" in serial:
+                subprocess.run(["adb", "disconnect", serial], capture_output=True)
+                subprocess.run(["adb", "connect", serial], capture_output=True, timeout=20)
+            time.sleep(5)
+            continue
+        power = subprocess.run(["adb", "shell", "dumpsys power | grep mWakefulness="], text=True,
+                               capture_output=True, timeout=20).stdout
+        if "Awake" in power:
+            return
+        subprocess.run(["adb", "shell", "am broadcast -a com.oculus.vrpowermanager.prox_close >/dev/null; "
+                        "input keyevent KEYCODE_WAKEUP"], capture_output=True, timeout=20)
+        time.sleep(5)
+    sys.exit("the headset didn't wake")
+
+
+def hand_back():
+    """After a run: the game stopped, its run files gone, proximity back to
+    the sensor and the usual screen timeout, so the unworn headset sleeps.
+    The next run wakes it (wake_headset)."""
+    adb("shell", "am", "force-stop", PKG, check=False)
+    adb("shell", "rm", "-f", ENV_FILE, CTL_FILE, check=False)
+    adb("shell", "am", "broadcast", "-a", "com.oculus.vrpowermanager.automation_disable", check=False)
+    adb("shell", "settings", "put", "system", "screen_off_timeout", str(IDLE_SCREEN_TIMEOUT_MS), check=False)
 
 
 def shell_write(path, text):
@@ -146,6 +189,14 @@ def view_coverage():
 
 
 def run(args):
+    try:
+        run_phases(args)
+    finally:
+        if not args.keep:
+            hand_back()
+
+
+def run_phases(args):
     phases = []
     for p in args.phases.split(","):
         mode, secs = p.split(":")
@@ -175,12 +226,12 @@ def run(args):
     disc = disc_uri()
     if "AURORA_XR_DUMP" in env:
         adb("shell", "mkdir", "-p", env["AURORA_XR_DUMP"])
+    wake_headset()
     shell_write(ENV_FILE, "".join(f"{k}={v}\n" for k, v in env.items()))
     shell_write(CTL_FILE, phases[0][0] + "\n")
-    # Wake the headset if it went to sleep, and keep the display running with
-    # nobody wearing it.
-    adb("shell", "input", "keyevent", "KEYCODE_WAKEUP")
+    # Keep the display running with nobody wearing it, for the run.
     adb("shell", "am", "broadcast", "-a", "com.oculus.vrpowermanager.prox_close")
+    adb("shell", "settings", "put", "system", "screen_off_timeout", str(RUN_SCREEN_TIMEOUT_MS))
     adb("shell", "am", "force-stop", PKG)
     adb("logcat", "-c")
     adb("shell", "am", "start", "-n", f"{PKG}/dev.melee.MeleeXrActivity", "--es", "disc", disc)
@@ -203,8 +254,6 @@ def run(args):
         with open(path, "w") as f:
             f.write(text)
         print(f"[{mode}] {path}\n{summarize(text)}")
-    if not args.keep:
-        adb("shell", "am", "force-stop", PKG)
 
 
 def main():
@@ -220,7 +269,8 @@ def main():
     r.add_argument("--label", default="run")
     r.add_argument("--no-view-check", dest="view_check", action="store_false",
                    help="skip dumping an eye image to check the stage is in view")
-    r.add_argument("--keep", action="store_true", help="leave the game running afterwards")
+    r.add_argument("--keep", action="store_true",
+                   help="leave the game running and the headset awake afterwards (no hand_back)")
     m = sub.add_parser("mode")
     m.add_argument("mode", choices=["mr", "vr"])
     s = sub.add_parser("summarize")
