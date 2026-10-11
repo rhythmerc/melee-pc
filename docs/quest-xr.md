@@ -285,11 +285,16 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     stage streams in around the camera, out to thousands of units, with the
     stands and sky (part 3, four copies) slid along after it; those are
     hidden. The rest shows through a follow window like Race to the
-    Finish's, but held on the platform (center 0, 40) until the bag leaves
-    it: the stage's distance reading (`Ground_801C57F0`, the bag's travel
-    past the platform's edge) turning positive releases it, and from then
-    on it follows the camera, which follows the bag (`FOLLOW_AFTER_LAUNCH`
-    in `s_follows`; `MELEE_XR_FOLLOW_LOG` logs the window once a second).
+    Finish's, held with the platform at its left (the platform's floor, x
+    -41 to 48, measured from the collision at the top floor's height; its
+    left edge 30 units inside the window's) until the bag (player slot 1)
+    is past the platform's right edge. From then on it follows the camera,
+    which follows the bag, along x only: it never moves up or down, so the
+    field stays in view (`FOLLOW_AFTER_LAUNCH`, a negative y slack in
+    `s_follows`). Front and back are cut solid, the sides dissolve (fades
+    per axis). `MELEE_XR_FOLLOW_LOG` logs the window and the bag. The
+    stage's own distance reading starts at x 67, past the platform's edge.
+    The flat frame shows no barrier around the platform either.
     The distance signs on the field are text drawn through the stage's own
     camera and stay out of the 3D view. Scale 1.
   - **Adventure (2026-10-10):** its fights are on stages done above. Its

@@ -17,6 +17,8 @@
 #include <melee/mp/forward.h>
 #include <melee/mp/mplib.h>
 #include <melee/mp/types.h>
+#include <melee/ft/ftlib.h>
+#include <melee/pl/player.h>
 #include <sysdolphin/baselib/dobj.h>
 #include <sysdolphin/baselib/jobj.h>
 
@@ -405,9 +407,11 @@ static const StagePlacement s_placements[] = {
  * past, so the world doesn't move with every jump. In mixed reality a box
  * `half` units either side of the center (x, y, z) clips everything the 3D
  * view draws, fighters too, dissolving over `fade` units inside it.
- * MELEE_XR_FOLLOW="hx,hy,hz,sx,sy,fade" overrides for the stage played.
- * A rule with `hold` set keeps the window at `start` (x, y) until
- * follow_released says the stage's action has begun, then follows. */
+ * MELEE_XR_FOLLOW="hx,hy,hz,sx,sy,fade" overrides for the stage played
+ * (one fade for all sides). `fade` is per axis (x, y, z): 0 cuts that pair
+ * of sides solid. A negative slack[1] keeps the window's height. A rule
+ * with `hold` set keeps the window at its start until follow_released says
+ * the stage's action has begun, then follows. */
 typedef enum {
     FOLLOW_ALWAYS,
     FOLLOW_AFTER_LAUNCH, /* Home-Run Contest: once the bag has left the platform */
@@ -417,21 +421,23 @@ typedef struct {
     int grkind;
     float half[3];
     float slack[2];
-    float fade;
+    float fade[3];
     FollowHold hold;
-    float start[2];
+    float start[2]; /* a held window's center until the platform is measured (y: always) */
 } FollowRule;
 
 static const FollowRule s_follows[] = {
-    {0x27, {160.f, 110.f, 80.f}, {40.f, 30.f}, 25.f, FOLLOW_ALWAYS, {0.f, 0.f}}, /* Race to the Finish */
+    {0x27, {160.f, 110.f, 80.f}, {40.f, 30.f}, {25.f, 25.f, 25.f}, FOLLOW_ALWAYS, {0.f, 0.f}}, /* Race to the Finish */
     /* Adventure's courses, whose camera follows player one through them. */
-    {0x1F, {160.f, 110.f, 80.f}, {40.f, 30.f}, 25.f, FOLLOW_ALWAYS, {0.f, 0.f}}, /* Mushroom Kingdom */
-    {0x20, {160.f, 110.f, 80.f}, {40.f, 30.f}, 25.f, FOLLOW_ALWAYS, {0.f, 0.f}}, /* Underground Maze */
-    {0x21, {160.f, 110.f, 80.f}, {40.f, 30.f}, 25.f, FOLLOW_ALWAYS, {0.f, 0.f}}, /* Escape from Brinstar */
-    {0x22, {160.f, 110.f, 80.f}, {40.f, 30.f}, 25.f, FOLLOW_ALWAYS, {0.f, 0.f}}, /* F-Zero Grand Prix */
-    /* Home-Run Contest: the platform while the bag is on it; the camera
-     * (which follows the bag) once the bag is past the platform's edge. */
-    {0x43, {160.f, 110.f, 80.f}, {40.f, 30.f}, 25.f, FOLLOW_AFTER_LAUNCH, {0.f, 40.f}},
+    {0x1F, {160.f, 110.f, 80.f}, {40.f, 30.f}, {25.f, 25.f, 25.f}, FOLLOW_ALWAYS, {0.f, 0.f}}, /* Mushroom Kingdom */
+    {0x20, {160.f, 110.f, 80.f}, {40.f, 30.f}, {25.f, 25.f, 25.f}, FOLLOW_ALWAYS, {0.f, 0.f}}, /* Underground Maze */
+    {0x21, {160.f, 110.f, 80.f}, {40.f, 30.f}, {25.f, 25.f, 25.f}, FOLLOW_ALWAYS, {0.f, 0.f}}, /* Escape from Brinstar */
+    {0x22, {160.f, 110.f, 80.f}, {40.f, 30.f}, {25.f, 25.f, 25.f}, FOLLOW_ALWAYS, {0.f, 0.f}}, /* F-Zero Grand Prix */
+    /* Home-Run Contest: held with the platform at the window's left (the bag
+     * flies right) while the bag is on it; then along after the camera,
+     * which follows the bag, but never up or down: the field stays in view.
+     * Front and back are cut solid. */
+    {0x43, {160.f, 110.f, 80.f}, {40.f, -1.f}, {25.f, 25.f, 0.f}, FOLLOW_AFTER_LAUNCH, {0.f, 60.f}},
 };
 #define FOLLOW_COUNT ((int)(sizeof s_follows / sizeof s_follows[0]))
 
@@ -659,20 +665,26 @@ static const FollowRule* s_follow;
 static float s_follow_center[3];
 static bool s_follow_placed;
 static bool s_follow_released; /* a held window has started following (follow_released) */
+/* The platform a held window starts on: the x span of the floors at the
+ * stage's top floor height (stage_top), NAN until measured. */
+static float s_platform_left = NAN, s_platform_right = NAN;
 static float s_focus[3];
 
 static void follow_stage(int grkind) {
     s_follow = NULL;
     s_follow_placed = false;
     s_follow_released = false;
+    s_platform_left = s_platform_right = NAN;
     for (int i = 0; i < FOLLOW_COUNT; i++) {
         if (s_follows[i].grkind == grkind) {
             s_follow_rule = s_follows[i];
             const char* env = getenv("MELEE_XR_FOLLOW");
             if (env != NULL) {
                 FollowRule* r = &s_follow_rule;
+                float fade = r->fade[0];
                 sscanf(env, "%f,%f,%f,%f,%f,%f", &r->half[0], &r->half[1], &r->half[2], &r->slack[0],
-                    &r->slack[1], &r->fade);
+                    &r->slack[1], &fade);
+                r->fade[0] = r->fade[1] = r->fade[2] = fade;
             }
             s_follow = &s_follow_rule;
         }
@@ -690,7 +702,7 @@ static int follow_planes(float planes[][4], float fades[]) {
     };
     memcpy(planes, box, sizeof box);
     for (int i = 0; i < 6; i++) {
-        fades[i] = s_follow->fade;
+        fades[i] = s_follow->fade[i / 2];
     }
     return 6;
 }
@@ -719,9 +731,18 @@ static bool follow_released(void) {
         case FOLLOW_ALWAYS:
             s_follow_released = true;
             break;
-        case FOLLOW_AFTER_LAUNCH:
-            s_follow_released = Ground_801C57F0(0) > 0.f;
+        case FOLLOW_AFTER_LAUNCH: {
+            /* The bag (player slot 1) past the platform's right edge. The
+             * stage's own distance reading starts at x 67, well inside the
+             * platform, so a bag shoved to the edge counted as launched. */
+            HSD_GObj* bag = Player_GetEntity(1);
+            if (bag != NULL && !isnan(s_platform_right)) {
+                Vec3 pos;
+                ftLib_GetPos(bag, &pos);
+                s_follow_released = pos.x > s_platform_right + 10.f;
+            }
             break;
+        }
         }
         if (s_follow_released && s_follow->hold != FOLLOW_ALWAYS) {
             pc_log_line("xr: the window follows from focus %.0f,%.0f", s_focus[0], s_focus[1]);
@@ -737,22 +758,36 @@ static void follow_update(void) {
         return;
     }
     if (!s_follow_placed) {
-        if (s_follow->hold != FOLLOW_ALWAYS) {
-            s_follow_center[0] = s_follow->start[0];
-            s_follow_center[1] = s_follow->start[1];
-        } else {
-            memcpy(s_follow_center, s_focus, sizeof s_follow_center);
-        }
+        /* A held window is placed below, until released. */
+        memcpy(s_follow_center, s_focus, sizeof s_follow_center);
         s_follow_center[2] = 0.f;
         s_follow_placed = true;
     }
     if (!follow_released()) {
+        /* Held: placed again each frame, as the platform is measured once
+         * the stage's collision is in (stage_top). */
+        s_follow_center[0] = isnan(s_platform_left) ? s_follow->start[0] : s_platform_left - 30.f + s_follow->half[0];
+        s_follow_center[1] = s_follow->start[1];
         aurora_xr_set_stage_center(s_follow_center[0], s_follow_center[1], s_follow_center[2]);
+        static int held_log = -1, held_frames;
+        if (held_log < 0) {
+            held_log = getenv("MELEE_XR_FOLLOW_LOG") != NULL;
+        }
+        HSD_GObj* bag = Player_GetEntity(1);
+        if (held_log && bag != NULL && ++held_frames % 30 == 0) {
+            Vec3 pos;
+            ftLib_GetPos(bag, &pos);
+            pc_log_line("xr: window held at %.0f,%.0f; bag at %.0f,%.0f", s_follow_center[0], s_follow_center[1], pos.x,
+                        pos.y);
+        }
         return;
     }
     for (int k = 0; k < 2; k++) {
         const float d = s_focus[k] - s_follow_center[k];
         const float slack = s_follow->slack[k];
+        if (slack < 0.f) {
+            continue; /* this axis stays put */
+        }
         if (d > slack) {
             s_follow_center[k] = s_focus[k] - slack;
         } else if (d < -slack) {
@@ -1053,9 +1088,17 @@ static float stage_top(void) {
                            Stage_GetBlastZoneBottomOffset(), Stage_GetBlastZoneTopOffset(), &top, &min_x, &max_x)) {
         return NAN;
     }
-    pc_log_line("xr: stage %d top floor at y %.1f; floors from x %.1f to %.1f; blast zones x %.0f to %.0f, y %.0f "
+    /* The platform: floors within 3 units of the top floor's height. */
+    float ptop, pleft, pright;
+    if (mpLib_FloorExtent(Stage_GetBlastZoneLeftOffset(), Stage_GetBlastZoneRightOffset(), top - 3.f, top + 3.f, &ptop,
+                          &pleft, &pright)) {
+        s_platform_left = pleft;
+        s_platform_right = pright;
+    }
+    pc_log_line("xr: stage %d top floor at y %.1f from x %.1f to %.1f; floors from x %.1f to %.1f; blast zones x %.0f to "
+                "%.0f, y %.0f "
                 "to %.0f",
-                stage_info.grkind, top, min_x, max_x, Stage_GetBlastZoneLeftOffset(), Stage_GetBlastZoneRightOffset(),
+                stage_info.grkind, top, s_platform_left, s_platform_right, min_x, max_x, Stage_GetBlastZoneLeftOffset(), Stage_GetBlastZoneRightOffset(),
                 Stage_GetBlastZoneBottomOffset(), Stage_GetBlastZoneTopOffset());
     return top;
 }
