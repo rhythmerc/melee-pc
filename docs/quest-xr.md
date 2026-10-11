@@ -292,6 +292,15 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     in `s_follows`; `MELEE_XR_FOLLOW_LOG` logs the window once a second).
     The distance signs on the field are text drawn through the stage's own
     camera and stay out of the 3D view. Scale 1.
+  - **Adventure (2026-10-10):** its fights are on stages done above. Its
+    four courses, whose camera follows player one through them, get Race
+    to the Finish's follow window (160 x 110 x 80 units, scale 0.8): the
+    Mushroom Kingdom course (GrKind 0x1F), the Underground Maze (0x20; its
+    rooms are part 4, on the far layer, shown), the escape up Brinstar's
+    shaft (0x21) and the F-Zero Grand Prix (0x22; the window also drops its
+    sky dome and the lava far below). Icicle Mountain is the VS stage's
+    kind and rules. Boot into any scene with `MELEE_BOOT_SCENE=adventure
+    MELEE_ADVENTURE_SCENE=<id>`.
 - **Screens over an ended fight.** Stage Clear (Classic, Adventure, All-Star
   and the other 1P modes, `gm/gmregclear.c`) draws its bonus tally flat over
   the fight, which goes on drawing behind it. While it's up, the fight and

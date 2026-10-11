@@ -171,6 +171,9 @@ static const PartRule s_builtin_rules[] = {
     {0x26, 1, 9, -1, false},
     {0x26, 1, 12, -1, false},
     {0x26, 1, 13, -1, false},
+    /* Adventure's Underground Maze: the maze itself is part 4, on the far
+     * layer; shown, and cut to the window (s_follows). */
+    {0x20, 4, -1, -1, true},
     /* Home-Run Contest: the stands and sky (part 3, four copies the stage
      * slides along after the camera). The field streams through a window
      * that holds on the platform until the bag leaves it (s_follows). */
@@ -385,6 +388,10 @@ static const StagePlacement s_placements[] = {
     {0x24, 0.f, 0.f, 0.f, 1.1f},     /* Battlefield */
     {0x27, 0.f, 0.f, 0.f, 0.8f},     /* Race to the Finish: its window (s_follows) */
     {0x26, 0.f, 0.f, 0.f, 0.95f},    /* Snag the Trophies */
+    {0x1F, 0.f, 0.f, 0.f, 0.8f},     /* Adventure: Mushroom Kingdom course, its window (s_follows) */
+    {0x20, 0.f, 0.f, 0.f, 0.8f},     /* Adventure: Underground Maze, its window */
+    {0x21, 0.f, 0.f, 0.f, 0.8f},     /* Adventure: Escape from Brinstar, its window */
+    {0x22, 0.f, 0.f, 0.f, 0.8f},     /* Adventure: F-Zero Grand Prix, its window */
     {0x43, 0.f, 0.f, 0.f, 1.f},      /* Home-Run Contest: its window (s_follows) */
     {0x25, 0.f, 0.f, 0.f, 1.f},      /* Final Destination */
 };
@@ -417,6 +424,11 @@ typedef struct {
 
 static const FollowRule s_follows[] = {
     {0x27, {160.f, 110.f, 80.f}, {40.f, 30.f}, 25.f, FOLLOW_ALWAYS, {0.f, 0.f}}, /* Race to the Finish */
+    /* Adventure's courses, whose camera follows player one through them. */
+    {0x1F, {160.f, 110.f, 80.f}, {40.f, 30.f}, 25.f, FOLLOW_ALWAYS, {0.f, 0.f}}, /* Mushroom Kingdom */
+    {0x20, {160.f, 110.f, 80.f}, {40.f, 30.f}, 25.f, FOLLOW_ALWAYS, {0.f, 0.f}}, /* Underground Maze */
+    {0x21, {160.f, 110.f, 80.f}, {40.f, 30.f}, 25.f, FOLLOW_ALWAYS, {0.f, 0.f}}, /* Escape from Brinstar */
+    {0x22, {160.f, 110.f, 80.f}, {40.f, 30.f}, 25.f, FOLLOW_ALWAYS, {0.f, 0.f}}, /* F-Zero Grand Prix */
     /* Home-Run Contest: the platform while the bag is on it; the camera
      * (which follows the bag) once the bag is past the platform's edge. */
     {0x43, {160.f, 110.f, 80.f}, {40.f, 30.f}, 25.f, FOLLOW_AFTER_LAUNCH, {0.f, 40.f}},
