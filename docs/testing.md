@@ -87,7 +87,7 @@ tree over the disc image.
   `atexit(pc_shutdown_once)` still runs), exit 0, and log
   `MELEE_EXIT_AFTER_FRAMES: reached frame <n>, exiting`. This is what makes a
   case bounded: a hang fails on the per-case timeout instead of hanging CI.
-- `MELEE_BOOT_SCENE=<title|vs|classic|training>` — boot straight into one scene
+- `MELEE_BOOT_SCENE=<title|vs|classic|adventure|homerun|training>` — boot straight into one scene
   with a hard-coded setup, no menu navigation. It starts the state machine in
   that mode instead of routing through `GM_BOOT`, whose memory-card scene burns
   a mode-dependent and wildly variable number of frames (under 300 ahead of

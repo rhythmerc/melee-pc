@@ -1,6 +1,7 @@
 #include "gmadventure.h"
 
 #include "forward.h"
+#include "gmboot.h"
 #include "gm_unsplit.h"
 #include "gmmain_lib.h"
 #include "gmregcommon.h"
@@ -8,6 +9,9 @@
 #include <melee/lb/lb_00B0.h>
 #include <melee/lb/lbaudio_ax.h>
 #include <sysdolphin/baselib/random.h>
+#ifdef TARGET_PC
+#include <stdlib.h>
+#endif
 
 extern UNK_T gmClassic_80470708[];
 extern DebugGameOverData gmClassic_80470850;
@@ -1767,6 +1771,30 @@ void gm_Mode_Adventure_OnLoad(void)
     data->x0.x6C = gm_8017E664;
     data->x0.x70 = gm_8017E6B4;
     gm_SetGameModeStateId(ADVENTURE_BACK_TO_CSS);
+#ifdef TARGET_PC
+    /* MELEE_BOOT_SCENE=adventure: ADVENTURE_BACK_TO_CSS is Adventure's own
+     * character select, which needs stick + Start. Do what its on_exit
+     * (gm_801B4350) does for a fixed Mario pick and go to a scene instead:
+     * MELEE_ADVENTURE_SCENE=<id> (the scene enum above, e.g. 0x01 for the
+     * Mushroom Kingdom course, 0x3A for the F-Zero Grand Prix), default the
+     * first. */
+    if (pc_boot_scene() == GM_ADVENTURE) {
+        struct gmm_x0_528_t* pick = gmMainLib_8015CDD4();
+        const char* scene_env = getenv("MELEE_ADVENTURE_SCENE");
+        const int scene_id = scene_env != NULL ? (int) strtol(scene_env, NULL, 0) : ADVENTURE_INTRO;
+        pick->c_kind = CKind_Mario;
+        pick->color = 0;
+        pick->stocks = 3;
+        pick->cpu_level = 0;
+        pick->nametag = GM_NAMETAG_COUNT;
+        data->x0.x0.ckind = pick->c_kind;
+        data->x0.x0.color = pick->color;
+        data->x0.x0.cpu_level = pick->cpu_level;
+        data->x0.x0.stocks = pick->stocks;
+        data->x0.x0.nametag = pick->nametag;
+        gm_SetGameModeStateId((u8) (scene_id >= 0 && scene_id < ADVENTURE_BACK_TO_CSS ? scene_id : 0));
+    }
+#endif
     gm_80172174();
     Ground_801C5A28();
 }

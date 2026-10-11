@@ -163,6 +163,18 @@ static const PartRule s_builtin_rules[] = {
      * (part 1 joint 1, mesh 45). The course slides through a window
      * (s_follows). */
     {0x27, 1, 1, 45, false},
+    /* Snag the Trophies (Classic's bonus stage): the starfield, the planet
+     * and the sea of clouds around the tower and pillars (part 1, joints 6,
+     * 7, 9, 12 and 13, far out under joint 5). */
+    {0x26, 1, 6, -1, false},
+    {0x26, 1, 7, -1, false},
+    {0x26, 1, 9, -1, false},
+    {0x26, 1, 12, -1, false},
+    {0x26, 1, 13, -1, false},
+    /* Home-Run Contest: the stands and sky (part 3, four copies the stage
+     * slides along after the camera). The field streams through a window
+     * that holds on the platform until the bag leaves it (s_follows). */
+    {0x43, 3, -1, -1, false},
 };
 
 /* Joints moved in the 3D view only: the joint and everything under it are
@@ -372,6 +384,8 @@ static const StagePlacement s_placements[] = {
     {0x1E, 0.f, 0.f, 0.f, 1.f},      /* Kongo Jungle 64 */
     {0x24, 0.f, 0.f, 0.f, 1.1f},     /* Battlefield */
     {0x27, 0.f, 0.f, 0.f, 0.8f},     /* Race to the Finish: its window (s_follows) */
+    {0x26, 0.f, 0.f, 0.f, 0.95f},    /* Snag the Trophies */
+    {0x43, 0.f, 0.f, 0.f, 1.f},      /* Home-Run Contest: its window (s_follows) */
     {0x25, 0.f, 0.f, 0.f, 1.f},      /* Final Destination */
 };
 #define PLACEMENT_COUNT ((int)(sizeof s_placements / sizeof s_placements[0]))
@@ -384,16 +398,28 @@ static const StagePlacement s_placements[] = {
  * past, so the world doesn't move with every jump. In mixed reality a box
  * `half` units either side of the center (x, y, z) clips everything the 3D
  * view draws, fighters too, dissolving over `fade` units inside it.
- * MELEE_XR_FOLLOW="hx,hy,hz,sx,sy,fade" overrides for the stage played. */
+ * MELEE_XR_FOLLOW="hx,hy,hz,sx,sy,fade" overrides for the stage played.
+ * A rule with `hold` set keeps the window at `start` (x, y) until
+ * follow_released says the stage's action has begun, then follows. */
+typedef enum {
+    FOLLOW_ALWAYS,
+    FOLLOW_AFTER_LAUNCH, /* Home-Run Contest: once the bag has left the platform */
+} FollowHold;
+
 typedef struct {
     int grkind;
     float half[3];
     float slack[2];
     float fade;
+    FollowHold hold;
+    float start[2];
 } FollowRule;
 
 static const FollowRule s_follows[] = {
-    {0x27, {160.f, 110.f, 80.f}, {40.f, 30.f}, 25.f}, /* Race to the Finish */
+    {0x27, {160.f, 110.f, 80.f}, {40.f, 30.f}, 25.f, FOLLOW_ALWAYS, {0.f, 0.f}}, /* Race to the Finish */
+    /* Home-Run Contest: the platform while the bag is on it; the camera
+     * (which follows the bag) once the bag is past the platform's edge. */
+    {0x43, {160.f, 110.f, 80.f}, {40.f, 30.f}, 25.f, FOLLOW_AFTER_LAUNCH, {0.f, 40.f}},
 };
 #define FOLLOW_COUNT ((int)(sizeof s_follows / sizeof s_follows[0]))
 
@@ -620,11 +646,13 @@ static FollowRule s_follow_rule;
 static const FollowRule* s_follow;
 static float s_follow_center[3];
 static bool s_follow_placed;
+static bool s_follow_released; /* a held window has started following (follow_released) */
 static float s_focus[3];
 
 static void follow_stage(int grkind) {
     s_follow = NULL;
     s_follow_placed = false;
+    s_follow_released = false;
     for (int i = 0; i < FOLLOW_COUNT; i++) {
         if (s_follows[i].grkind == grkind) {
             s_follow_rule = s_follows[i];
@@ -669,15 +697,46 @@ static void base_clip(void) {
 
 void pc_xr_camera_focus(const float interest[3]) { memcpy(s_focus, interest, sizeof s_focus); }
 
-/* Drags the window's center after the focus, past the slack. */
+/* Whether a held window may start following. Home-Run Contest: the stage's
+ * distance reading (Ground_801C57F0, grHomeRun_8021EA30) is the bag's
+ * travel past the platform's edge, 0 until it leaves; latched, so a bag
+ * that lands short of the edge doesn't snap the window back. */
+static bool follow_released(void) {
+    if (!s_follow_released) {
+        switch (s_follow->hold) {
+        case FOLLOW_ALWAYS:
+            s_follow_released = true;
+            break;
+        case FOLLOW_AFTER_LAUNCH:
+            s_follow_released = Ground_801C57F0(0) > 0.f;
+            break;
+        }
+        if (s_follow_released && s_follow->hold != FOLLOW_ALWAYS) {
+            pc_log_line("xr: the window follows from focus %.0f,%.0f", s_focus[0], s_focus[1]);
+        }
+    }
+    return s_follow_released;
+}
+
+/* Drags the window's center after the focus, past the slack; a held
+ * window stays at its start until released. */
 static void follow_update(void) {
     if (s_follow == NULL) {
         return;
     }
     if (!s_follow_placed) {
-        memcpy(s_follow_center, s_focus, sizeof s_follow_center);
+        if (s_follow->hold != FOLLOW_ALWAYS) {
+            s_follow_center[0] = s_follow->start[0];
+            s_follow_center[1] = s_follow->start[1];
+        } else {
+            memcpy(s_follow_center, s_focus, sizeof s_follow_center);
+        }
         s_follow_center[2] = 0.f;
         s_follow_placed = true;
+    }
+    if (!follow_released()) {
+        aurora_xr_set_stage_center(s_follow_center[0], s_follow_center[1], s_follow_center[2]);
+        return;
     }
     for (int k = 0; k < 2; k++) {
         const float d = s_focus[k] - s_follow_center[k];
@@ -689,6 +748,15 @@ static void follow_update(void) {
         }
     }
     aurora_xr_set_stage_center(s_follow_center[0], s_follow_center[1], s_follow_center[2]);
+    /* MELEE_XR_FOLLOW_LOG: the window's center and the focus, once a second. */
+    static int log_on = -1, frames;
+    if (log_on < 0) {
+        log_on = getenv("MELEE_XR_FOLLOW_LOG") != NULL;
+    }
+    if (log_on && ++frames % 60 == 0) {
+        pc_log_line("xr: window at %.0f,%.0f, focus %.0f,%.0f", s_follow_center[0], s_follow_center[1], s_focus[0],
+                 s_focus[1]);
+    }
 }
 
 void pc_xr_world_camera(const float view[3][4]) {

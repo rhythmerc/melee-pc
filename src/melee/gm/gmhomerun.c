@@ -3,6 +3,7 @@
 #include <melee/pl/forward.h>
 
 #include "forward.h"
+#include "gmboot.h"
 #include "gm_unsplit.h"
 #include "gmmain_lib.h"
 #include "gmvsmelee.h"
@@ -181,4 +182,36 @@ void gm_Mode_Homerun_OnLoad(void)
 {
     gm_804D68F8 = gm_801677F0();
     gm_804D68F9 = 0;
+#ifdef TARGET_PC
+    /* MELEE_BOOT_SCENE=homerun: state 0 is the character select, which needs
+     * stick + Start. Do what its on_exit (gm_801B999C) does for a fixed Mario
+     * pick and go straight to the contest (state 1). The mode is preloaded,
+     * so publish the cast and stage the way the select's on_enter
+     * (gm_801B98E8) does, as MELEE_BOOT_SCENE=training does. */
+    if (pc_boot_scene() == GM_HOME_RUN_CONTEST) {
+        VsModeData* vs = &gmHomeRun_VsModeData;
+        struct GameCache* cache;
+        int i;
+
+        gm_SetupAllPlayerDefaults(vs->start.players);
+        vs->start.players[0].ckind = CKind_Mario;
+        vs->start.players[0].color = 0;
+        vs->start.players[1].ckind = ChKind_Sandbag;
+        vs->start.players[1].cpu_kind = 0xF;
+        vs->start.players[1].defense_ratio = 1.0f;
+        vs->start.players[1].slot_type = Gm_PKind_Cpu;
+        vs->start.players[1].stocks = 1;
+        vs->start.players[1].team = 1;
+
+        cache = &lbDvd_GetPreloadCacheScene()->game_cache;
+        lbDvd_SetupVsPreloadCache();
+        for (i = 0; i < 4; i++) {
+            cache->entries[i].char_id = vs->start.players[i].ckind;
+            cache->entries[i].color = vs->start.players[i].color;
+        }
+        cache->stkind = 0x54;
+        lbDvd_80018254();
+        gm_SetGameModeStateId(1);
+    }
+#endif
 }

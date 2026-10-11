@@ -277,6 +277,21 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     behind the whole course (part 1 joint 1, mesh 45). The HUD keeps its
     fixed height. Table: `s_follows` in `xr_scene.c`;
     `MELEE_XR_FOLLOW="hx,hy,hz,sx,sy,fade"` tries other sizes. Scale 0.8.
+  - **Snag the Trophies (2026-10-10):** Classic's bonus stage. Hidden: the
+    starfield, the planet and the sea of clouds (part 1 joints 6, 7, 9, 12
+    and 13, all far out under joint 5), leaving the cannon tower, the two
+    pillars and the platforms. Scale 0.95.
+  - **Home-Run Contest (2026-10-10):** the field is tiled in segments the
+    stage streams in around the camera, out to thousands of units, with the
+    stands and sky (part 3, four copies) slid along after it; those are
+    hidden. The rest shows through a follow window like Race to the
+    Finish's, but held on the platform (center 0, 40) until the bag leaves
+    it: the stage's distance reading (`Ground_801C57F0`, the bag's travel
+    past the platform's edge) turning positive releases it, and from then
+    on it follows the camera, which follows the bag (`FOLLOW_AFTER_LAUNCH`
+    in `s_follows`; `MELEE_XR_FOLLOW_LOG` logs the window once a second).
+    The distance signs on the field are text drawn through the stage's own
+    camera and stay out of the 3D view. Scale 1.
 - **Screens over an ended fight.** Stage Clear (Classic, Adventure, All-Star
   and the other 1P modes, `gm/gmregclear.c`) draws its bonus tally flat over
   the fight, which goes on drawing behind it. While it's up, the fight and
