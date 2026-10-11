@@ -424,6 +424,7 @@ typedef struct {
     float fade[3];
     FollowHold hold;
     float start[2]; /* a held window's center until the platform is measured (y: always) */
+    bool open_top;  /* no top side: things flying high stay in view */
 } FollowRule;
 
 static const FollowRule s_follows[] = {
@@ -433,11 +434,11 @@ static const FollowRule s_follows[] = {
     {0x20, {160.f, 110.f, 80.f}, {40.f, 30.f}, {25.f, 25.f, 25.f}, FOLLOW_ALWAYS, {0.f, 0.f}}, /* Underground Maze */
     {0x21, {160.f, 110.f, 80.f}, {40.f, 30.f}, {25.f, 25.f, 25.f}, FOLLOW_ALWAYS, {0.f, 0.f}}, /* Escape from Brinstar */
     {0x22, {160.f, 110.f, 80.f}, {40.f, 30.f}, {25.f, 25.f, 25.f}, FOLLOW_ALWAYS, {0.f, 0.f}}, /* F-Zero Grand Prix */
-    /* Home-Run Contest: held with the platform at the window's left (the bag
-     * flies right) while the bag is on it; then along after the camera,
-     * which follows the bag, but never up or down: the field stays in view.
-     * Front and back are cut solid. */
-    {0x43, {160.f, 110.f, 80.f}, {40.f, -1.f}, {25.f, 25.f, 0.f}, FOLLOW_AFTER_LAUNCH, {0.f, 60.f}},
+    /* Home-Run Contest: held centered on the platform while the bag is on
+     * it; then along after the camera, which follows the bag, but never up
+     * or down: the field stays in view, and with no top a high flyer does
+     * too. Front and back are cut solid. */
+    {0x43, {160.f, 110.f, 80.f}, {40.f, -1.f}, {25.f, 25.f, 0.f}, FOLLOW_AFTER_LAUNCH, {0.f, 60.f}, true},
 };
 #define FOLLOW_COUNT ((int)(sizeof s_follows / sizeof s_follows[0]))
 
@@ -700,11 +701,15 @@ static int follow_planes(float planes[][4], float fades[]) {
         {0.f, 1.f, 0.f, -(c[1] - h[1])}, {0.f, -1.f, 0.f, c[1] + h[1]},
         {0.f, 0.f, 1.f, -(c[2] - h[2])}, {0.f, 0.f, -1.f, c[2] + h[2]},
     };
-    memcpy(planes, box, sizeof box);
+    int n = 0;
     for (int i = 0; i < 6; i++) {
-        fades[i] = s_follow->fade[i / 2];
+        if (i == 3 && s_follow->open_top) {
+            continue; /* {0, -1, 0}: the top */
+        }
+        memcpy(planes[n], box[i], sizeof box[i]);
+        fades[n++] = s_follow->fade[i / 2];
     }
-    return 6;
+    return n;
 }
 
 /* The clip everything in the 3D view gets between stage parts: the
@@ -766,7 +771,8 @@ static void follow_update(void) {
     if (!follow_released()) {
         /* Held: placed again each frame, as the platform is measured once
          * the stage's collision is in (stage_top). */
-        s_follow_center[0] = isnan(s_platform_left) ? s_follow->start[0] : s_platform_left - 30.f + s_follow->half[0];
+        s_follow_center[0] =
+            isnan(s_platform_left) ? s_follow->start[0] : 0.5f * (s_platform_left + s_platform_right);
         s_follow_center[1] = s_follow->start[1];
         aurora_xr_set_stage_center(s_follow_center[0], s_follow_center[1], s_follow_center[2]);
         static int held_log = -1, held_frames;
@@ -1080,6 +1086,9 @@ static int s_top_grkind = -1;
 void pc_xr_stage_load(void) {
     s_top_grkind = -1;
     s_follow_placed = false; /* the next fight's window starts on its focus */
+    /* And a held one holds again: a Home-Run retry reloads the same stage,
+     * and its window started out released, following the camera. */
+    s_follow_released = false;
 }
 
 static float stage_top(void) {
