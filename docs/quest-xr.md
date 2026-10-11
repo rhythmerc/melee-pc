@@ -311,7 +311,8 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     - **Feel (2026-10-11):** every follow window now eases to where the
       slack puts it (`ease`, 0.25-0.35 s) instead of being dragged at the
       slack's edge, which felt stiff; the Mushroom Kingdom course also has
-      more slack (60 x 35).
+      more slack (60 x 35). Not the Home-Run Contest's: the bag outran the
+      easing into the window's dissolving sides.
     - **Underground Maze:** its window is lower (80 units up and down), so
       the corridor above doesn't float over the one you're in. In its
       platform fights the game locks its camera on the platform

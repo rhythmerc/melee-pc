@@ -455,10 +455,11 @@ static const FollowRule s_follows[] = {
     /* Home-Run Contest: held centered on the platform while the bag is on
      * it; then along after the camera, which follows the bag, but never up
      * or down: the field stays in view, and with no top a high flyer does
-     * too. Front and back are cut solid. */
+     * too. Front and back are cut solid. No easing: the bag outran it into
+     * the window's dissolving sides. */
     {.grkind = 0x43,
      .half = {160.f, 110.f, 80.f}, .slack = {40.f, -1.f}, .fade = {25.f, 25.f, 0.f},
-     .hold = FOLLOW_AFTER_LAUNCH, .start = {0.f, 60.f}, .open_top = true, .ease = 0.25f},
+     .hold = FOLLOW_AFTER_LAUNCH, .start = {0.f, 60.f}, .open_top = true},
 };
 #define FOLLOW_COUNT ((int)(sizeof s_follows / sizeof s_follows[0]))
 
