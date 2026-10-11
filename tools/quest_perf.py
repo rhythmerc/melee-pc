@@ -20,11 +20,13 @@ by address is used: a wireless headset shows up under both its address and
 its mDNS name.
 
 Headset power: a run wakes the headset (reconnecting wireless adb if it
-dropped while asleep), reports proximity closed and sets a 30-minute screen
-timeout, so it stays on unworn. When the run ends, failed or not, it stops the
-game, deletes the run files, hands proximity back to the sensor and sets the
-usual 60-second timeout, so the headset sleeps until the next run wakes it.
---keep skips that.
+dropped while dozing), reports proximity closed and sets a 30-minute screen
+timeout, so it stays on unworn through a batch of runs; each run ends by
+stopping the game and deleting its run files. At the end of a batch,
+`quest_perf.py handback` (or --hand-back on the last run) hands proximity back
+to the sensor and sets the usual 60-second timeout. Once the headset sleeps
+deeply its wifi drops and only a person can wake it, so don't hand back
+between runs. `quest_perf.py wake` keeps it on without a run.
 """
 import argparse
 import os
@@ -62,32 +64,37 @@ RUN_SCREEN_TIMEOUT_MS = 1800000  # during a run: the display stays on unworn
 IDLE_SCREEN_TIMEOUT_MS = 60000   # after it: the headset's usual
 
 
-def wake_headset(tries=24):
+def wake_headset(tries=36):
     """Reconnects wifi adb if it dropped while the headset slept, then wakes
-    it (proximity reported closed, a wake key) until it says it's awake."""
+    it (proximity reported closed, a wake key) until it says it's awake. A
+    dozing headset's wifi comes and goes, so a command that hangs is just a
+    failed try."""
     serial = os.environ.get("ANDROID_SERIAL", "")
+
+    def quiet(*args):
+        try:
+            return subprocess.run(["adb", *args], text=True, capture_output=True, timeout=20).stdout
+        except subprocess.TimeoutExpired:
+            return ""
+
     for _ in range(tries):
-        state = subprocess.run(["adb", "get-state"], text=True, capture_output=True)
-        if state.stdout.strip() != "device":
+        if quiet("get-state").strip() != "device":
             if ":" in serial:
-                subprocess.run(["adb", "disconnect", serial], capture_output=True)
-                subprocess.run(["adb", "connect", serial], capture_output=True, timeout=20)
+                quiet("disconnect", serial)
+                quiet("connect", serial)
             time.sleep(5)
             continue
-        power = subprocess.run(["adb", "shell", "dumpsys power | grep mWakefulness="], text=True,
-                               capture_output=True, timeout=20).stdout
-        if "Awake" in power:
+        if "Awake" in quiet("shell", "dumpsys power | grep mWakefulness="):
             return
-        subprocess.run(["adb", "shell", "am broadcast -a com.oculus.vrpowermanager.prox_close >/dev/null; "
-                        "input keyevent KEYCODE_WAKEUP"], capture_output=True, timeout=20)
+        quiet("shell", "am broadcast -a com.oculus.vrpowermanager.prox_close >/dev/null; input keyevent KEYCODE_WAKEUP")
         time.sleep(5)
     sys.exit("the headset didn't wake")
 
 
 def hand_back():
-    """After a run: the game stopped, its run files gone, proximity back to
-    the sensor and the usual screen timeout, so the unworn headset sleeps.
-    The next run wakes it (wake_headset)."""
+    """The end of a batch: the game stopped, its run files gone, proximity
+    back to the sensor and the usual screen timeout, so the unworn headset
+    sleeps."""
     adb("shell", "am", "force-stop", PKG, check=False)
     adb("shell", "rm", "-f", ENV_FILE, CTL_FILE, check=False)
     adb("shell", "am", "broadcast", "-a", "com.oculus.vrpowermanager.automation_disable", check=False)
@@ -192,7 +199,9 @@ def run(args):
     try:
         run_phases(args)
     finally:
-        if not args.keep:
+        adb("shell", "am", "force-stop", PKG, check=False)
+        adb("shell", "rm", "-f", ENV_FILE, CTL_FILE, check=False)
+        if args.hand_back:
             hand_back()
 
 
@@ -269,12 +278,14 @@ def main():
     r.add_argument("--label", default="run")
     r.add_argument("--no-view-check", dest="view_check", action="store_false",
                    help="skip dumping an eye image to check the stage is in view")
-    r.add_argument("--keep", action="store_true",
-                   help="leave the game running and the headset awake afterwards (no hand_back)")
+    r.add_argument("--hand-back", action="store_true",
+                   help="afterwards, let the headset sleep (hand_back): for the last run of a batch")
     m = sub.add_parser("mode")
     m.add_argument("mode", choices=["mr", "vr"])
     s = sub.add_parser("summarize")
     s.add_argument("log")
+    sub.add_parser("wake", help="wake the headset and keep it on unworn")
+    sub.add_parser("handback", help="let the headset sleep: the end of a batch")
     args = ap.parse_args()
     if args.cmd == "summarize":
         with open(args.log) as f:
@@ -283,6 +294,12 @@ def main():
     pick_device()
     if args.cmd == "mode":
         shell_write(CTL_FILE, args.mode + "\n")
+    elif args.cmd == "wake":
+        wake_headset()
+        adb("shell", "am", "broadcast", "-a", "com.oculus.vrpowermanager.prox_close")
+        adb("shell", "settings", "put", "system", "screen_off_timeout", str(RUN_SCREEN_TIMEOUT_MS))
+    elif args.cmd == "handback":
+        hand_back()
     else:
         run(args)
 
