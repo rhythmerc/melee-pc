@@ -326,6 +326,12 @@ std::unordered_map<int, ArenaPose> g_stageArenas;
 std::array<float, 3> g_arenaCenter{};
 // The current stage's size against the default scale.
 float g_stageScale = 1.f;
+// A zoom on top of the arena's scale, for the 3D view only (the placement
+// the player grabs keeps its own): aurora_xr_set_stage_zoom.
+float g_stageZoom = 1.f;
+// The HUD over the 3D view even in mixed reality, for the current stage
+// (aurora_xr_set_hud_on_top).
+std::atomic<bool> g_hudOnTop{false};
 // The stage's highest floor (game units; NaN: unknown), for the HUD.
 float g_stageTop = std::numeric_limits<float>::quiet_NaN();
 
@@ -3211,8 +3217,10 @@ bool render_xr_frame() {
     // wherever nothing drew, so fighters passing over it hide it. Nothing
     // of the stage reaches it (it sits above the highest floor). Full VR
     // draws the whole stage and its sky, so the HUD stays on top there.
-    // AURORA_XR_HUD_ON_TOP=1 keeps it on top in mixed reality too.
-    const bool hudUnder = g_passthroughWanted && !env_flag("AURORA_XR_HUD_ON_TOP", false);
+    // AURORA_XR_HUD_ON_TOP=1 keeps it on top in mixed reality too, as does
+    // a stage whose scenery reaches it (aurora_xr_set_hud_on_top).
+    static const bool hudOnTopEnv = env_flag("AURORA_XR_HUD_ON_TOP", false);
+    const bool hudUnder = g_passthroughWanted && !hudOnTopEnv && !g_hudOnTop;
     if (showHud && hudUnder)
       layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&hudQuad);
     layers[layerCount++] = reinterpret_cast<const XrCompositionLayerBaseHeader*>(&proj);
@@ -3764,11 +3772,12 @@ Mat4 projection(const XrFovf& fov, float near) {
 // Destination's ~170-unit stage is about 0.6 m wide); the player can move,
 // turn and scale the arena during a pause.
 Mat4 arena_transform() {
-  const ArenaPose a = arena_pose();
+  ArenaPose a = arena_pose();
   std::array<float, 3> ctr;
   {
     std::lock_guard lock{g_arenaMutex};
     ctr = g_arenaCenter;
+    a.scale *= g_stageZoom;
   }
   const float c = std::cos(a.yaw) * a.scale, s = std::sin(a.yaw) * a.scale;
   // T(pos) · R_y(yaw) · S(scale) · T(-center)
@@ -5194,6 +5203,8 @@ extern "C" void aurora_xr_set_stage(int stage, float x, float y, float z, float 
   g_stage = stage;
   g_arenaCenter = {x, y, z};
   g_stageScale = scale > 0.f ? scale : 1.f;
+  g_stageZoom = 1.f;
+  g_hudOnTop = false;
   init_arena();
   if (const auto it = g_stageArenas.find(stage); it != g_stageArenas.end()) {
     g_arena = it->second;
@@ -5210,6 +5221,14 @@ extern "C" void aurora_xr_set_stage_center(float x, float y, float z) {
   using namespace aurora::xr;
   std::lock_guard lock{g_arenaMutex};
   g_arenaCenter = {x, y, z};
+}
+
+extern "C" void aurora_xr_set_hud_on_top(bool on) { aurora::xr::g_hudOnTop = on; }
+
+extern "C" void aurora_xr_set_stage_zoom(float zoom) {
+  using namespace aurora::xr;
+  std::lock_guard lock{g_arenaMutex};
+  g_stageZoom = zoom > 0.f ? zoom : 1.f;
 }
 
 extern "C" bool aurora_xr_pace(void) {

@@ -99,6 +99,15 @@ void aurora_xr_set_stage(int stage, float x, float y, float z, float scale);
  * without touching where the arena is: for stages whose camera roams a
  * course bigger than the arena, which then slides through it. Any thread. */
 void aurora_xr_set_stage_center(float x, float y, float z);
+/* Zooms the 3D view of the current stage about its center by `zoom`, on top
+ * of the arena's scale, leaving where the player put the stage as it is
+ * (1: none; aurora_xr_set_stage resets it). For a stretch of a course worth
+ * a closer look. Any thread. */
+void aurora_xr_set_stage_zoom(float zoom);
+/* Keeps the HUD over the 3D view in mixed reality too, for the current
+ * stage (aurora_xr_set_stage resets it): for stages whose scenery reaches
+ * the HUD's height, which would otherwise hide it. Any thread. */
+void aurora_xr_set_hud_on_top(bool on);
 
 /* The height (world units) of the stage's highest floor, so the HUD can
  * float clear of it. NaN: unknown (the HUD keeps a fixed height). Any

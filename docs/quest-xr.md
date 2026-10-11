@@ -61,7 +61,9 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     fighters, items and effects passing over the HUD hide it. That works
     because no stage scenery reaches the HUD's height (below). Full VR
     draws the whole stage and its sky, so there the HUD stays on top.
-    `AURORA_XR_HUD_ON_TOP=1` keeps it on top in mixed reality too.
+    `AURORA_XR_HUD_ON_TOP=1` keeps it on top in mixed reality too, and a
+    stage can keep it there (`aurora_xr_set_hud_on_top`; the Underground
+    Maze).
   - **Off-screen fighters.** Past the flat camera's view, the game stops
     drawing a fighter and shows it in a magnifier bubble at the screen's
     edge. The 3D view sees the whole arena, so in XR the fighter keeps
@@ -305,7 +307,20 @@ and the investigation behind it are in docs/xr-3d-plan.md.
     rooms are part 4, on the far layer, shown), the escape up Brinstar's
     shaft (0x21) and the F-Zero Grand Prix (0x22; the window also drops its
     sky dome and the lava far below). Icicle Mountain is the VS stage's
-    kind and rules. Boot into any scene with `MELEE_BOOT_SCENE=adventure
+    kind and rules.
+    - **Feel (2026-10-11):** every follow window now eases to where the
+      slack puts it (`ease`, 0.25-0.35 s) instead of being dragged at the
+      slack's edge, which felt stiff; the Mushroom Kingdom course also has
+      more slack (60 x 35).
+    - **Underground Maze:** its window is lower (80 units up and down), so
+      the corridor above doesn't float over the one you're in. In its
+      platform fights the game locks its camera on the platform
+      (`grshrineroute.c`: `Camera_80030AE0(0)` and the camera's target on
+      the platform); the window then sits still on that target and zooms in
+      1.4 times (`lock_zoom`, `aurora_xr_set_stage_zoom`, a zoom of the 3D
+      view only), its box shrunk to keep its footprint. The HUD stays over
+      the 3D view there (`aurora_xr_set_hud_on_top`): the maze reaches its
+      height. The walls the game leaves untextured black stay black. Boot into any scene with `MELEE_BOOT_SCENE=adventure
     MELEE_ADVENTURE_SCENE=<id>`.
 - **Screens over an ended fight.** Stage Clear (Classic, Adventure, All-Star
   and the other 1P modes, `gm/gmregclear.c`) draws its bonus tally flat over
