@@ -701,10 +701,8 @@ after the split, the eyes are drawn again at the frame's end (counted as
   it late for the next frame.
 - **The image:** OpenXR allows one waited image per swapchain until it's
   released, so a frame's eyes can't start before the previous frame's image
-  is handed over (at latency 3, 8.3 ms after this frame's tick). The eyes are
-  ready at about 6 ms and wait 2-4 ms for it on most frames; rendering into
-  a texture of our own and copying would save that but cost about a
-  millisecond of GPU for the copy.
+  is handed over (at latency 3, 8.3 ms after this frame's tick; at 4, 16.7).
+  Getting around that doesn't pay on Quest; see "Release order" below.
 - **Copies of the EFB:** the world part drops its world draws like any flat
   pass nobody reads. If the continuation is then read (Pokémon Stadium's
   jumbotron zoom copies it), it draws the world part's world draws again
@@ -716,6 +714,70 @@ after the split, the eyes are drawn again at the frame's end (counted as
   stages now come from spikes (GPU done up to 40-60 ms) more than from the
   typical frame: Stadium rock 2.9 a second at latency 3, 4.4 at 4; Brinstar
   Depths 1.5 and 1.4. The XR stats line counts early eyes and redraws.
+
+### Release order
+
+(2026-10-10.) At latency 4 a frame's eyes wait for the last frame's image,
+handed over 16.7 ms after their tick, though they're ready at 10-12. Two
+stereo swapchains used in turn removed that wait: the eyes went to the GPU
+at about 11 ms and were done at about 22 instead of 30. But the runtime then
+ran an extra display frame behind: VrApi's `Prd` went from 18 to 28-35 ms,
+its `Early` count from about 5 to 100-180 a second, and the XR loop skipped
+about 10 display frames a second in `xrWaitFrame` (four-CPU Mute City).
+
+The cause is the order on the GPU. Quest's runtime marks each image's
+release on the GPU, and that mark finishes only after the work queued ahead
+of it. With one swapchain, the next frame's eyes can't be queued before the
+release, so nothing is ahead of it. With two, at latency 4 they were queued
+5 ms before it and ran 7 ms past it, and the runtime took the frame as late.
+At latency 3 the release comes first and two swapchains were fine on Mute
+City (`Prd` 20.5, `Early` 17), but not on Battlefield, whose eyes are queued
+6 ms after the tick, before even latency 3's release. What didn't help:
+
+- A higher priority for the runtime's queue than Dawn's (0.5 or 0 against
+  1.0): no change. Adreno doesn't seem to preempt between one device's queues.
+- Sending our part of the release (the wait on Dawn's semaphores and the
+  layout change) as soon as the image is drawn, before the next eyes: no
+  change, so it's the runtime's own mark that's late.
+- Releasing an image as soon as it's drawn and showing it at its slot by
+  pointing the layer at its swapchain: the runtime ties a release to the
+  next `xrEndFrame`, never retired the images ("xrWaitSwapchainImage: Failed
+  to retire next frame") and `xrEndFrame` blocked 28 ms every time.
+- Rendering into images of our own and copying at the slot would put the
+  eyes on the GPU ahead of the previous release the same way.
+
+So at latency 4 the eyes have the 16.7 ms between two releases: they can't
+start before the last frame's release and must be done by their own.
+Holding an image past its slot while its GPU work runs, so `xrBeginFrame`
+doesn't stall, made it worse with one swapchain: the next frame's eyes then
+waited for the held image, and 3D dropped to 56-58 fps.
+
+What changed instead:
+
+- **Shadows first** (`AURORA_XR_PRESUBMIT`, on): the early-eyes item
+  submits what comes before the eyes (the staging copies and the fighters'
+  shadow passes) before waiting for the image, so the GPU runs them in the
+  idle time before the last frame's release instead of inside the eyes'
+  window. GPU done 2-3 ms sooner after the tick (median; four-CPU Stadium
+  rock 28 against 31). Two runs each, stale frames a second (frames done
+  over 1 ms after their slot per 40 s): Stadium rock 0.72 (8) and 1.43
+  (35) against 1.38 (42) and 2.12 (40) without; Brinstar Depths 0.63 (68)
+  and 0.44 (64) against 0.21 (223) and 0.74 (251); Mute City 1.10 and 0.45
+  against 1.05 and 0.13, within its noise. Frames a millisecond or two late
+  cost little; the stale ones are the spikes, 40-50 ms after the tick.
+- **Lateness check:** the latency picker samples the GPU finishing less the
+  wait for an image, as if the image would come sooner at a lower latency.
+  On Mute City and Stadium it often didn't: at latency 3 the image came at
+  about 17 ms anyway, frames finished at 26-28 against 25, and the picker
+  went back and forth. Now more than 2 of the last 120 frames finishing over
+  a millisecond after their release, below the cap, sends the latency up one
+  and bars the one it left for 15 s (then 30, 60, 120; 10 s held clears it).
+  The XR stats line counts those raises. Dynamic resolution's margin is no
+  more than the margin to the slot the frame is released in, for the same
+  reason.
+- **Spike log:** frames done after the slot they're released in are logged
+  on their own line, "Frames done after their slot", each hop in ms after
+  the tick; the pacing summary counts those over a millisecond late.
 
 ### CPU level
 
@@ -1272,6 +1334,7 @@ On Quest, set these in `/sdcard/Android/data/dev.melee.game/files/melee-env.txt`
 | `AURORA_XR_FIXED_LATENCY` | adaptive | Display frames from tick to release; 0 turns fixed-latency presentation off |
 | `AURORA_XR_RELEASE_DONE` | 0 | Hand 3D images to the runtime only once their GPU work is done (Android; drops frames) |
 | `AURORA_XR_EARLY_EYES` | 1 (Android) | Submit the eyes as soon as a fight frame's world is recorded |
+| `AURORA_XR_PRESUBMIT` | 1 | Early eyes: submit the work before the eyes (shadows, copies) before waiting for the 3D image |
 | `AURORA_VTX_CACHE` | 1 | Keep decoded vertices across frames (with `AURORA_VTX_DECODE`) |
 | `AURORA_TEX_HASH_MEMO` | 1 | Reuse texture content hashes within a frame |
 | `AURORA_PIPELINE_INLINE` | 0 | Compile pipelines on the render thread instead of the compile thread |

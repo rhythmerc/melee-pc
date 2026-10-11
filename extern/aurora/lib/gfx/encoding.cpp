@@ -678,7 +678,22 @@ bool xr_early_eyes() noexcept { return g_xrEarlyEyes.load(std::memory_order_rela
 
 void run_xr_early(FramePacket& frame, const XrEarlyEyes& early) {
   ZoneScoped;
-  if (g_xrEarlyHook == nullptr || !frame.encoder || !g_xrEarlyHook(frame.encoder, frame, early))
+  if (g_xrEarlyHook == nullptr || !frame.encoder)
+    return;
+  // The work before the eyes (the staging copies, the fighters' shadows)
+  // goes before they wait for their image. At latency 4 the image comes
+  // only once the last frame's is released, 16.7 ms after the tick; queued
+  // with the eyes, the shadows ran after that too, in the window the eyes
+  // have to finish in. AURORA_XR_PRESUBMIT=0 keeps them together.
+  static const bool presubmit = env_flag_gfx("AURORA_XR_PRESUBMIT", true);
+  if (presubmit) {
+    unmap_first_staging(frame);
+    const wgpu::CommandBuffer before = frame.encoder.Finish();
+    g_queue.Submit(1, &before);
+    constexpr wgpu::CommandEncoderDescriptor EyesDescriptor{.label = "Eyes encoder"};
+    frame.encoder = g_device.CreateCommandEncoder(&EyesDescriptor);
+  }
+  if (!g_xrEarlyHook(frame.encoder, frame, early))
     return;
   // Everything so far goes now; the rest of the frame continues in a new
   // encoder (frame.cpp submits it at the end as usual). Its copies come from

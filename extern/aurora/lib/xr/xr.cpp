@@ -1252,6 +1252,14 @@ struct Presentation {
   size_t count = 0, next = 0;
   int sinceUpdate = 0, steadyLower = 0;
   uint64_t held = 0; // images held for their slot (logged)
+  // Frames finishing after their release at the current latency, over the
+  // last 120 (note_lateness): too many, and it's left and kept out of for a
+  // while, longer each time.
+  std::array<bool, 120> late{};
+  int lateLatency = 0, lateCount = 0, lateNext = 0, lateFrames = 0;
+  std::array<int64_t, 16> bannedUntilNs{};
+  std::array<int, 16> bans{};
+  uint64_t raisedForLate = 0; // since the last stats (logged)
 } g_present;
 
 // Frames whose eyes went early, and of those, drawn again at the frame's end
@@ -1290,8 +1298,10 @@ struct PaceProbe {
   std::array<int64_t, 5> next{};            // render worker: record start, world end, game done, record end, render start
   int64_t slotWaitNs = 0;                   // render worker: this frame's wait for a 3D image
   std::vector<uint8_t> doneLatency;          // display frames from tick to GPU done, for g_present
+  std::vector<std::pair<uint8_t, bool>> lateness; // latency drawn at, done over 1 ms after its release
   std::vector<float> idealMargins;           // ns from GPU done to the ideal latency's slot, for g_dynres
-  std::vector<std::string> spikes;           // frames done well past the ideal slot, by hop (logged, a few)
+  std::vector<std::string> spikes;           // frames done after their slot, by hop (logged, a few)
+  uint32_t lateFrames = 0;                   // done over 1 ms after their slot (logged)
   bool started = false;
 } g_pace;
 
@@ -1348,16 +1358,27 @@ void pace_watch() {
     // display frame, whatever the latency is now.
     const int ideal = std::max(g_displayPerGameFrame.load(), 1) + 1;
     const double slot = static_cast<double>(tick.waitNs) + ideal * 1e9 / hz;
+    // No more than the margin to the slot it's released in: above the
+    // ideal latency, the wait for an image left out above may not go at
+    // the ideal one (see note_lateness).
+    const double releaseSlot = static_cast<double>(tick.waitNs) + p.latency * 1e9 / hz;
     if (g_pace.idealMargins.size() < 256)
-      g_pace.idealMargins.push_back(static_cast<float>(slot - static_cast<double>(doneNs - p.slotWaitNs)));
-    // A spike: done 5 ms past the ideal slot. Each hop, ms after the tick.
-    if (static_cast<double>(doneNs - p.slotWaitNs) > slot + 5e6 && g_pace.spikes.size() < 6) {
+      g_pace.idealMargins.push_back(static_cast<float>(
+          std::min(slot - static_cast<double>(doneNs - p.slotWaitNs), releaseSlot - static_cast<double>(doneNs))));
+    const bool late = static_cast<double>(doneNs) > releaseSlot + 1e6;
+    g_pace.lateFrames += late ? 1 : 0;
+    if (g_pace.lateness.size() < 256)
+      g_pace.lateness.emplace_back(static_cast<uint8_t>(p.latency), late);
+    // A spike: done after the slot it's released in. Each hop, ms after the tick.
+    if (static_cast<double>(doneNs) > releaseSlot && g_pace.spikes.size() < 8) {
       const auto ms = [&](int64_t ns) { return ns != 0 ? static_cast<float>(ns - tick.waitNs) / 1e6f : -1.f; };
       g_pace.spikes.push_back(fmt::format("[world {:.1f} game {:.1f} recorded {:.1f} replaying {:.1f} submitted {:.1f} "
-                                          "done {:.1f} image wait {:.1f}]",
+                                          "done {:.1f} slot {:.1f} image wait {:.1f}]",
                                           ms(p.ns[PaceProbe::WorldEnd]), ms(p.ns[PaceProbe::GameDone]),
                                           ms(p.ns[PaceProbe::RecordEnd]), ms(p.ns[PaceProbe::RenderStart]),
-                                          ms(p.ns[PaceProbe::Submit]), ms(doneNs), p.slotWaitNs / 1e6));
+                                          ms(p.ns[PaceProbe::Submit]), ms(doneNs),
+                                          (releaseSlot - static_cast<double>(tick.waitNs)) / 1e6,
+                                          p.slotWaitNs / 1e6));
     }
     // The display time of the frame it's released for.
     const auto& due = g_pace.displays[(p.tickFrame + p.latency) % g_pace.displays.size()];
@@ -1424,13 +1445,17 @@ std::string pace_summary() {
                      m + 1 < PaceProbe::Margin ? "," : ";");
   }
   if (!g_pace.spikes.empty()) {
-    s += "; spikes";
+    // Its own line: logcat cuts the stats line short.
+    std::string spikes;
     for (const auto& sp : g_pace.spikes)
-      s += " " + sp;
+      spikes += " " + sp;
+    Log.info("Frames done after their slot (ms after the tick):{}", spikes);
     g_pace.spikes.clear();
   }
   auto& margin = g_pace.ms[PaceProbe::Margin];
   auto under = [&](float ms) { return std::count_if(margin.begin(), margin.end(), [&](float m) { return m < ms; }); };
+  s += fmt::format(" {} done over 1 ms after their slot;", g_pace.lateFrames);
+  g_pace.lateFrames = 0;
   s += fmt::format(" margin before display {:.1f} median, {:.1f} least; under 8/10/12/14 ms: {}/{}/{}/{} of {}",
                    pct(margin, 0.5f), pct(margin, 0.f), under(8.f), under(10.f), under(12.f), under(14.f),
                    margin.size());
@@ -1466,12 +1491,47 @@ void note_ready_latency(uint64_t lat) {
     p.latency = k;
     p.steadyLower = 0;
   } else if (k < p.latency) {
-    if (++p.steadyLower >= 4) {
+    const int64_t now = monotonic_ns();
+    while (k < p.latency && now < p.bannedUntilNs[k])
+      ++k;
+    if (k < p.latency && ++p.steadyLower >= 4) {
       p.latency = k;
       p.steadyLower = 0;
     }
   } else {
     p.steadyLower = 0;
+  }
+}
+
+// Android: each 3D frame's GPU work against its release at the latency it
+// was drawn at. The picker samples the GPU finishing less the render
+// worker's wait for an image, as if the image would come sooner at a lower
+// latency; on Mute City and Pokémon Stadium (four CPUs) it often didn't,
+// and frames at latency 3 finished at 26-28 ms against 25 and went stale.
+// More than 2 of the last 120 frames over a millisecond late, below the
+// cap, and the latency goes up one, the one left barred for 15 s (then 30,
+// 60, 120 if it fails again; 10 s held clears that).
+void note_lateness(int latency, bool late) {
+  auto& p = g_present;
+  if (p.forced >= 0 || latency != p.latency)
+    return;
+  if (p.lateLatency != p.latency) {
+    p.lateLatency = p.latency;
+    p.late = {};
+    p.lateCount = p.lateNext = p.lateFrames = 0;
+  }
+  p.lateCount += (late ? 1 : 0) - (p.late[p.lateNext] ? 1 : 0);
+  p.late[p.lateNext] = late;
+  p.lateNext = (p.lateNext + 1) % static_cast<int>(p.late.size());
+  if (++p.lateFrames == 600)
+    p.bans[p.latency] = 0;
+  const int cap = std::max(g_displayPerGameFrame.load(), 1) + 2;
+  if (p.lateCount > 2 && p.latency < cap) {
+    const int n = std::min(p.bans[p.latency]++, 3);
+    p.bannedUntilNs[p.latency] = monotonic_ns() + (int64_t{15'000'000'000} << n);
+    ++p.latency;
+    p.steadyLower = 0;
+    ++p.raisedForLate;
   }
 }
 
@@ -2955,12 +3015,16 @@ bool render_xr_frame() {
     pace_display(B.displayFrame, fs.predictedDisplayTime);
   {
     std::vector<uint8_t> done;
+    std::vector<std::pair<uint8_t, bool>> lateness;
     {
       std::lock_guard lock{g_pace.mutex};
       done.swap(g_pace.doneLatency);
+      lateness.swap(g_pace.lateness);
     }
     for (uint8_t lat : done)
       note_ready_latency(lat);
+    for (const auto& [lat, late] : lateness)
+      note_lateness(lat, late);
   }
   update_input();
   publish_views(fs.predictedDisplayTime);
@@ -3171,13 +3235,13 @@ bool render_xr_frame() {
                                 B.sectionMaxNs[i] / 1e6, B.sectionWorst[i]);
     Log.info("{:.1f} display fps ({:.0f}% 3D); frames/s released: screen {:.1f}, 3D {:.1f}, HUD {:.1f}; "
              "3D images shown 1/2/3/4+ display frames: {}/{}/{}/{}; presented {} display frames after the tick "
-             "({} held); XR loop: wait to end {:.1f} ms at most, {} over 4 ms; gaps {:.1f} ms at most, {} over 10 ms; "
+             "({} held, raised {} times for late frames); XR loop: wait to end {:.1f} ms at most, {} over 4 ms; gaps {:.1f} ms at most, {} over 10 ms; "
              "{:.1f} ms least before display; slow loops' sections (most ms, times largest): {}; "
              "early eyes {} ({} redrawn); image waits (most ms, over 2 ms) 3D {:.1f}/{} HUD {:.1f}/{} screen {:.1f}/{}{}",
              B.framesShown / secs, 100.0 * B.fightFrames / std::max<uint64_t>(B.framesShown, 1),
              B.releasedSinceStats[kScreen] / secs, B.releasedSinceStats[kStereo] / secs,
              B.releasedSinceStats[kHud] / secs, B.shownHistogram[0], B.shownHistogram[1], B.shownHistogram[2],
-             B.shownHistogram[3], g_present.latency, g_present.held, B.loopMaxNs / 1e6, B.loopOver4,
+             B.shownHistogram[3], g_present.latency, g_present.held, g_present.raisedForLate, B.loopMaxNs / 1e6, B.loopOver4,
              B.gapMaxNs / 1e6, B.gapOver10, B.leadMinNs / 1e6, sections, g_earlyEyes.exchange(0),
              g_earlyResumed.exchange(0), g_acquireWaitMaxNs[kStereo] / 1e6, g_acquireWaitsOver2[kStereo],
              g_acquireWaitMaxNs[kHud] / 1e6, g_acquireWaitsOver2[kHud], g_acquireWaitMaxNs[kScreen] / 1e6,
@@ -3191,6 +3255,7 @@ bool render_xr_frame() {
     B.loopOver4 = B.gapOver10 = 0;
     B.shownHistogram = {};
     g_present.held = 0;
+    g_present.raisedForLate = 0;
     B.framesShown = 0;
     B.fightFrames = 0;
     B.releasedSinceStats = {};
