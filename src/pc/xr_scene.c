@@ -1191,6 +1191,30 @@ bool pc_xr_fighter_offscreen_begin(void) {
 
 void pc_xr_fighter_offscreen_end(void) { base_clip(); }
 
+/* Each fighter takes the room light at its middle (its ECB's centre) for
+ * all its draws: one probe that moves with it, blended from the room
+ * light's grid (aurora_xr_light_probe), so it's lit as one body wherever it
+ * is on a big stage. */
+static bool s_fighter_light;
+
+void pc_xr_fighter_light_begin(HSD_GObj* gobj) {
+    if (!aurora_xr_active() || s_category != AURORA_XR_WORLD) {
+        return;
+    }
+    Vec3 c;
+    ftLib_GetECBCenter(gobj, &c);
+    const float p[3] = { c.x, c.y, c.z };
+    aurora_xr_light_probe(p);
+    s_fighter_light = true;
+}
+
+void pc_xr_fighter_light_end(void) {
+    if (s_fighter_light) {
+        aurora_xr_light_probe(NULL);
+        s_fighter_light = false;
+    }
+}
+
 /* The magnifier bubble (and its arrow) goes to the flat frame only: in XR
  * the fighter itself stays in view. Its game state is untouched, including
  * the off-screen flag the damage tick reads. */

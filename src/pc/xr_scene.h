@@ -97,6 +97,10 @@ bool pc_xr_fighter_offscreen_begin(void);
 /* MELEE_XR_OFFSCREEN=2: every fighter drawn as if off the flat camera (a measurement). */
 bool pc_xr_fighter_offscreen_forced(void);
 void pc_xr_fighter_offscreen_end(void);
+struct HSD_GObj;
+/* Around a fighter's draws (ft/ftdrawcommon.c): its room light probe. */
+void pc_xr_fighter_light_begin(struct HSD_GObj* gobj);
+void pc_xr_fighter_light_end(void);
 /* Around the magnifier bubble's draw (if/ifmagnify.c): true when it is kept
  * to the flat frame, off the XR HUD; then call pc_xr_magnify_end. */
 bool pc_xr_magnify_begin(void);
@@ -151,6 +155,9 @@ static inline void pc_xr_blast_clip_end(int began) { (void)began; }
 static inline bool pc_xr_fighter_offscreen_begin(void) { return false; }
 static inline bool pc_xr_fighter_offscreen_forced(void) { return false; }
 static inline void pc_xr_fighter_offscreen_end(void) {}
+struct HSD_GObj;
+static inline void pc_xr_fighter_light_begin(struct HSD_GObj* gobj) { (void)gobj; }
+static inline void pc_xr_fighter_light_end(void) {}
 static inline bool pc_xr_magnify_begin(void) { return false; }
 static inline void pc_xr_magnify_end(void) {}
 #endif

@@ -414,6 +414,9 @@ void ftDrawCommon_80080E18(HSD_GObj* gobj, intptr_t arg1)
             return;
         }
     }
+#ifdef TARGET_PC
+    pc_xr_fighter_light_begin(gobj);
+#endif
     {
         switch (Camera_80031060()) {
         case 1:
@@ -433,6 +436,7 @@ void ftDrawCommon_80080E18(HSD_GObj* gobj, intptr_t arg1)
         }
     }
 #ifdef TARGET_PC
+    pc_xr_fighter_light_end();
     if (offscreen_xr) {
         pc_xr_fighter_offscreen_end();
     }
