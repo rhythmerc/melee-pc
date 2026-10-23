@@ -1679,6 +1679,11 @@ typedef struct {
 } ParticleRule;
 
 static const ParticleRule s_particles[] = {
+    /* Peach's Castle: the water's splashes, left floating behind the castle
+     * once its water is hidden (texture group 2, y 2..10, the stage's only
+     * particles in a fight: MELEE_XR_PTCL_STATS; a 3D dump with and
+     * without). */
+    {0x02, 30, -1, 2},
     /* Kongo Jungle: the river's splashes (bank 30 is the stage's own), left
      * floating once the river is hidden. */
     {0x04, 30, -1, -1},
