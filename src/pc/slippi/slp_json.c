@@ -7,6 +7,7 @@
  * why this exists and what it covers. */
 #include "pc/slippi/slp_json.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -579,5 +580,35 @@ bool pc_slippi_json_string(const PcSlippiJson* node, char* out, size_t out_cap) 
         out[0] = '\0';
         return false;
     }
+    return true;
+}
+
+bool pc_slippi_json_escape(const char* s, char* out, size_t cap) {
+    size_t w = 0;
+    for (const unsigned char* p = (const unsigned char*)s; *p != '\0'; p++) {
+        char esc[8];
+        const char* add = NULL;
+        switch (*p) {
+        case '"': add = "\\\""; break;
+        case '\\': add = "\\\\"; break;
+        case '\n': add = "\\n"; break;
+        case '\r': add = "\\r"; break;
+        case '\t': add = "\\t"; break;
+        default:
+            if (*p < 0x20) {
+                snprintf(esc, sizeof esc, "\\u%04x", *p);
+                add = esc;
+            }
+            break;
+        }
+        const char* src = add != NULL ? add : (const char*)p;
+        size_t n = add != NULL ? strlen(add) : 1;
+        if (w + n >= cap) {
+            return false;
+        }
+        memcpy(out + w, src, n);
+        w += n;
+    }
+    out[w] = '\0';
     return true;
 }

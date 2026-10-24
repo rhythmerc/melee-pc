@@ -8,7 +8,8 @@
  * untrusted, so this parses the subset Slippi actually uses -- objects, arrays,
  * strings, numbers, true/false/null -- with a bounded, non-throwing reader that
  * refuses anything malformed instead of guessing. There is no writer here: the
- * one request we send (create-ticket) is small enough to format directly.
+ * requests we send are small enough to format directly, with
+ * pc_slippi_json_escape() for the strings in them.
  *
  * Strings keep pointing into the caller's input buffer (no copy); the parser
  * only decodes escapes into a caller-provided scratch buffer when asked, via
@@ -85,6 +86,12 @@ bool pc_slippi_json_is_array(const PcSlippiJson* node);
  * out_cap > 0) when the node is not a string or the decoded value does not fit;
  * a truncated copy is never returned as success. */
 bool pc_slippi_json_string(const PcSlippiJson* node, char* out, size_t out_cap);
+
+/* Escape `s` for embedding in a JSON string literal, into a bounded buffer.
+ * Returns false when the escaped value does not fit. A display name or a
+ * password may contain a quote or backslash, which must not break the
+ * request. */
+bool pc_slippi_json_escape(const char* s, char* out, size_t cap);
 
 #ifdef __cplusplus
 }

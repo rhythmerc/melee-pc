@@ -399,6 +399,23 @@ static void resp_str(const char* body, const char* key, char* out, size_t cap) {
     }
 }
 
+/* The account's strings escaped for the create-ticket body. A quote or
+ * backslash doubles a byte, so twice each field's bound always fits one that
+ * has no control bytes. */
+typedef struct EscapedUser {
+    char uid[PC_SLIPPI_UID_MAX * 2];
+    char play_key[PC_SLIPPI_PLAY_KEY_MAX * 2];
+    char connect_code[PC_SLIPPI_CONNECT_CODE_MAX * 2];
+    char display_name[PC_SLIPPI_DISPLAY_NAME_MAX * 2];
+} EscapedUser;
+
+static bool escape_user(const PcSlippiAccount* a, EscapedUser* out) {
+    return pc_slippi_json_escape(a->uid, out->uid, sizeof out->uid) &&
+           pc_slippi_json_escape(a->play_key, out->play_key, sizeof out->play_key) &&
+           pc_slippi_json_escape(a->connect_code, out->connect_code, sizeof out->connect_code) &&
+           pc_slippi_json_escape(a->display_name, out->display_name, sizeof out->display_name);
+}
+
 /* The search thread. Owns its ENet host and writes state under the lock. */
 static int match_thread(void* user) {
     PcSlippiMatch* m = (PcSlippiMatch*)user;
@@ -472,23 +489,26 @@ static int match_thread(void* user) {
                 snprintf(error, sizeof error, "connect failed");
             } else {
                 char reply[8192];
+                EscapedUser esc;
                 int stopped = 0;
                 int r = mm_receive(host, peer, NULL, PC_SLIPPI_MM_TIMEOUT_MS, reply, sizeof reply,
                                    &stopped, true);
                 if (r != 0) {
                     snprintf(error, sizeof error, "no connect to mm server");
+                } else if (!escape_user(&m->account, &esc)) {
+                    snprintf(error, sizeof error, "account details too long");
                 } else {
                     /* create-ticket. connectCode is a byte array; for Direct it
                      * is the target code, for Unranked empty. */
-                    char body[1400];
+                    char body[2048];
                     int w = snprintf(body, sizeof body, "{\"type\":\"create-ticket\","
                                                        "\"user\":{\"uid\":\"%s\","
                                                        "\"playKey\":\"%s\","
                                                        "\"connectCode\":\"%s\","
                                                        "\"displayName\":\"%s\"},"
                                                        "\"search\":{\"mode\":%d,\"connectCode\":[",
-                                     m->account.uid, m->account.play_key, m->account.connect_code,
-                                     m->account.display_name, m->mode);
+                                     esc.uid, esc.play_key, esc.connect_code, esc.display_name,
+                                     m->mode);
                     if (m->mode == PC_SLIPPI_MODE_DIRECT && m->connect_code[0]) {
                         for (const unsigned char* p = (const unsigned char*)m->connect_code; *p; p++) {
                             w += snprintf(body + w, sizeof body - w, "%s%u", p ==

@@ -587,39 +587,6 @@ bool pc_slippi_account_login_available(void) {
     return key != NULL && key[0] != '\0' && gql != NULL && gql[0] != '\0';
 }
 
-/* Escape a string for embedding in a JSON string literal, into a bounded
- * buffer. Email addresses and passwords are ASCII in practice, but a password
- * may contain a quote or backslash, which must not break the request. */
-static bool login_json_escape(const char* s, char* out, size_t cap) {
-    size_t w = 0;
-    for (const unsigned char* p = (const unsigned char*)s; *p != '\0'; p++) {
-        char esc[8];
-        const char* add = NULL;
-        switch (*p) {
-        case '"': add = "\\\""; break;
-        case '\\': add = "\\\\"; break;
-        case '\n': add = "\\n"; break;
-        case '\r': add = "\\r"; break;
-        case '\t': add = "\\t"; break;
-        default:
-            if (*p < 0x20) {
-                snprintf(esc, sizeof esc, "\\u%04x", *p);
-                add = esc;
-            }
-            break;
-        }
-        const char* src = add != NULL ? add : (const char*)p;
-        size_t n = add != NULL ? strlen(add) : 1;
-        if (w + n >= cap) {
-            return false;
-        }
-        memcpy(out + w, src, n);
-        w += n;
-    }
-    out[w] = '\0';
-    return true;
-}
-
 bool pc_slippi_account_login(const char* email, const char* password, PcSlippiAccount* out,
                              char* err, size_t err_cap) {
     if (out != NULL) {
@@ -647,8 +614,8 @@ bool pc_slippi_account_login(const char* email, const char* password, PcSlippiAc
     char url[512];
     int n = snprintf(url, sizeof url, PC_SLIPPI_FIREBASE_SIGNIN, key);
     char em[256], pw[256];
-    if (n < 0 || (size_t)n >= sizeof url || !login_json_escape(email, em, sizeof em) ||
-        !login_json_escape(password, pw, sizeof pw)) {
+    if (n < 0 || (size_t)n >= sizeof url || !pc_slippi_json_escape(email, em, sizeof em) ||
+        !pc_slippi_json_escape(password, pw, sizeof pw)) {
         if (err != NULL && err_cap > 0) {
             snprintf(err, err_cap, "Login credentials are too long");
         }
