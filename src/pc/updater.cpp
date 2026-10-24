@@ -7,6 +7,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -652,6 +653,20 @@ bool http_download_file_curl(
 }  // namespace
 
 void check_for_updates_async(bool include_prereleases) {
+    /* MELEE_UPDATER_FAKE=<tag>: a release with that tag is offered, with no
+     * network, to check the launcher's update card. */
+    if (const char* fake = std::getenv("MELEE_UPDATER_FAKE"); fake && *fake) {
+        std::lock_guard lock(g_updater_mutex);
+        g_updater_state = {};
+        g_updater_state.status = Status::UpdateAvailable;
+        g_updater_state.message = std::string("Xelee ") + fake + " is available.";
+        g_updater_state.latest_release.tag_name = fake;
+        g_updater_state.latest_release.name = std::string("Xelee ") + fake;
+        g_updater_state.latest_release.body = "A test release (MELEE_UPDATER_FAKE).";
+        g_updater_state.latest_release.prerelease = std::strchr(fake, '-') != nullptr;
+        g_updater_state.target_asset_name = "Xelee-Quest-arm64.apk";
+        return;
+    }
     {
         std::lock_guard lock(g_updater_mutex);
         if (g_updater_state.status == Status::Checking ||
