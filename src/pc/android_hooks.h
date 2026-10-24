@@ -53,6 +53,15 @@ void pc_android_set_launcher_active(bool active);
 bool pc_android_is_xr_activity(void);
 bool pc_android_launch_xr(const char* disc);
 void pc_android_launch_panel(void);
+/* The passthrough cameras' permission (HEADSET_CAMERA), for Roomtone
+ * lighting, from the launcher panel. pc_android_headset_camera_request asks
+ * (the system's prompt, unless already granted); _result is then -1 while
+ * asking, 0 declined, 1 granted, 2 declined and Android won't ask again.
+ * pc_android_open_app_settings opens Xelee's page in the system settings. */
+bool pc_android_headset_camera_granted(void);
+void pc_android_headset_camera_request(void);
+int pc_android_headset_camera_result(void);
+void pc_android_open_app_settings(void);
 /* The updater (updater.cpp). pc_android_download: fetch url into path,
  * blocking (call from a worker thread); true when it all arrived.
  * pc_android_install_apk: hand the APK at path to the system installer,

@@ -380,6 +380,9 @@ button.value {
     transform: skewX(-10deg);
 }
 button.value.action { decorator: none; }
+/* A pick value opens its choices (src/pc/rml_picklist.cpp): no arrows,
+ * since it doesn't step. */
+button.value.pick, button.value.pick:focus { decorator: none; }
 button.value:hover { border-color: #e0b030; color: #ffffff; }
 button.value:focus {
     background-color: #ffcb00;
@@ -509,3 +512,40 @@ input.range sliderarrowdec, input.range sliderarrowinc { width: 0; height: 0; }
     .row .name { font-size: 16dp; }
     #descbar { width: 92%; }
 }
+
+/* A row's choices, shown before one is taken (src/pc/rml_picklist.cpp):
+ * Melee's dark plates, the highlighted choice lit as a focused value. */
+.picklist.launcher {
+    padding: 4dp 0;
+    background-color: #0c0a06f4;
+    border: 2dp #e0b030;
+    border-radius: 5dp;
+}
+.picklist.launcher .item { display: flex; height: 34dp; line-height: 34dp; padding: 0 18dp; font-size: 17dp; color: #f4f0dc; }
+.picklist.launcher .item.cursor { background-color: #ffcb00; color: #141008; }
+.picklist.launcher .item.current { font-weight: bold; }
+.picklist.launcher .item .tag { margin-left: auto; font-size: 13dp; color: #c9b77c; }
+.picklist.launcher .item.cursor .tag { color: #4a3a10; }
+
+/* A question before the system's own (the camera permission, Lighting). */
+#camera-dialog {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 100%;
+    align-items: center;
+    justify-content: center;
+    background-color: #000000b0;
+}
+#camera-dialog .dialog-box {
+    width: 600dp;
+    padding: 24dp 28dp;
+    background-color: #141008f4;
+    border: 2dp #e0b030;
+    border-radius: 8dp;
+}
+#camera-dialog h2 { margin: 0 0 12dp; font-size: 22dp; color: #ffd84a; }
+#camera-dialog p { margin: 0 0 20dp; font-size: 16dp; line-height: 1.45; color: #f4f0dc; }
+#camera-dialog .dialog-buttons { display: flex; justify-content: flex-end; }
+#camera-dialog button.value { width: auto; margin-left: 14dp; }

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "launcher.h"
+#include "rml_picklist.hpp"
 #include "textures.h"
 #include "widescreen.h"
 #include "launcher_data.hpp"
@@ -27,6 +28,9 @@
 #endif
 #if defined(__APPLE__) && TARGET_OS_IPHONE
 #include "ios_dialog.h"
+#endif
+#if defined(__ANDROID__)
+#include "android_hooks.h"
 #endif
 #include <RmlUi/Core.h>
 #include <SDL3/SDL.h>
@@ -403,6 +407,15 @@ class Launcher final : public Rml::EventListener {
     Rml::Element* current_row = nullptr;
     // Where the pointer last moved, so only a real move steers the cursor.
     int pointer_x = -1, pointer_y = -1;
+    // A row's choices, open over the settings (a "pick" value: Lighting), and
+    // the row it's for. While open it takes every input.
+    pc::rml::PickList pick;
+    std::string pick_for;
+    // The camera question before the system's own (Lighting > Roomtone):
+    // 0 closed, 1 why the cameras, 2 Android won't ask again. While a request
+    // is with the system, camera_waiting.
+    int camera_dialog = 0;
+    bool camera_waiting = false;
 
     Rml::Element* element(const char* id) {
         if (std::strcmp(id, "fullscreen") == 0) {
@@ -453,7 +466,8 @@ class Launcher final : public Rml::EventListener {
     std::vector<std::string> page_focus() const {
         switch (tab) {
         case 0:
-            return {"display", "sync", "resolution", "xr-resolution", "spacewarp", "xr-foveation", "xr-shadow", "xr-place", "aspect",
+            return {"display", "sync", "resolution", "xr-resolution", "spacewarp", "xr-foveation", "xr-shadow", "xr-place",
+                "xr-lighting", "aspect",
                 "hud-mode", "aa", "filter-mode", "fps", "custom-textures", "backend",
                 "performance", "defaults-graphics"};
         case 1:
@@ -656,11 +670,169 @@ class Launcher final : public Rml::EventListener {
                 enter_rows();
         } else if (is_slider(id))
             step_slider(direction);
-        else if (focus->IsClassSet("value") && !focus->IsClassSet("action")) {
+        else if (focus->IsClassSet("value") && !focus->IsClassSet("action") && !focus->IsClassSet("pick")) {
             if (!cycle(id, direction))
                 action(id);  // two states: either arrow flips it
         } else if (settings && direction < 0)
             show_tab(tab);
+    }
+    static const char* lighting_name(int lighting) { return lighting == 1 ? "Roomtone (Beta)" : "Vanilla"; }
+    /* A "pick" value: its choices listed under it, the current one marked,
+     * so the player sees what they're changing to before taking it. */
+    void open_pick(const std::string& id) {
+        auto* button = element(id.c_str());
+        if (!button)
+            return;
+        std::vector<pc::rml::PickChoice> choices;
+        int current = 0;
+        if (id == "xr-lighting") {
+            choices = {{lighting_name(0), "default"}, {lighting_name(1), ""}};
+            current = prefs.xr_lighting;
+        } else
+            return;
+        pick_for = id;
+        pick.open(document, "", std::move(choices), current, button->GetAbsoluteLeft(),
+            button->GetAbsoluteTop() + button->GetOffsetHeight() + 4.0f, button->GetOffsetWidth(), "50% 0%",
+            "launcher", "skewX(-10deg)");
+    }
+    void close_pick() {
+        pick.close();
+        if (auto* e = element(pick_for.c_str()))
+            e->Focus();
+        pick_for.clear();
+    }
+    void picked(int choice) {
+        const std::string id = pick_for;
+        close_pick();
+        if (id == "xr-lighting")
+            choose_lighting(choice);
+    }
+    static bool camera_granted() {
+#if defined(__ANDROID__)
+        return pc_android_headset_camera_granted();
+#else
+        /* No permission to ask for off Android. MELEE_LAUNCHER_CAMERA=ask or
+         * blocked walks the dialogs on a desktop, as if it weren't granted
+         * and the system then granted it (ask) or wouldn't ask (blocked). */
+        return std::getenv("MELEE_LAUNCHER_CAMERA") == nullptr;
+#endif
+    }
+    /* Vanilla at once; Roomtone once the headset cameras may be used, after
+     * saying why (the camera dialog), before the system asks. */
+    void choose_lighting(int lighting) {
+        if (lighting == 0 || camera_granted()) {
+            prefs.xr_lighting = lighting;
+            save();
+            refresh_settings();
+            if (auto* e = element("xr-lighting"))
+                e->Focus();
+            return;
+        }
+        show_camera_dialog(1);
+    }
+    void show_camera_dialog(int mode) {
+        camera_dialog = mode;
+        if (mode == 1) {
+            text("camera-title", "Roomtone uses the headset's cameras");
+            text("camera-body",
+                "To light the fight like your room, Roomtone looks at the room through the passthrough cameras "
+                "to measure where the light comes from and its colour. The camera images are only used on the "
+                "headset to work out the light. They are never saved or sent anywhere.");
+            text("camera-allow", "Allow camera access");
+        } else {
+            text("camera-title", "Camera access is off for Xelee");
+            text("camera-body",
+                "The headset won't ask again. To use Roomtone, allow Xelee to use the headset cameras in its "
+                "settings, then pick Roomtone here again.");
+            text("camera-allow", "Open settings");
+        }
+        if (auto* e = element("camera-dialog"))
+            e->SetProperty("display", "flex");
+        if (auto* e = element("camera-allow"))
+            e->Focus();
+    }
+    void hide_camera_dialog() {
+        camera_dialog = 0;
+        if (auto* e = element("camera-dialog"))
+            e->SetProperty("display", "none");
+        if (auto* e = element("xr-lighting"))
+            e->Focus();
+    }
+    void camera_answer(bool allow) {
+        const int mode = camera_dialog;
+        hide_camera_dialog();
+        if (!allow) {
+            note("Lighting stays Vanilla.");
+            return;
+        }
+#if defined(__ANDROID__)
+        if (mode == 2) {
+            pc_android_open_app_settings();
+            note("Allow Xelee's camera access there, then pick Roomtone again.");
+            return;
+        }
+        camera_waiting = true;
+        pc_android_headset_camera_request();
+#else
+        const char* fake = std::getenv("MELEE_LAUNCHER_CAMERA");
+        if (mode == 2) {
+            note("Allow Xelee's camera access there, then pick Roomtone again.");
+        } else if (fake != nullptr && std::strcmp(fake, "blocked") == 0) {
+            show_camera_dialog(2);
+        } else {
+            prefs.xr_lighting = 1;
+            save();
+            refresh_settings();
+            note("Roomtone is on: fights are lit by your room's light.");
+        }
+#endif
+    }
+    /* Once a frame: the system's answer, once it has one. */
+    void poll_camera() {
+#if defined(__ANDROID__)
+        if (!camera_waiting)
+            return;
+        const int answer = pc_android_headset_camera_result();
+        if (answer < 0)
+            return;
+        camera_waiting = false;
+        if (answer == 1) {
+            prefs.xr_lighting = 1;
+            save();
+            refresh_settings();
+            note("Roomtone is on: fights are lit by your room's light.");
+        } else if (answer == 2) {
+            show_camera_dialog(2);
+        } else {
+            note("Roomtone needs the headset cameras. Lighting stays Vanilla.");
+        }
+#endif
+    }
+    /* While the choices or the camera dialog are up, they take the input:
+     * 0 up, 1 down, 2 left, 3 right, 4 confirm, 5 back. False when neither is. */
+    bool modal_input(int what) {
+        if (pick.is_open()) {
+            if (what <= 1)
+                pick.move(what == 0 ? -1 : 1);
+            else if (what == 4)
+                picked(pick.cursor());
+            else if (what == 5)
+                close_pick();
+            return true;
+        }
+        if (camera_dialog != 0) {
+            auto* focus = document->GetContext()->GetFocusElement();
+            const bool on_allow = focus && focus->GetId() == "camera-allow";
+            if (what <= 3) {
+                if (auto* e = element(on_allow ? "camera-cancel" : "camera-allow"))
+                    e->Focus();
+            } else if (what == 4)
+                camera_answer(on_allow);
+            else if (what == 5)
+                camera_answer(false);
+            return true;
+        }
+        return false;
     }
     /* The settings with more than two values, stepped either way. */
     bool cycle(const std::string& id, int direction) {
@@ -726,6 +898,7 @@ class Launcher final : public Rml::EventListener {
         text("xr-foveation", foveation_name(prefs.xr_foveation));
         text("xr-shadow", prefs.xr_shadow ? "On" : "Off");
         text("xr-place", prefs.xr_place_hold ? "Place the stage" : "Start right away");
+        text("xr-lighting", lighting_name(prefs.xr_lighting));
         text("aspect", prefs.widescreen == 0 ? "Original (73:60)" :
                        prefs.widescreen == 1 ? "Widescreen 16:9" :
                                                "Auto (window aspect)");
@@ -878,6 +1051,7 @@ class Launcher final : public Rml::EventListener {
             prefs.xr_foveation = d.xr_foveation;
             prefs.xr_shadow = d.xr_shadow;
             prefs.xr_place_hold = d.xr_place_hold;
+            prefs.xr_lighting = d.xr_lighting;
             message = "Graphics settings are back to their defaults.";
             if (restart)
                 message += " Anti-aliasing and the backend apply after a restart.";
@@ -956,6 +1130,14 @@ class Launcher final : public Rml::EventListener {
         if (id == "quit") {
             result = 0;
             cancel = true;
+            return;
+        }
+        if (id == "xr-lighting") {
+            open_pick(id);
+            return;
+        }
+        if (id == "camera-allow" || id == "camera-cancel") {
+            camera_answer(id == "camera-allow");
             return;
         }
         if (launcher_tab_index(id) >= 0) {
@@ -1278,6 +1460,37 @@ public:
         context->Update();
     }
     void ProcessEvent(Rml::Event& event) override {
+        // A row's choices take the pointer and the keys while they're open.
+        if (pick.is_open()) {
+            auto* target = event.GetTargetElement();
+            if (event.GetId() == Rml::EventId::Mousemove) {
+                pick.hover(target);
+                return;
+            }
+            if (event.GetId() == Rml::EventId::Click) {
+                const int choice = pick.clicked(target);
+                if (choice >= 0)
+                    picked(choice);
+                else if (!pick.contains(target))
+                    close_pick(); // a click beside them closes them
+                return;
+            }
+        }
+        if ((pick.is_open() || camera_dialog != 0) && event.GetId() == Rml::EventId::Keydown) {
+            const auto key = event.GetParameter<int>("key_identifier", 0);
+            const int what = key == Rml::Input::KI_UP       ? 0
+                             : key == Rml::Input::KI_DOWN   ? 1
+                             : key == Rml::Input::KI_LEFT   ? 2
+                             : key == Rml::Input::KI_RIGHT  ? 3
+                             : key == Rml::Input::KI_RETURN ? 4
+                             : key == Rml::Input::KI_ESCAPE ? 5
+                                                            : -1;
+            if (what >= 0) {
+                modal_input(what);
+                event.StopPropagation();
+            }
+            return;
+        }
         if (event.GetId() == Rml::EventId::Focus) {
             describe(event.GetTargetElement());
         } else if (event.GetId() == Rml::EventId::Mousemove) {
@@ -1361,6 +1574,13 @@ public:
     int run(const std::string& initial_error) {
         if (!prefs.disc.empty())
             inspect(prefs.disc);
+        /* Roomtone without the headset cameras (turned off in the system's
+         * settings since) would light nothing: back to Vanilla. */
+        if (prefs.xr_lighting == 1 && !camera_granted() && !std::getenv("MELEE_LAUNCHER_CAMERA")) {
+            prefs.xr_lighting = 0;
+            save();
+            status("Lighting is back to Vanilla: Roomtone needs the headset cameras, and their access is off.");
+        }
         if (!initial_error.empty())
             status(initial_error, true);
         while (result == -2) {
@@ -1370,6 +1590,8 @@ public:
                 break;
             }
             auto* events = aurora_update();
+            pick.update();
+            poll_camera();
             /* The sign-in runs on a worker; pick it up here and repaint. */
             if (slippi_auth.poll() && settings)
                 refresh_settings();
@@ -1380,7 +1602,26 @@ public:
                 }
                 if (e->type != AURORA_SDL_EVENT)
                     continue;
-                if (e->sdl.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+                if (e->sdl.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && (pick.is_open() || camera_dialog != 0)) {
+                    const auto button = e->sdl.gbutton.button;
+                    modal_input(button == SDL_GAMEPAD_BUTTON_DPAD_UP      ? 0
+                                : button == SDL_GAMEPAD_BUTTON_DPAD_DOWN  ? 1
+                                : button == SDL_GAMEPAD_BUTTON_DPAD_LEFT  ? 2
+                                : button == SDL_GAMEPAD_BUTTON_DPAD_RIGHT ? 3
+                                : button == SDL_GAMEPAD_BUTTON_SOUTH || button == SDL_GAMEPAD_BUTTON_START ? 4
+                                : button == SDL_GAMEPAD_BUTTON_EAST       ? 5
+                                                                          : -1);
+                } else if (e->sdl.type == SDL_EVENT_GAMEPAD_AXIS_MOTION && (pick.is_open() || camera_dialog != 0)) {
+                    const auto value = e->sdl.gaxis.value;
+                    const auto now = SDL_GetTicks();
+                    if (std::abs(value) > 18000 && now - last_axis > 200) {
+                        if (e->sdl.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTY)
+                            modal_input(value > 0 ? 1 : 0);
+                        else if (e->sdl.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTX)
+                            modal_input(value > 0 ? 3 : 2);
+                        last_axis = now;
+                    }
+                } else if (e->sdl.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
                     auto button = e->sdl.gbutton.button;
                     if (button == SDL_GAMEPAD_BUTTON_DPAD_DOWN)
                         focus_step(1);
@@ -1695,6 +1936,7 @@ extern "C" void pc_launcher_configure(AuroraConfig* config) {
     config->xrNoSpaceWarp = !prefs.xr_spacewarp;
     config->xrFoveation = prefs.xr_foveation;
     config->xrNoStageShadow = !prefs.xr_shadow;
+    config->xrRoomLight = prefs.xr_lighting;
     config->maxTextureAnisotropy = prefs.anisotropy;
     if (!std::getenv("MELEE_VSYNC"))
         config->vsync = prefs.vsync;

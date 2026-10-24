@@ -28,9 +28,10 @@
     <uses-permission android:name="com.oculus.permission.USE_SCENE" />
     <!-- Passthrough Camera API: while a room capture runs (the dev tools'
          Light page, source ROOM), one passthrough camera's frames, reduced to
-         grids of mean colour, give the room's light for XR room lighting
+         grids of mean colour, give the room's light for Roomtone lighting
          (dev.melee.RoomCapture; Quest 3 and 3S). Frames never leave the game.
-         Asked for in the launcher panel too. -->
+         Asked for by the launcher only when the player picks Roomtone
+         lighting, after it says why (MeleeActivity.requestHeadsetCamera). -->
     <uses-permission android:name="horizonos.permission.HEADSET_CAMERA" />
 
     <!-- Spatial anchors: the stage spot kept in the room across launches

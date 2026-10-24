@@ -97,17 +97,17 @@ public class MeleeActivity extends SDLActivity {
 
     /* Runtime permissions the Quest build's game uses when granted, and does
      * without otherwise: spatial data (USE_SCENE, both names; the stage's
-     * shadow on the real surface under it) and the passthrough cameras
-     * (HEADSET_CAMERA; the room's light, captured for XR room lighting,
-     * RoomCapture). Asked for here, in the launcher
+     * shadow on the real surface under it). Asked for here, in the launcher
      * panel, once the graphics device is up, never in the immersive game: a
      * grant is the package's, so it covers the game's process too. Only the
      * ones this build's manifest declares (none on phones), once a launch;
-     * Android itself stops asking after repeated denials. */
+     * Android itself stops asking after repeated denials. The passthrough
+     * cameras (HEADSET_CAMERA) are not asked for here: only when the player
+     * picks Roomtone lighting, after the launcher says why
+     * (requestHeadsetCamera). */
     private static final String[] XR_PERMISSIONS = {
         "horizonos.permission.USE_SCENE",
         "com.oculus.permission.USE_SCENE",
-        "horizonos.permission.HEADSET_CAMERA",
     };
     private static final int XR_PERMISSIONS_REQUEST = 0x4d58; /* clear of SDL's own request codes */
     private boolean mXrPermissionsAsked;
@@ -147,8 +147,69 @@ public class MeleeActivity extends SDLActivity {
         }
     }
 
+    /* The passthrough cameras, for Roomtone lighting (the room's light,
+     * RoomCapture). Called from native (src/pc/android_compat.cpp) by the
+     * launcher's Lighting row, after its own explanation. */
+    private static final String HEADSET_CAMERA = "horizonos.permission.HEADSET_CAMERA";
+    private static final int CAMERA_REQUEST = 0x4d59;
+    /* The last request's answer: -1 asking, 0 declined, 1 granted, 2 declined
+     * and Android won't ask again (the system settings can still allow it). */
+    private static volatile int sCameraResult = -1;
+
+    public boolean hasHeadsetCamera() {
+        return android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.M
+            || checkSelfPermission(HEADSET_CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED;
+    }
+
+    public void requestHeadsetCamera() {
+        if (hasHeadsetCamera()) {
+            sCameraResult = 1;
+            return;
+        }
+        sCameraResult = -1;
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                android.util.Log.i("melee", "permission " + HEADSET_CAMERA + ": asking (Roomtone)");
+                requestPermissions(new String[] {HEADSET_CAMERA}, CAMERA_REQUEST);
+            }
+        });
+    }
+
+    public int headsetCameraResult() {
+        return sCameraResult;
+    }
+
+    /* Xelee's page in the system settings, where a permission Android won't
+     * ask for again can still be allowed. */
+    public void openAppSettings() {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    android.content.Intent intent = new android.content.Intent(
+                        android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        android.net.Uri.fromParts("package", getPackageName(), null));
+                    intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(intent);
+                } catch (android.content.ActivityNotFoundException e) {
+                    android.util.Log.w("melee", "no app settings page: " + e);
+                }
+            }
+        });
+    }
+
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        if (requestCode == CAMERA_REQUEST) {
+            final boolean granted = grantResults.length > 0
+                && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED;
+            /* Declined with no rationale to show: Android won't ask again. */
+            sCameraResult = granted ? 1 : (shouldShowRequestPermissionRationale(HEADSET_CAMERA) ? 0 : 2);
+            android.util.Log.i("melee", "permission " + HEADSET_CAMERA + ": "
+                + (granted ? "granted" : sCameraResult == 2 ? "denied, won't ask again" : "denied"));
+            return;
+        }
         if (requestCode != XR_PERMISSIONS_REQUEST) {
             super.onRequestPermissionsResult(requestCode, permissions, grantResults);
             return;

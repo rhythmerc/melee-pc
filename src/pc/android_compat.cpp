@@ -245,6 +245,33 @@ void pc_android_set_launcher_active(bool active) {
     env->DeleteLocalRef(activity);
 }
 
+/* Call a method taking nothing and returning an int (or a boolean, as 0/1)
+ * on the current activity; `fallback` when it can't. */
+static int call_activity_int(const char* name, const char* sig, int fallback) {
+    JNIEnv* env = (JNIEnv*)SDL_GetAndroidJNIEnv();
+    jobject activity = env != nullptr ? (jobject)SDL_GetAndroidActivity() : nullptr;
+    if (env == nullptr || activity == nullptr) {
+        return fallback;
+    }
+    int value = fallback;
+    jclass cls = env->GetObjectClass(activity);
+    jmethodID method = cls != nullptr ? env->GetMethodID(cls, name, sig) : nullptr;
+    if (method != nullptr) {
+        const int got = sig[2] == 'Z' ? (env->CallBooleanMethod(activity, method) ? 1 : 0)
+                                      : static_cast<int>(env->CallIntMethod(activity, method));
+        if (!threw(env, name)) {
+            value = got;
+        }
+    } else {
+        env->ExceptionClear();
+    }
+    if (cls != nullptr) {
+        env->DeleteLocalRef(cls);
+    }
+    env->DeleteLocalRef(activity);
+    return value;
+}
+
 /* Call a void method on the current activity (it posts to its UI thread). */
 static bool call_activity(const char* name, const char* sig, const char* arg) {
     JNIEnv* env = (JNIEnv*)SDL_GetAndroidJNIEnv();
@@ -377,6 +404,22 @@ extern "C" JNIEXPORT void JNICALL Java_dev_melee_RoomCapture_nativeFrame(JNIEnv*
 }
 #endif
 
+bool pc_android_headset_camera_granted(void) {
+    return call_activity_int("hasHeadsetCamera", "()Z", 0) != 0;
+}
+
+void pc_android_headset_camera_request(void) {
+    call_activity("requestHeadsetCamera", "()V", nullptr);
+}
+
+int pc_android_headset_camera_result(void) {
+    return call_activity_int("headsetCameraResult", "()I", 0);
+}
+
+void pc_android_open_app_settings(void) {
+    call_activity("openAppSettings", "()V", nullptr);
+}
+
 #else
 
 void pc_android_multicast_lock_acquire(void) {}
@@ -412,4 +455,17 @@ const char* pc_android_device_name(void) {
     return nullptr;
 }
 
+bool pc_android_headset_camera_granted(void) {
+    return true;
+}
+
+void pc_android_headset_camera_request(void) {}
+
+int pc_android_headset_camera_result(void) {
+    return 1;
+}
+
+void pc_android_open_app_settings(void) {}
+
 #endif
+

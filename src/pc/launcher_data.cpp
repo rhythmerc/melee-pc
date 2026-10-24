@@ -412,6 +412,10 @@ Preferences load_preferences(const std::filesystem::path& path) {
             int value;
             if (row >> value && value >= 0 && value <= 3)
                 prefs.xr_foveation = value;
+        } else if (key == "xr_lighting") {
+            int value;
+            if (row >> value && value >= 0 && value <= 1)
+                prefs.xr_lighting = value;
         } else if (key == "xr_resolution") {
             int value;
             if (row >> value && (value == 0 || (value >= 80 && value <= 130 && value % 10 == 0)))
@@ -461,7 +465,7 @@ bool save_preferences(
          << "\nxr_resolution " << prefs.xr_resolution
          << "\nxr_spacewarp " << prefs.xr_spacewarp << "\nxr_foveation " << prefs.xr_foveation
          << "\nxr_shadow " << prefs.xr_shadow
-         << "\nxr_place_hold " << prefs.xr_place_hold << '\n';
+         << "\nxr_place_hold " << prefs.xr_place_hold << "\nxr_lighting " << prefs.xr_lighting << '\n';
     auto data = text.str();
     size_t done = 0;
     bool ok = true;

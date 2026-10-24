@@ -17,9 +17,9 @@ import android.util.Log;
  * (aurora_xr_room_capture_wanted: the 20 s after ROOM is chosen, or ambient
  * while it's the source, in the menus and while the stage is placed, when
  * only a frame each AMBIENT_MS is used). While one is, with the passthrough camera
- * permission (horizonos.permission.HEADSET_CAMERA, asked for in the launcher
- * panel), it streams one passthrough camera (the left one, by Meta's vendor
- * tags) at 1280x1280, its square size (the whole sensor, scaled, so its
+ * permission (horizonos.permission.HEADSET_CAMERA, asked for by the launcher
+ * when Roomtone lighting is picked), it streams one passthrough camera (the
+ * left one, by Meta's vendor tags) at 1280x1280, its square size (the whole sensor, scaled, so its
  * calibration applies as it is), at its lowest frame rate. Each frame
  * becomes a 32x32 grid of mean linear RGB (BT.601 full range, decoded from
  * sRGB) and the share of each cell that clipped (luma 250 or more: a lamp

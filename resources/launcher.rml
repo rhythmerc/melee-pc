@@ -70,6 +70,7 @@
           <div class="row quest-only" data-desc="Fixed foveated rendering: the edges of each eye, where the lenses are least sharp, are drawn at a lower resolution, leaving the GPU more room. Higher levels save more and soften more of the edges."><span class="name">Foveation</span><button id="xr-foveation" class="value">Off</button></div>
           <div class="row quest-only" data-desc="A soft shadow under the stage on the desk or table it sits over, found with the headset's depth sensing."><span class="name">Stage shadow</span><button id="xr-shadow" class="value">On</button></div>
           <div class="row quest-only" data-desc="Hold each fight's first frame to move, turn and size the stage, or start right away where your stage spot is. Either way, the pause moves it any time."><span class="name">Before each fight</span><button id="xr-place" class="value">Place the stage</button></div>
+          <div class="row quest-only" data-desc="How fights are lit. Vanilla is Melee's own lighting. Roomtone (Beta) lights the fighters and the stage with your room's light, measured through the headset's cameras."><span class="name">Lighting</span><button id="xr-lighting" class="value pick">Vanilla</button></div>
           <div class="row no-quest" data-desc="Applies to fights. Menus and cutscenes keep the original aspect."><span class="name">Aspect ratio</span><button id="aspect" class="value">Original (73:60)</button></div>
           <div class="row no-quest" data-desc="Classic keeps 4:3 safe margins; Wide anchors damage and stocks to the 16:9 edges."><span class="name">HUD layout</span><button id="hud-mode" class="value">Classic (4:3)</button></div>
           <div class="row no-quest" data-desc="Smooth polygon edges with multisampling. Applies after a restart."><span class="name">Anti-aliasing <span class="badge">RESTART</span></span><button id="aa" class="value">Anti-aliasing</button></div>
@@ -135,6 +136,13 @@
       </div>
     </div>
     <div id="descbar"><p id="desc">Pick a disc to play.</p></div>
+  </div>
+  <div id="camera-dialog" style="display: none;">
+    <div class="dialog-box">
+      <h2 id="camera-title">Roomtone uses the headset's cameras</h2>
+      <p id="camera-body"></p>
+      <div class="dialog-buttons"><button id="camera-allow" class="value action">Allow camera access</button><button id="camera-cancel" class="value action">Not now</button></div>
+    </div>
   </div>
   <div id="hints" class="no-mobile no-quest">Arrows / D-Pad Move<span>Enter / A Select</span><span>Esc / B Back</span></div>
 </body>
