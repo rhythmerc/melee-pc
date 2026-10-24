@@ -60,9 +60,11 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="com.oculus.intent.category.2D" />
             </intent-filter>
+            <!-- Horizon OS's own default panel size (its panel sizing guide);
+                 the launcher's Quest layout fits it without scrolling. -->
             <layout
-                android:defaultWidth="1280dp"
-                android:defaultHeight="800dp"
+                android:defaultWidth="1024dp"
+                android:defaultHeight="640dp"
                 android:minWidth="800dp"
                 android:minHeight="500dp" />
         </activity>
