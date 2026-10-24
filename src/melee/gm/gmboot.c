@@ -84,6 +84,9 @@ u8 pc_boot_scene(void)
         } else if (strcmp(want, "login") == 0) {
             scene = GM_ONLINE;
             gmOnline_SetKind(ONLINE_KIND_LOGIN);
+        } else if (strcmp(want, "register") == 0) {
+            scene = GM_ONLINE;
+            gmOnline_SetKind(ONLINE_KIND_REGISTER);
         } else if (strcmp(want, "place") == 0) {
             scene = GM_ONLINE;
             gmOnline_SetKind(ONLINE_KIND_PLACE);
@@ -91,7 +94,7 @@ u8 pc_boot_scene(void)
             scene = GM_MENU;
         } else {
             OSReport("MELEE_BOOT_SCENE: unknown scene '%s'; valid values are "
-                     "title, vs, css, classic, adventure, allstar, homerun, training, unranked, direct, ranked, login, place, menu\n",
+                     "title, vs, css, classic, adventure, allstar, homerun, training, unranked, direct, ranked, login, register, place, menu\n",
                      want);
         }
     }

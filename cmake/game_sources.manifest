@@ -885,6 +885,7 @@ src/melee/mn/mnonline.c
 src/melee/mn/mnonlinecss.c
 src/melee/mn/mnonlinelobby.c
 src/melee/mn/mnruleplus.c
+src/melee/mn/mnslippi.c
 src/melee/mn/mnsnap.c
 src/melee/mn/mnsound.c
 src/melee/mn/mnsoundtest.c

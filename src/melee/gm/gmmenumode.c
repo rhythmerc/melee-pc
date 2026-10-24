@@ -16,6 +16,7 @@
 #ifdef TARGET_PC
 #include "gmonlinemode.h"
 #ifdef TARGET_PC
+#include "pc/net_match.h"
 #include "pc/xr_place.h"
 #endif
 #endif
@@ -204,6 +205,11 @@ void onEnter(GameModeState* scene)
         case ONLINE_KIND_LOGIN:
             data->menu_kind = MENU_KIND_ONLINE_SLIPPI;
             data->hovered_selection = 0;
+            break;
+        case ONLINE_KIND_REGISTER:
+            /* Signed in now: Unranked, the first row. Else back on Register. */
+            data->menu_kind = MENU_KIND_ONLINE_SLIPPI;
+            data->hovered_selection = pc_net_match_slippi_ready() ? 0 : 1;
             break;
         case ONLINE_KIND_PLACE:
             if (gmOnline_TakePlaceFromOptions()) {

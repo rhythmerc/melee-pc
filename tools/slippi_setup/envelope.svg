@@ -1,0 +1,18 @@
+<!-- The email step's picture (src/pc/slippi_menu.cpp), in Fight Controls' gold
+     line work. Baked to resources/slippi-setup/envelope.png by make_art.sh. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="690" viewBox="0 0 380 345">
+  <defs>
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="4" result="b"/>
+      <feColorMatrix in="b" type="matrix" values="1 0 0 0 0.1  0 0.6 0 0 0  0 0 0.1 0 0  0 0 0 0.9 0" result="g"/>
+      <feMerge><feMergeNode in="g"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round" filter="url(#glow)">
+    <rect x="40" y="95" width="290" height="195" rx="13" stroke="#f0c226" stroke-width="5.5"/>
+    <path d="M49 106 L185 204 L321 106" stroke="#f0c226" stroke-width="5.5"/>
+    <path d="M49 280 L146 183 M321 280 L224 183" stroke="#f0c226" stroke-width="3.5"/>
+    <circle cx="298" cy="95" r="37" stroke="#fff4c4" stroke-width="5.5" fill="#0c0b08"/>
+    <path d="M283 95 l11 11 l20 -22" stroke="#fff4c4" stroke-width="5.5"/>
+  </g>
+</svg>

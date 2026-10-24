@@ -110,7 +110,7 @@ static u16 mn_803EAE7C[] = {
     0x2, 0x3, 0x4, 0x9, 0xB, 0xC, 0xD, 0x0,
 };
 #ifdef TARGET_PC
-#define MENU_KIND_TABLE_LEN (MENU_KIND_SETTINGS_FIGHT + 1)
+#define MENU_KIND_TABLE_LEN (MENU_KIND_SLIPPI_PAGE + 1)
 #else
 #define MENU_KIND_TABLE_LEN 0x22
 #endif
@@ -302,6 +302,12 @@ static AnimLoopSettings mn_803EAE8C[MENU_KIND_TABLE_LEN][3] = {
         { 4200, 4249, 4220 },
         { 4250, 4299, 4270 },
         { 4300, 4399, 4320 },
+    },
+    { /* MENU_KIND_SLIPPI_PAGE: Name Entry's (VS. Mode's red frame with a
+       * sub-title tab); mnslippi.c swaps the sub-title */
+        { 3000, 3049, 3020 },
+        { 3050, 3099, 3070 },
+        { 3100, 3199, 3120 },
     },
 #endif
 };
@@ -697,6 +703,13 @@ MenuKindData mn_803EB6B0[MENU_KIND_TABLE_LEN] = {
         mnOnline_SlippiThink,
     },
     { /* MENU_KIND_SETTINGS_FIGHT: its own GObjs (mnfight.c), as Sound's */
+        NULL,
+        0,
+        NULL,
+        0x01,
+        NULL,
+    },
+    { /* MENU_KIND_SLIPPI_PAGE: its own GObjs (mnslippi.c) */
         NULL,
         0,
         NULL,
@@ -2223,6 +2236,7 @@ int mn_8022C010(int menu_kind, int selection)
 #ifdef TARGET_PC
     case MENU_KIND_ONLINE:
     case MENU_KIND_ONLINE_SLIPPI:
+    case MENU_KIND_SLIPPI_PAGE:
 #endif
         return 1;
     case MENU_KIND_TOY:

@@ -29,7 +29,7 @@ static const char* const online_descriptions[] = {
     "Play another player on your local network.",
 };
 
-/* Online Mode > Slippi: signed out there is only Login; signed in it is
+/* Online Mode > Slippi: signed out it is Login and Register; signed in it is
  * Unranked, Direct, Place Stage (only with a headset presenting) and Logout. */
 enum { row_unranked, row_direct, row_place, row_logout, row_count };
 static const char* const slippi_in_labels[row_count] = { "Unranked", "Direct", "Place Stage",
@@ -57,7 +57,7 @@ static int slippi_built_count;
 
 int mnOnline_SlippiCount(void)
 {
-    return pc_net_match_slippi_ready() ? (pc_xr_place_available() ? row_count : row_count - 1) : 1;
+    return pc_net_match_slippi_ready() ? (pc_xr_place_available() ? row_count : row_count - 1) : 2;
 }
 
 void mnOnline_SlippiBuilt(void)
@@ -83,7 +83,7 @@ const char* mnOnline_Label(MenuKind kind, int selection)
     }
     if (kind == MENU_KIND_ONLINE_SLIPPI) {
         if (!pc_net_match_slippi_ready()) {
-            return selection == 0 ? "Login" : NULL;
+            return selection == 0 ? "Login" : selection == 1 ? "Register" : NULL;
         }
         if (slippiRow(selection) >= 0) {
             return slippi_in_labels[slippiRow(selection)];
@@ -110,7 +110,9 @@ const char* mnOnline_Description(MenuKind kind, int selection)
     }
     if (kind == MENU_KIND_ONLINE_SLIPPI) {
         if (!pc_net_match_slippi_ready()) {
-            return selection == 0 ? "Sign in to your Slippi account." : NULL;
+            return selection == 0 ? "Sign in to your Slippi account."
+                   : selection == 1 ? "Make a new Slippi account."
+                                    : NULL;
         }
         if (slippiRow(selection) >= 0) {
             return slippi_in_descriptions[slippiRow(selection)];
@@ -211,7 +213,7 @@ void mnOnline_SlippiThink(HSD_GObj* gp)
     }
     if (buttons & MenuInput_Confirm) {
         if (!signed_in) {
-            enterOnline(ONLINE_KIND_LOGIN);
+            enterOnline(mn_804A04F0.hovered_selection == 1 ? ONLINE_KIND_REGISTER : ONLINE_KIND_LOGIN);
             return;
         }
         switch (slippiRow(mn_804A04F0.hovered_selection)) {

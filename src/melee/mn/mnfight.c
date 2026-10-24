@@ -4,6 +4,7 @@
 #include "inlines.h"
 #include "mnmain.h"
 #include "types.h"
+#include "mnslippi.h"
 #include "pc/fight_menu.h"
 #include <melee/it/forward.h>
 #include <melee/lb/lb_00B0.h>
@@ -244,48 +245,75 @@ static void mnFight_TitleItalic(void* gobj_)
     GXLoadPosMtxImm(out, 0);
 }
 
-/* The tab's title: Erase Data's texture hidden, "Fight Controls" in SIS
- * text where it sits, following it through the tab's slide in and out. */
+/* The tab's sub-title of a PC page, or NULL for a stock kind. */
+static const char* mnFight_PageTitle(MenuKind kind)
+{
+    switch (kind) {
+    case MENU_KIND_SETTINGS_FIGHT:
+        return "Fight Controls";
+    case MENU_KIND_SLIPPI_PAGE:
+        return mnSlippi_Title();
+    default:
+        return NULL;
+    }
+}
+
+/* The tab's title on a PC page: the borrowed page's texture hidden, ours in
+ * SIS text where it sits, following it through the tab's slide in and out. */
+static HSD_Text* mnFight_title;
+static char mnFight_titleShown[32];
+static bool mnFight_titleHidden;
+
 void mnFight_PanelTitle(HSD_JObj* panel, MenuKind cur, MenuKind prev, bool leaving)
 {
     /* Sampled from the stock sub-titles: a light grey. */
     static const GXColor colour = { 0x9C, 0x9C, 0x9C, 0xFF };
-    static HSD_Text* title;
-    static bool hidden;
-    const bool ours = cur == MENU_KIND_SETTINGS_FIGHT || (leaving && prev == MENU_KIND_SETTINGS_FIGHT);
+    const char* text = mnFight_PageTitle(cur);
     HSD_JObj* joint = NULL;
     Vec3 pos;
 
+    if (text == NULL && leaving) {
+        text = mnFight_PageTitle(prev);
+    }
     lb_80011E24(panel, &joint, PANEL_TITLE_JOINT, -1);
     if (joint == NULL) {
         return;
     }
     mnFight_titleJoint = joint;
-    if (!ours) {
-        if (title != NULL) {
-            HSD_SisLib_803A5CC4(title);
-            title = NULL;
-        }
-        if (hidden) {
+    if (mnFight_title != NULL && (text == NULL || strcmp(text, mnFight_titleShown) != 0)) {
+        HSD_SisLib_803A5CC4(mnFight_title);
+        mnFight_title = NULL;
+    }
+    if (text == NULL) {
+        if (mnFight_titleHidden) {
             HSD_JObjClearFlagsAll(joint, JOBJ_HIDDEN);
-            hidden = false;
+            mnFight_titleHidden = false;
         }
         return;
     }
     HSD_JObjSetFlagsAll(joint, JOBJ_HIDDEN);
-    hidden = true;
-    if (title == NULL) {
-        title = HSD_SisLib_803A6754(0, mn_804D6BB4);
-        title->default_kerning = 1;
+    mnFight_titleHidden = true;
+    if (mnFight_title == NULL) {
+        snprintf(mnFight_titleShown, sizeof mnFight_titleShown, "%s", text);
+        mnFight_title = HSD_SisLib_803A6754(0, mn_804D6BB4);
+        mnFight_title->default_kerning = 1;
         /* Condensed a little: 14 letters in the tab that holds "Erase Data". */
-        title->font_size.x = 0.031f;
-        title->font_size.y = 0.038f;
-        HSD_SisLib_803A6B98(title, 0.0f, 0.0f, "%s", "Fight Controls");
-        title->render_callback = mnFight_TitleItalic;
+        mnFight_title->font_size.x = 0.031f;
+        mnFight_title->font_size.y = 0.038f;
+        HSD_SisLib_803A6B98(mnFight_title, 0.0f, 0.0f, "%s", mnFight_titleShown);
+        mnFight_title->render_callback = mnFight_TitleItalic;
     }
     lb_8000B1CC(joint, NULL, &pos);
-    title->pos_x = pos.x;
-    title->pos_y = -pos.y - 16.0f * title->font_size.y;
-    title->pos_z = pos.z;
-    HSD_SisLib_803A74F0(title, 0, (GXColor*) &colour);
+    /* The stock sub-titles start a little in from the tab's slanted left edge
+     * (Name Entry's, measured: ~12 px of 1280); the joint's origin is on it. */
+    mnFight_title->pos_x = pos.x + 0.4f;
+    mnFight_title->pos_y = -pos.y - 16.0f * mnFight_title->font_size.y;
+    mnFight_title->pos_z = pos.z;
+    HSD_SisLib_803A74F0(mnFight_title, 0, (GXColor*) &colour);
+}
+
+void mnFight_PanelTitleForget(void)
+{
+    mnFight_title = NULL;
+    mnFight_titleHidden = false;
 }

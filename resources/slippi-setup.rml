@@ -1,0 +1,4 @@
+<rml><head><title>Slippi</title><link type="text/rcss" href="slippi-setup.rcss" /></head>
+<body>
+<div id="screen"><div id="board"></div></div>
+</body></rml>

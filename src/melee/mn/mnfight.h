@@ -17,5 +17,8 @@ void mnFight_Init(void);
 /* Each frame, from the panel's think (fn_80229BF4): the tab's title. The
  * panel is `panel`, showing `cur` (and leaving `prev` when `leaving`). */
 void mnFight_PanelTitle(HSD_JObj* panel, MenuKind cur, MenuKind prev, bool leaving);
+/* A scene that frees every SIS text (HSD_SisLib_803A5E70) and its panel to
+ * build another screen calls this: the title went with them. */
+void mnFight_PanelTitleForget(void);
 
 #endif

@@ -124,6 +124,9 @@ typedef enum MenuKind {
     MENU_KIND_ONLINE_SLIPPI = 35,
     /* PC: Options > Fight Controls (mnfight.c). */
     MENU_KIND_SETTINGS_FIGHT = 36,
+    /* PC: the Slippi sign-in, sign-up and setup pages (mnslippi.c), shown in
+     * the online lobby scene. */
+    MENU_KIND_SLIPPI_PAGE = 37,
 #endif
 } MenuKind;
 

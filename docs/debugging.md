@@ -87,6 +87,7 @@ only; none of them fixes anything. User-facing knobs (`MELEE_BACKEND`,
 | `MELEE_HEAP_CHECK=1` | Canaries on every heap allocation, checked each frame; aborts at the first stomp. |
 | `MELEE_SEED=<n>` | Deterministic RNG for the attract demo. |
 | `MELEE_LAUNCHER_PLATFORM=desktop\|mobile\|quest` | Lay the launcher out as that platform does (what it hides), to check the phone or Quest panel layout from a desktop. |
+| `MELEE_SLIPPI_AUTH_HOST=<url>`, `MELEE_SLIPPI_TYPED=<a;b;...>` | Point the Slippi account calls (sign-in, sign-up, email, rules, connect code) at `tools/slippi_fake_auth.py` instead of Firebase, with `MELEE_SLIPPI_FIREBASE_KEY=fake` and `MELEE_SLIPPI_GRAPHQL_ENDPOINT=<url>/graphql`; and answer the Login and Register keyboards from a list (`<back>` is Back). `MELEE_BOOT_SCENE=login` or `register` opens those pages. |
 | `MELEE_AUDIO_DUMP=<file>` | Also write the mix as raw f32 stereo 32 kHz. |
 | `MELEE_SFX_STATS=1` | Sound-effect request/accept/reject counts. |
 | `MELEE_AUDIO_STATS=1` | Per-0.5s voice census. |

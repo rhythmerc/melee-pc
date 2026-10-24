@@ -23,6 +23,7 @@
 #include <melee/lb/lbaudio_ax.h>
 #include <melee/mn/mnmain.h>
 #include <melee/mn/mnnamenew.h>
+#include <melee/mn/mnslippi.h>
 #include <melee/lb/lbdvd.h>
 #include <melee/lb/types.h>
 #include <melee/mn/inlines.h>
@@ -1130,7 +1131,7 @@ static void profileRefresh(void) {
 }
 static bool internetLobby(void) {
     return online_kind != ONLINE_KIND_LAN && online_kind != ONLINE_KIND_PROFILE &&
-           online_kind != ONLINE_KIND_LOGIN &&
+           online_kind != ONLINE_KIND_LOGIN && online_kind != ONLINE_KIND_REGISTER &&
            !(online_kind == ONLINE_KIND_DIRECT && getenv("MELEE_LAN_DIRECT"));
 }
 
@@ -1464,210 +1465,13 @@ static bool directEntryFrame(OnlineLobbyView* view, u64 input)
 }
 #endif
 
-#ifdef TARGET_PC
-/* ---- Slippi sign-in ---------------------------------------------------
- * Online Mode > Slippi > Login: the email, then the password, typed on Melee's
- * own Name Entry screen (mnNameNew_PcOpen), as Slippi's Direct keyboard is.
- * The sign-in itself is blocking HTTPS (pc_slippi_account_login), so it runs
- * on a thread; the lobby view shows "Signing in..." and the result. A
- * password is kept only until the request is sent. */
-enum { LOGIN_ENTRY, LOGIN_BUSY, LOGIN_DONE, LOGIN_FAIL };
-#define LOGIN_FIELD_MAX 90
-
-typedef struct LoginJob {
-    char email[LOGIN_FIELD_MAX + 1];
-    char password[LOGIN_FIELD_MAX + 1];
-    PcSlippiAccount account;
-    char error[160];
-    SDL_AtomicInt done;
-    bool ok;
-} LoginJob;
-
-static int login_step;
-static char login_email[LOGIN_FIELD_MAX + 1];
-static char login_message[ONLINE_LOBBY_MSG_LEN];
-static LoginJob* login_job;
-static SDL_Thread* login_thread;
-static HSD_Archive* login_ext;
-static bool login_view; /* the lobby view (status text) is up */
-
-static bool loginEmailDone(bool confirmed, const char* text, void* user);
-static bool loginPasswordDone(bool confirmed, const char* text, void* user);
-
-static int loginThread(void* user)
-{
-    LoginJob* job = user;
-    job->ok = pc_slippi_account_login(job->email, job->password, &job->account, job->error,
-                                      sizeof job->error);
-    memset(job->password, 0, sizeof job->password);
-    SDL_SetAtomicInt(&job->done, 1);
-    return 0;
-}
-
-static void loginOpenEmail(void)
-{
-    login_step = LOGIN_ENTRY;
-    mnNameNew_PcOpen(login_ext, login_email, LOGIN_FIELD_MAX, false, true,
-                     "Enter the email of your Slippi account.", loginEmailDone, NULL, false, NULL);
-}
-
-static void loginOpenPassword(void)
-{
-    login_step = LOGIN_ENTRY;
-    mnNameNew_PcOpen(login_ext, "", LOGIN_FIELD_MAX, true, true,
-                     "Enter your password.", loginPasswordDone, NULL, false, NULL);
-}
-
-static void loginLeave(void)
-{
-    gm_ChangeGameModeAfterCurrentScene(GM_MENU);
-    gm_801A4B60();
-}
-
-/* The status view (the lobby's panel and text) for busy, done and failed. */
-static void loginShowView(void)
-{
-    if (!login_view) {
-        mnOnlineLobby_Create();
-        login_view = true;
-    }
-}
-
-static void loginHideView(void)
-{
-    if (login_view) {
-        mnOnlineLobby_Destroy();
-        HSD_SisLib_803A5E70();
-        mn_8022EBDC();
-        login_view = false;
-    }
-}
-
-static bool loginEmailDone(bool confirmed, const char* text, UNUSED void* user)
-{
-    if (!confirmed) {
-        loginLeave();
-        return true;
-    }
-    snprintf(login_email, sizeof login_email, "%s", text);
-    if (strchr(login_email, '@') == NULL) {
-        /* Not an email: back to the same entry. */
-        loginOpenEmail();
-        return true;
-    }
-    loginOpenPassword();
-    return true;
-}
-
-static bool loginPasswordDone(bool confirmed, const char* text, UNUSED void* user)
-{
-    if (!confirmed) {
-        loginOpenEmail();
-        return true;
-    }
-    login_job = calloc(1, sizeof *login_job);
-    if (login_job != NULL) {
-        snprintf(login_job->email, sizeof login_job->email, "%s", login_email);
-        snprintf(login_job->password, sizeof login_job->password, "%s", text);
-        login_thread = SDL_CreateThread(loginThread, "slippi login", login_job);
-    }
-    if (login_thread == NULL) {
-        free(login_job);
-        login_job = NULL;
-        login_step = LOGIN_FAIL;
-        snprintf(login_message, sizeof login_message, "Could not start the sign-in");
-    } else {
-        login_step = LOGIN_BUSY;
-    }
-    loginShowView();
-    return true;
-}
-
-static void loginBegin(void)
-{
-    login_step = LOGIN_ENTRY;
-    login_email[0] = '\0';
-    login_message[0] = '\0';
-    login_view = false;
-    if (!pc_slippi_account_login_available()) {
-        login_step = LOGIN_FAIL;
-        snprintf(login_message, sizeof login_message, "Online login is not set up in this build");
-        loginShowView();
-        return;
-    }
-    /* What the Name Entry screen needs: the menu text and its archive. */
-    if (lbLang_IsSavedLanguageUS()) {
-        HSD_SisLib_803A62A0(0, "SdMenu.usd", "SIS_MenuData");
-        login_ext = lbArchive_LoadArchive("MnExtAll.usd");
-    } else {
-        HSD_SisLib_803A62A0(0, "SdMenu.dat", "SIS_MenuData");
-        login_ext = lbArchive_LoadArchive("MnExtAll.dat");
-    }
-    loginOpenEmail();
-}
-
-static void loginEnd(void)
-{
-    if (login_ext != NULL) {
-        lbArchive_80016EFC(login_ext);
-        login_ext = NULL;
-    }
-}
-
-/* One frame of the status view; the keyboard runs its own procs. */
-static void loginFrame(OnlineLobbyView* view, u64 input)
-{
-    view->title = "SLIPPI LOGIN";
-    view->phase = LOBBY_PHASE_FOUND;
-    view->screen = LOBBY_SCREEN_PLAYERS;
-    if (login_step == LOGIN_BUSY) {
-        view->phase = LOBBY_PHASE_CONNECTING;
-        snprintf(view->message, sizeof view->message, "Signing in...");
-        view->hint = "Please wait";
-        if (login_job != NULL && SDL_GetAtomicInt(&login_job->done) != 0) {
-            SDL_WaitThread(login_thread, NULL);
-            login_thread = NULL;
-            if (login_job->ok) {
-                login_step = LOGIN_DONE;
-                snprintf(login_message, sizeof login_message, "Signed in as %.32s (%.12s)",
-                         login_job->account.display_name, login_job->account.connect_code);
-                pc_net_match_slippi_refresh();
-            } else {
-                login_step = LOGIN_FAIL;
-                snprintf(login_message, sizeof login_message, "%.90s",
-                         login_job->error[0] ? login_job->error : "Sign-in failed");
-            }
-            memset(login_job, 0, sizeof *login_job);
-            free(login_job);
-            login_job = NULL;
-        }
-        return;
-    }
-    view->phase = login_step == LOGIN_DONE ? LOBBY_PHASE_FOUND : LOBBY_PHASE_ERROR;
-    snprintf(view->message, sizeof view->message, "%s", login_message);
-    view->hint = login_step == LOGIN_DONE ? "A: continue" :
-                 pc_slippi_account_login_available() ? "A: try again   B: back" : "B: back";
-    if (input & (HSD_PAD_A | HSD_PAD_START)) {
-        sfxForward();
-        if (login_step == LOGIN_DONE) {
-            loginLeave();
-        } else if (pc_slippi_account_login_available()) {
-            loginHideView();
-            loginOpenPassword();
-        }
-    } else if (input & HSD_PAD_B) {
-        sfxBack();
-        loginLeave();
-    }
-}
-#endif
 
 void gm_Scene_OnlineLobby_OnEnter(UNUSED void* unused)
 {
 #ifdef TARGET_PC
-    if (online_kind == ONLINE_KIND_LOGIN) {
+    if (online_kind == ONLINE_KIND_LOGIN || online_kind == ONLINE_KIND_REGISTER) {
         direct_screen = DIRECT_OFF;
-        loginBegin(); /* the keyboard builds its own screen */
+        mnSlippi_Begin(online_kind == ONLINE_KIND_REGISTER); /* its own screens */
         return;
     }
     if (online_kind == ONLINE_KIND_PLACE || unrankedPassThrough()) {
@@ -1700,8 +1504,9 @@ void gm_Scene_OnlineLobby_OnEnter(UNUSED void* unused)
 void gm_Scene_OnlineLobby_OnExit(UNUSED void* unused)
 {
 #ifdef TARGET_PC
-    if (online_kind == ONLINE_KIND_LOGIN) {
-        loginEnd();
+    if (online_kind == ONLINE_KIND_LOGIN || online_kind == ONLINE_KIND_REGISTER) {
+        mnSlippi_End();
+        return;
     }
     if (online_kind == ONLINE_KIND_PLACE || unrankedPassThrough()) {
         return;
@@ -1845,12 +1650,8 @@ void gm_Scene_OnlineLobby_OnFrame(void)
         gm_801A4B60(); /* nothing to show: on to the placement scene, or the CSS */
         return;
     }
-    if (online_kind == ONLINE_KIND_LOGIN) {
-        if (login_view) {
-            memset(&view, 0, sizeof view);
-            loginFrame(&view, input);
-            mnOnlineLobby_Update(&view);
-        }
+    if (online_kind == ONLINE_KIND_LOGIN || online_kind == ONLINE_KIND_REGISTER) {
+        mnSlippi_Frame();
         return;
     }
     if (slippiFlow() && !slippi_picked) {
