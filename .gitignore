@@ -22,6 +22,7 @@ docs/*
 !docs/xr-raycast-surface-plan.md
 !docs/xr-auto-room-light.md
 !docs/browser-mobile-findings.md
+!docs/adding-menu-pages.md
 !docs/site/
 
 # Android build outputs (CI builds these from source).
