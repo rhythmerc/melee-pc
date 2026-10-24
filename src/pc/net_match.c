@@ -323,6 +323,7 @@ static void sign_packet(void* p, size_t n) {
     pc_identity_sign(&identity, (uint8_t*)p + n - 64, p, n - 64);
 }
 static void fail(const char* why) {
+    pc_log_line("match: failed: %s", why != NULL ? why : "(no reason)");
     state = PC_MATCH_FAIL;
     failure = why;
     pc_dht_stop();

@@ -34,6 +34,17 @@
 #include <unistd.h>
 #endif
 
+/* The diagnostic log (src/pc/main.c). Weak here so the parser test links
+ * without it. */
+#if defined(__GNUC__) || defined(__clang__)
+void pc_log_line(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+__attribute__((weak)) void pc_log_line(const char* fmt, ...) {
+    (void)fmt;
+}
+#else
+void pc_log_line(const char* fmt, ...);
+#endif
+
 /* The opaque client. The search runs on its own thread and publishes state and
  * result under `lock`; the state atomic is the cheap poll the UI reads. */
 struct PcSlippiMatch {
@@ -416,6 +427,112 @@ static bool escape_user(const PcSlippiAccount* a, EscapedUser* out) {
            pc_slippi_json_escape(a->display_name, out->display_name, sizeof out->display_name);
 }
 
+/* Compare two "major.minor.patch" versions numerically: negative, zero or
+ * positive as `a` is older than, equal to or newer than `b`. Missing parts
+ * count as 0 and anything after the numbers is ignored. */
+static int semver_compare(const char* a, const char* b) {
+    for (int i = 0; i < 3; i++) {
+        char* ea;
+        char* eb;
+        unsigned long x = strtoul(a, &ea, 10);
+        unsigned long y = strtoul(b, &eb, 10);
+        if (x != y) {
+            return x < y ? -1 : 1;
+        }
+        a = ea + (*ea == '.');
+        b = eb + (*eb == '.');
+    }
+    return 0;
+}
+
+/* The text shown for a matchmaking server error. An outdated client is told to
+ * restart or update the Slippi Launcher, sometimes with the latestVersion it
+ * needs, which means nothing in Xelee, so those errors get our own text. The
+ * reply itself, with the server's words, is in the log. */
+static void server_error_text(const char* err, const char* latest, char* out, size_t cap) {
+    bool restart = SDL_strcasestr(err, "restart") != NULL && SDL_strcasestr(err, "launcher") != NULL;
+    if (latest[0] >= '0' && latest[0] <= '9' && semver_compare(latest, PC_SLIPPI_SEMVER) > 0) {
+        snprintf(out, cap, "Slippi needs version %.12s. Update Xelee.", latest);
+    } else if (restart || SDL_strcasestr(err, "update") != NULL) {
+        snprintf(out, cap, "Slippi rejected this version. Update Xelee.");
+    } else {
+        snprintf(out, cap, "%s", err);
+    }
+}
+
+/* The shown text for an error envelope, with the reply's latestVersion. */
+static void server_error(const char* reply, const char* err, char* out, size_t cap) {
+    char latest[32];
+    resp_str(reply, "latestVersion", latest, sizeof latest);
+    server_error_text(err, latest, out, cap);
+}
+
+/* True for a member whose value identifies or authenticates a player. */
+static bool secret_key(const char* key, size_t len) {
+    char k[64];
+    snprintf(k, sizeof k, "%.*s", (int)len, key);
+    return SDL_strcasecmp(k, "uid") == 0 || SDL_strncasecmp(k, "ipAddress", 9) == 0 ||
+           SDL_strcasestr(k, "key") != NULL || SDL_strcasestr(k, "token") != NULL ||
+           SDL_strcasestr(k, "secret") != NULL || SDL_strcasestr(k, "password") != NULL;
+}
+
+static const char* skip_space(const char* p) {
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+        p++;
+    }
+    return p;
+}
+
+/* Past the closing quote of the string whose opening quote is at `p`. */
+static const char* string_end(const char* p) {
+    for (p++; *p != '\0' && *p != '"'; p++) {
+        if (*p == '\\' && p[1] != '\0') {
+            p++;
+        }
+    }
+    return *p == '"' ? p + 1 : p;
+}
+
+/* Copy a server reply for the log, each secret member's string value replaced
+ * with "-". A raw scan rather than a parse, so a malformed reply is still
+ * logged. */
+static void reply_redact(const char* body, char* out, size_t cap) {
+    size_t w = 0;
+    const char* p = body;
+    while (*p != '\0' && w + 1 < cap) {
+        if (*p != '"') {
+            out[w++] = *p++;
+            continue;
+        }
+        const char* e = string_end(p);
+        const char* v = skip_space(e);
+        /* A ':' after it makes the string a member key (and a closed one). */
+        if (*v == ':' && secret_key(p + 1, (size_t)(e - p) - 2)) {
+            v = skip_space(v + 1);
+            if (*v == '"') {
+                while (p < v && w + 1 < cap) {
+                    out[w++] = *p++;
+                }
+                for (const char* r = "\"-\""; *r != '\0' && w + 1 < cap; r++) {
+                    out[w++] = *r;
+                }
+                p = string_end(v);
+                continue;
+            }
+        }
+        while (p < e && w + 1 < cap) {
+            out[w++] = *p++;
+        }
+    }
+    out[w] = '\0';
+}
+
+static void log_reply(const char* reply) {
+    char line[448];
+    reply_redact(reply, line, sizeof line);
+    pc_log_line("slippi mm: reply %s", line);
+}
+
 /* The search thread. Owns its ENet host and writes state under the lock. */
 static int match_thread(void* user) {
     PcSlippiMatch* m = (PcSlippiMatch*)user;
@@ -525,8 +642,16 @@ static int match_thread(void* user) {
                     w += snprintf(body + w, sizeof body - w,
                                   "]},\"appVersion\":\"%s\",\"ipAddressLan\":\"%s\"}",
                                   PC_SLIPPI_SEMVER, lan_addr);
+                    bool direct = m->mode == PC_SLIPPI_MODE_DIRECT;
+                    pc_log_line("slippi mm: create-ticket to %s:%u, mode %d%s%s, appVersion %s, "
+                                "uid %.6s...",
+                                host_name, (unsigned)port, m->mode, direct ? " for " : "",
+                                direct ? m->connect_code : "", PC_SLIPPI_SEMVER, m->account.uid);
 
                     r = mm_receive(host, peer, body, 5000, reply, sizeof reply, &stopped, false);
+                    if (r == 0) {
+                        log_reply(reply);
+                    }
                     char type[32];
                     resp_str(reply, "type", type, sizeof type);
                     char err[128];
@@ -538,7 +663,7 @@ static int match_thread(void* user) {
                     } else if (strcmp(type, "create-ticket-resp") != 0) {
                         snprintf(error, sizeof error, "bad create-ticket response");
                     } else if (err[0]) {
-                        snprintf(error, sizeof error, "%s", err);
+                        server_error(reply, err, error, sizeof error);
                     } else {
                         /* Now the server pushes a get-ticket-resp when a match
                          * is assigned. Poll until then (or a 2-minute cap). */
@@ -552,6 +677,7 @@ static int match_thread(void* user) {
                                 snprintf(error, sizeof error, "lost connection to mm server");
                                 break;
                             }
+                            log_reply(reply);
                             resp_str(reply, "type", type, sizeof type);
                             if (strcmp(type, "get-ticket-resp") != 0) {
                                 snprintf(error, sizeof error, "invalid seek result");
@@ -559,7 +685,7 @@ static int match_thread(void* user) {
                             }
                             resp_str(reply, "error", err, sizeof err);
                             if (err[0]) {
-                                snprintf(error, sizeof error, "%s", err);
+                                server_error(reply, err, error, sizeof error);
                                 break;
                             }
                             if (pc_slippi_ticket_parse(reply, strlen(reply), m->local_port,
