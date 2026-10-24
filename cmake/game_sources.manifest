@@ -870,6 +870,7 @@ src/melee/mn/mndiagram.c
 src/melee/mn/mndiagram2.c
 src/melee/mn/mndiagram3.c
 src/melee/mn/mnevent.c
+src/melee/mn/mnfight.c
 src/melee/mn/mngallery.c
 src/melee/mn/mnhyaku.c
 src/melee/mn/mninfo.c

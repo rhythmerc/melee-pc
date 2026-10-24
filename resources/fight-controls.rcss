@@ -1,0 +1,39 @@
+/* Fight Controls (src/pc/fight_menu.cpp): Melee's gold line work, drawn
+   into the native Options page's frame (src/melee/mn/mnfight.c) over the
+   running menu. No backdrop, title or footer: the page's frame, tab and
+   hint box are Melee's. Laid out in px on a 1120x660 screen that the code
+   scales into the frame (#screen's transform). */
+* { box-sizing: border-box; }
+body { width: 100%; height: 100%; margin: 0; font-family: "Noto Sans"; color: #f0f2f5; background-color: #00000000; }
+div, span { display: block; }
+#screen { position: absolute; left: 0; top: 0; width: 1120px; height: 660px; transform-origin: 0 0; }
+#board { position: absolute; left: 0; top: 0; width: 1120px; height: 660px; }
+#art, .lit { position: absolute; }
+
+#device { position: absolute; top: 4px; text-align: center; font-size: 17px; letter-spacing: 1px; color: #c9b77c; }
+
+/* The leader lines: a stub out of the box, then a run to the part. */
+.seg { position: absolute; height: 3px; background-color: #f0c226c0; box-shadow: #ff961480 0px 0px 6px 1px; transform-origin: 0px 1.5px; }
+.seg.on { background-color: #fff4c4; box-shadow: #ffb020e0 0px 0px 10px 2px; }
+.dot { position: absolute; width: 9px; height: 9px; border-radius: 5px; background-color: #f0c226; box-shadow: #ff9614c0 0px 0px 6px 1px; }
+.dot.on { background-color: #fff4c4; box-shadow: #ffb020 0px 0px 10px 3px; }
+
+.slot { position: absolute; width: 260px; height: 56px; padding: 4px 14px; border: 3px #f0c226b0; border-radius: 7px; background-color: #0c0b08e0; box-shadow: #ff961450 0px 0px 8px 1px; }
+.slot .in { font-size: 16px; letter-spacing: 1px; color: #c9b77c; }
+.slot .act { font-size: 22px; font-weight: bold; color: #fff8e0; }
+.slot .act.unset { font-weight: normal; color: #8d8468; }
+.slot.changed .act { color: #ffe066; }
+.slot.cursor { border-color: #fff4c4; background-color: #1d180af0; box-shadow: #ffb020e0 0px 0px 14px 3px; }
+.slot.fixed { border-color: #f0c22650; box-shadow: none; background-color: #0a0a0ac0; }
+.slot.fixed .act { color: #a49a7c; font-weight: normal; }
+
+#reset { position: absolute; width: 220px; height: 40px; padding-top: 7px; text-align: center; border: 3px #f0c226a0; border-radius: 7px; background-color: #0c0b08e0; font-size: 18px; color: #f0e4b8; }
+#reset.cursor { border-color: #fff4c4; color: #ffffff; background-color: #1d180af0; box-shadow: #ffb020e0 0px 0px 14px 3px; }
+
+#list { position: absolute; width: 260px; padding: 6px 0; border: 3px #fff4c4; border-radius: 7px; background-color: #100e08f8; box-shadow: #ffb020c0 0px 0px 16px 3px; }
+#list .head { padding: 2px 14px 6px; font-size: 16px; letter-spacing: 1px; color: #c9b77c; }
+#list .item { display: flex; padding: 7px 14px; font-size: 22px; color: #f0e4b8; }
+#list .item.none { color: #8d8468; border-bottom: 1px #f0c22650; }
+#list .item.cursor { background-color: #f0c22638; color: #ffffff; }
+#list .item.current { font-weight: bold; }
+#list .item .tag { margin-left: auto; font-size: 14px; color: #c9b77c; padding-top: 6px; }

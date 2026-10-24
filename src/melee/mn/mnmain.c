@@ -5,6 +5,7 @@
 #include <math.h>
 #ifdef TARGET_PC
 #include "pc/pc.h"
+#include "mnfight.h"
 #include "pc/xr_place.h"
 #endif
 
@@ -109,7 +110,7 @@ static u16 mn_803EAE7C[] = {
     0x2, 0x3, 0x4, 0x9, 0xB, 0xC, 0xD, 0x0,
 };
 #ifdef TARGET_PC
-#define MENU_KIND_TABLE_LEN (MENU_KIND_ONLINE_SLIPPI + 1)
+#define MENU_KIND_TABLE_LEN (MENU_KIND_SETTINGS_FIGHT + 1)
 #else
 #define MENU_KIND_TABLE_LEN 0x22
 #endif
@@ -296,6 +297,12 @@ static AnimLoopSettings mn_803EAE8C[MENU_KIND_TABLE_LEN][3] = {
         { 450, 499, 450 },
         { 500, 599, 500 },
     },
+    { /* MENU_KIND_SETTINGS_FIGHT: Erase Data's (a plain inside); mnfight.c
+       * swaps the tab's title */
+        { 4200, 4249, 4220 },
+        { 4250, 4299, 4270 },
+        { 4300, 4399, 4320 },
+    },
 #endif
 };
 
@@ -363,6 +370,7 @@ static AnimLoopSettings mn_803EB4F8[] = {
     { 1450, 1499, 1470 }, { 1500, 1549, 1520 }, { 1550, 1599, 1570 },
 #ifdef TARGET_PC
     { 1400, 1449, 1420 }, /* Place Stage (XR): Screen Display's preview */
+    { 1300, 1349, 1320 }, /* Fight Controls: Rumble's preview (a controller) */
 #endif
 };
 
@@ -405,8 +413,9 @@ static u16 mn_803EB660[] = { 0x81, 0x82, 0x83, 0x84, 0x85, 0x00 };
 static u16 mn_803EB66C[] = { 0x86, 0x87, 0x88, 0x89, 0x8A, 0x00 };
 static u16 mn_803EB678[] = { 0x8E, 0x8F, 0x90, 0x91, 0x92, 0x00 };
 #ifdef TARGET_PC
-/* + Place Stage, whose description is literal (mnOnline_Description) */
-static u16 mn_803EB684[] = { 0x9A, 0x9B, 0x9C, 0x9D, 0x9D, 0x9E, 0x9E };
+/* + Place Stage and Fight Controls, whose descriptions are literal
+ * (mnOnline_Description) */
+static u16 mn_803EB684[] = { 0x9A, 0x9B, 0x9C, 0x9D, 0x9D, 0x9E, 0x9E, 0x9E };
 #else
 static u16 mn_803EB684[] = { 0x9A, 0x9B, 0x9C, 0x9D, 0x9D, 0x9E };
 #endif
@@ -686,6 +695,13 @@ MenuKindData mn_803EB6B0[MENU_KIND_TABLE_LEN] = {
         NULL,
         ARRAY_SIZE(mn_OnlineSlippiPreview),
         mnOnline_SlippiThink,
+    },
+    { /* MENU_KIND_SETTINGS_FIGHT: its own GObjs (mnfight.c), as Sound's */
+        NULL,
+        0,
+        NULL,
+        0x01,
+        NULL,
     },
 #endif
 };
@@ -1189,6 +1205,9 @@ void fn_80229BF4(HSD_GObj* gobj)
         break;
     }
     mn_8022ED6C(sp20, &mn_803EB354);
+#ifdef TARGET_PC
+    mnFight_PanelTitle(temp_r28, (MenuKind) data->cur_menu, (MenuKind) data->prev_menu, data->state == 1);
+#endif
 }
 
 HSD_GObj* mn_80229DC0(void)
@@ -1850,9 +1869,9 @@ HSD_GObj* mn_8022B3A0(u8 state)
         mnOnline_SlippiBuilt();
     }
     if (cur_menu == MENU_KIND_SETTINGS) {
-        /* Place Stage, last, while a headset is presenting. */
-        mn_803EB6B0[MENU_KIND_SETTINGS].selection_count =
-            pc_xr_place_available() ? SEL_SETTINGS_PLACE + 1 : SEL_SETTINGS_ERASE + 1;
+        /* Place Stage while a headset is presenting (locked, so hidden,
+         * otherwise), then Fight Controls. */
+        mn_803EB6B0[MENU_KIND_SETTINGS].selection_count = SEL_SETTINGS_FIGHT + 1;
     }
 #endif
     /// @todo Idiomatic spellings put the pointer in a named local, not a temp.
@@ -2215,6 +2234,9 @@ int mn_8022C010(int menu_kind, int selection)
     case MENU_KIND_22:
     case MENU_KIND_SETTINGS_LANG:
     case MENU_KIND_SETTINGS_ERASE:
+#ifdef TARGET_PC
+    case MENU_KIND_SETTINGS_FIGHT:
+#endif
         return 3;
     case MENU_KIND_DATA:
     case MENU_KIND_DATA_SNAP:
@@ -2827,6 +2849,11 @@ void mn_8022D104(HSD_GObj* gp)
 #ifdef TARGET_PC
         case SEL_SETTINGS_PLACE:
             mnOnline_PlaceFromOptions();
+            break;
+        case SEL_SETTINGS_FIGHT:
+            sfxForward();
+            mnFight_Init();
+            HSD_GObjFree(gp);
             break;
 #endif
         }

@@ -1,0 +1,15 @@
+# touch.png at 640x450 on the screen; per input: anchor x y, lit picture x y w h
+size 640 450
+left_stick 175.5 82.2 127 35 96 93
+left_stick_click 175.5 82.2 127 35 96 93
+left_trigger 288.5 146.0 252 93 76 108
+left_grip 175.8 223.8 93 158 164 135
+x 162.2 125.2 122 87 81 76
+y 210.2 102.8 169 65 82 76
+menu 129.2 122.0 91 87 76 70
+right_stick 467.2 82.2 420 35 96 93
+right_stick_click 467.2 82.2 420 35 96 93
+right_trigger 354.5 146.0 315 93 76 108
+right_grip 467.2 223.8 386 158 164 135
+a 480.8 125.2 440 87 81 76
+b 432.8 102.8 391 65 83 76

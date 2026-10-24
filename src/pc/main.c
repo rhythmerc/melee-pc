@@ -24,6 +24,7 @@
 
 #include "pc/pc.h"
 #include "pc/android_hooks.h"
+#include "pc/fight_map.h"
 #include "pc/launcher.h"
 
 int melee_main(void);
@@ -694,6 +695,7 @@ MELEE_EXPORT int main(int argc, char* argv[]) {
      * hidapi hint so SDL's rescaling driver leaves it for our raw path. */
     pc_gcadapter_init();
     pc_launcher_configure(&config);
+    pc_fight_map_configure(config.userPath);
 
     const AuroraInfo info = aurora_initialize(argc, argv, &config);
 

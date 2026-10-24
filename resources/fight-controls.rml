@@ -1,0 +1,4 @@
+<rml><head><title>Fight Controls</title><link type="text/rcss" href="fight-controls.rcss" /></head>
+<body>
+<div id="screen"><div id="board"></div></div>
+</body></rml>

@@ -122,6 +122,8 @@ typedef enum MenuKind {
     MENU_KIND_ONLINE = 34,
     /* PC: VS Mode > Online > Slippi (Unranked, Direct, ...). */
     MENU_KIND_ONLINE_SLIPPI = 35,
+    /* PC: Options > Fight Controls (mnfight.c). */
+    MENU_KIND_SETTINGS_FIGHT = 36,
 #endif
 } MenuKind;
 
@@ -218,6 +220,7 @@ typedef enum SettingsMenuSelection {
     SEL_SETTINGS_ERASE = 5,
 #ifdef TARGET_PC
     SEL_SETTINGS_PLACE = 6, ///< XR only: the stage-placement scene
+    SEL_SETTINGS_FIGHT = 7, ///< PC: Fight Controls (src/pc/fight_menu.h)
 #endif
 } SettingsMenuSelection;
 

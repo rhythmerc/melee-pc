@@ -71,6 +71,7 @@ enum {
 };
 bool pc_pad_engaged(const struct PADStatus* st); /* a button, or a stick or trigger off rest */
 void pc_pad_rumble_engaged(unsigned engaged); /* main thread, once a frame; adds the gamepad */
+int pc_pad_active_device(void); /* PC_PAD_DEVICE_*: port 1's device that most recently began to show input */
 void pc_pad_rumble_command(unsigned port, unsigned command); /* a game port's PAD_MOTOR_* */
 /* HUD snapshot: raw[6] = stick x,y  c-stick x,y  L R as the adapter reports
  * them (0-255). Returns false when no controller is in that slot. Safe from

@@ -73,6 +73,9 @@ const char* mnOnline_Label(MenuKind kind, int selection)
     if (kind == MENU_KIND_SETTINGS && selection == SEL_SETTINGS_PLACE) {
         return "Place Stage";
     }
+    if (kind == MENU_KIND_SETTINGS && selection == SEL_SETTINGS_FIGHT) {
+        return "Fight Controls";
+    }
     if (kind == MENU_KIND_ONLINE && selection >= 0 &&
         selection < (int) ARRAY_SIZE(online_labels))
     {
@@ -96,6 +99,9 @@ const char* mnOnline_Description(MenuKind kind, int selection)
     }
     if (kind == MENU_KIND_SETTINGS && selection == SEL_SETTINGS_PLACE) {
         return slippi_in_descriptions[row_place];
+    }
+    if (kind == MENU_KIND_SETTINGS && selection == SEL_SETTINGS_FIGHT) {
+        return "Choose what each button does in a fight.";
     }
     if (kind == MENU_KIND_ONLINE && selection >= 0 &&
         selection < (int) ARRAY_SIZE(online_descriptions))

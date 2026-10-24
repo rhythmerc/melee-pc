@@ -122,6 +122,10 @@ void pc_pad_rumble_engaged(unsigned engaged) {
     }
 }
 
+int pc_pad_active_device(void) {
+    return atomic_load_explicit(&s_device0, memory_order_relaxed);
+}
+
 void pc_pad_rumble_command(unsigned port, unsigned command) {
     if (pc_net_active()) {
         if ((int)port != pc_net_local_player())

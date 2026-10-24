@@ -2388,6 +2388,15 @@ PortMenu port_menu;
 extern "C" bool pc_menu_is_open(void) {
     return port_menu.open;
 }
+/* Where the menus' documents are ("" on Android: the APK's assets), with a
+ * trailing separator, for the other RmlUi screens (fight_menu.cpp). */
+extern "C" const char* pc_resources_dir(void) {
+    static const std::string dir = [] {
+        const auto p = pc_resources_path();
+        return p.empty() ? std::string() : (p / "").string();
+    }();
+    return dir.c_str();
+}
 extern "C" void pc_menu_init(SDL_Window* window) {
     slippi_auth.account = SlippiAuth::load_account();
     pc_widescreen_set_mode(prefs.widescreen);
