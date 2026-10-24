@@ -288,6 +288,7 @@ set(PC_SOURCES
         src/pc/disc_open.c
         src/pc/fight_map.c
         src/pc/fight_menu.cpp
+        src/pc/rml_picklist.cpp
         src/pc/discfont.c
         src/pc/gcadapter.c
         src/pc/gx.c

@@ -30,10 +30,11 @@ div, span { display: block; }
 #reset { position: absolute; width: 220px; height: 40px; padding-top: 7px; text-align: center; border: 3px #f0c226a0; border-radius: 7px; background-color: #0c0b08e0; font-size: 18px; color: #f0e4b8; }
 #reset.cursor { border-color: #fff4c4; color: #ffffff; background-color: #1d180af0; box-shadow: #ffb020e0 0px 0px 14px 3px; }
 
-#list { position: absolute; width: 260px; padding: 6px 0; border: 3px #fff4c4; border-radius: 7px; background-color: #100e08f8; box-shadow: #ffb020c0 0px 0px 16px 3px; }
-#list .head { padding: 2px 14px 6px; font-size: 16px; letter-spacing: 1px; color: #c9b77c; }
-#list .item { display: flex; padding: 7px 14px; font-size: 22px; color: #f0e4b8; }
-#list .item.none { color: #8d8468; border-bottom: 1px #f0c22650; }
-#list .item.cursor { background-color: #f0c22638; color: #ffffff; }
-#list .item.current { font-weight: bold; }
-#list .item .tag { margin-left: auto; font-size: 14px; color: #c9b77c; padding-top: 6px; }
+/* An input's list of actions (src/pc/rml_picklist.cpp); the first is (none). */
+.picklist.fight { padding: 6px 0; border: 3px #fff4c4; border-radius: 7px; background-color: #100e08f8; box-shadow: #ffb020c0 0px 0px 16px 3px; }
+.picklist.fight .head { padding: 2px 14px 6px; font-size: 16px; letter-spacing: 1px; color: #c9b77c; }
+.picklist.fight .item { display: flex; padding: 7px 14px; font-size: 22px; color: #f0e4b8; }
+.picklist.fight .item.first { color: #8d8468; border-bottom: 1px #f0c22650; }
+.picklist.fight .item.cursor { background-color: #f0c22638; color: #ffffff; }
+.picklist.fight .item.current { font-weight: bold; }
+.picklist.fight .item .tag { margin-left: auto; font-size: 14px; color: #c9b77c; padding-top: 6px; }

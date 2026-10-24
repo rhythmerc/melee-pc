@@ -5,6 +5,7 @@
 #include "fight_map.h"
 #include "launcher.h"
 #include "pc.h"
+#include "rml_picklist.hpp"
 
 #include <RmlUi/Core.h>
 #include <SDL3/SDL.h>
@@ -36,7 +37,6 @@ constexpr float kTop = 8.f, kBottom = 652.f; // the boxes' columns
 constexpr float kArtScale = 0.8f;            // the pictures were drawn for 640 px across
 constexpr float kResetW = 220.f, kResetH = 40.f;
 constexpr int kFixed = -1; // the pause button's box: shown, never mapped
-constexpr int kListPop = 6; // frames the list takes to open
 
 struct InputName {
     const char* file;  // fight_map.c's name, and the picture's
@@ -64,15 +64,15 @@ const char* action_label(PcFightAction a) {
     return a >= 0 && a < PC_FIGHT_ACTION_COUNT ? names[a] : "?";
 }
 
-// What the hint box says on a list entry.
+// What the hint box says on a list entry. Melee's font has no semicolon.
 const char* action_hint(PcFightAction a) {
     static const char* const hints[PC_FIGHT_ACTION_COUNT] = {
         "This input does nothing in a fight.",
-        "Walk and run; tilt attacks with Attack.",
+        "Walk and run. Tilt it with Attack for tilts.",
         "Smash attacks and aerials, by direction.",
-        "Shield; press a trigger lightly for a light shield.",
+        "Shield. Press a trigger lightly for a light shield.",
         "Grab, and Z's other moves.",
-        "Jump; again in the air for a double jump.",
+        "Jump. Again in the air for a double jump.",
         "Normal attacks.",
         "Special moves.",
         "Taunt.",
@@ -105,9 +105,8 @@ struct Menu : Rml::EventListener {
     static constexpr int kReset = -2;
     int lastColumn = 0;         // where up from Reset goes back to
     int listFor = -1;           // the slot whose list is open
-    int listAge = 0;            // frames since it opened
-    std::vector<PcFightAction> items;
-    int itemCursor = 0;
+    std::vector<PcFightAction> items; // the list's choices
+    pc::rml::PickList list;
     float presence = 0.f;       // the page's fade: 0 gone, 1 shown
     float scale = 1.f;
     Rml::Vector2i dims{0, 0};
@@ -269,7 +268,7 @@ struct Menu : Rml::EventListener {
         }
         rml += "<button id=\"reset\" style=\"left: " + fmt((kScreenW - kResetW) / 2) + "px; top: " +
                fmt(kScreenH - kResetH - 6) + "px;\">Reset to defaults</button>";
-        rml += "<div id=\"list\" style=\"display: none;\" />";
+        list.close();
         document->GetElementById("board")->SetInnerRML(rml);
         listFor = -1;
         lastColumn = 0;
@@ -333,56 +332,14 @@ struct Menu : Rml::EventListener {
     }
 
     void refresh_list() {
-        auto* list = document->GetElementById("list");
-        if (list == nullptr)
-            return;
-        if (listFor < 0) {
-            list->SetProperty("display", "none");
-            return;
-        }
-        const Slot& s = slots[listFor];
-        const PcFightAction current = pc_fight_map_get(device, s.input);
-        const PcFightAction def = pc_fight_map_default(device, s.input);
-        std::string rml = "<div class=\"head\">" + s.label + "</div>";
-        for (size_t j = 0; j < items.size(); j++) {
-            std::string cls = "item";
-            if (items[j] == PC_FIGHT_NONE)
-                cls += " none";
-            if (static_cast<int>(j) == itemCursor)
-                cls += " cursor";
-            if (items[j] == current)
-                cls += " current";
-            rml += "<div id=\"item-" + std::to_string(j) + "\" class=\"" + cls + "\"><span>" +
-                   action_label(items[j]) + "</span>" +
-                   (items[j] == def && def != PC_FIGHT_NONE ? "<span class=\"tag\">default</span>" : "") + "</div>";
-        }
-        list->SetInnerRML(rml);
-        // Beside the box, toward the picture, centred on it, on the screen.
-        const float h = 40.f + 44.f * static_cast<float>(items.size());
-        const float top = std::clamp(s.y + kBoxH / 2 - h / 2, 4.f, kScreenH - 4.f - h);
-        list->SetProperty("left", fmt(s.left ? s.x + kBoxW + 10 : s.x - kBoxW - 10) + "px");
-        list->SetProperty("top", fmt(top) + "px");
-        list->SetProperty("transform-origin", s.left ? "0% 50%" : "100% 50%");
-        list->SetProperty("display", "block");
-        pop_list();
-    }
-
-    // The list opening: grown out of its box, faded in, over kListPop frames.
-    void pop_list() {
-        auto* list = document->GetElementById("list");
-        if (list == nullptr || listFor < 0)
-            return;
-        const float t = std::min(1.f, static_cast<float>(listAge) / kListPop);
-        const float ease = 1.f - (1.f - t) * (1.f - t);
-        list->SetProperty("opacity", fmt(ease));
-        list->SetProperty("transform", "scale(" + fmt(0.9f + 0.1f * ease) + ")");
+        if (listFor < 0)
+            list.close();
     }
 
     void open_list(int slot) {
         if (slot < 0 || slot >= static_cast<int>(slots.size()) || slots[slot].input == kFixed)
             return;
         listFor = slot;
-        listAge = 0;
         items.clear();
         items.push_back(PC_FIGHT_NONE);
         if (pc_fight_map_is_stick(slots[slot].input)) {
@@ -393,11 +350,22 @@ struct Menu : Rml::EventListener {
                                     PC_FIGHT_TAUNT})
                 items.push_back(a);
         }
-        const PcFightAction current = pc_fight_map_get(device, slots[slot].input);
-        itemCursor = 0;
-        for (size_t j = 0; j < items.size(); j++)
+        const Slot& s = slots[slot];
+        const PcFightAction current = pc_fight_map_get(device, s.input);
+        const PcFightAction def = pc_fight_map_default(device, s.input);
+        std::vector<pc::rml::PickChoice> choices;
+        int at = 0;
+        for (size_t j = 0; j < items.size(); j++) {
+            choices.push_back({action_label(items[j]), items[j] == def && def != PC_FIGHT_NONE ? "default" : ""});
             if (items[j] == current)
-                itemCursor = static_cast<int>(j);
+                at = static_cast<int>(j);
+        }
+        // Beside the box, toward the picture, centred on it, on the screen.
+        const float h = pc::rml::PickList::height(items.size(), 44.f, 40.f);
+        const float top = std::clamp(s.y + kBoxH / 2 - h / 2, 4.f, kScreenH - 4.f - h);
+        list.open(document->GetElementById("board"), s.label, std::move(choices), at,
+                  s.left ? s.x + kBoxW + 10 : s.x - kBoxW - 10, top, kBoxW, s.left ? "0% 50%" : "100% 50%",
+                  "fight");
         lbAudioAx_80024030(SFX_CONFIRM);
         refresh();
     }
@@ -425,12 +393,8 @@ struct Menu : Rml::EventListener {
     // across to the nearest box. dir: 0 up, 1 down, 2 left, 3 right.
     void move(int dir) {
         if (listFor >= 0) {
-            if (dir > 1)
-                return;
-            const int n = static_cast<int>(items.size());
-            itemCursor = (itemCursor + (dir == 0 ? n - 1 : 1)) % n;
-            lbAudioAx_80024030(SFX_MOVE);
-            refresh_list();
+            if (dir <= 1 && list.move(dir == 0 ? -1 : 1))
+                lbAudioAx_80024030(SFX_MOVE);
             return;
         }
         const int before = cursor;
@@ -476,7 +440,7 @@ struct Menu : Rml::EventListener {
 
     void select() {
         if (listFor >= 0)
-            pick(itemCursor);
+            pick(list.cursor());
         else if (cursor == kReset)
             reset();
         else
@@ -511,6 +475,7 @@ struct Menu : Rml::EventListener {
             return;
         shown = false;
         listFor = -1;
+        list.close();
         document->Hide();
     }
 
@@ -519,7 +484,7 @@ struct Menu : Rml::EventListener {
         if (!shown)
             return nullptr;
         if (listFor >= 0)
-            return action_hint(items[itemCursor]);
+            return action_hint(items[std::clamp(list.cursor(), 0, static_cast<int>(items.size()) - 1)]);
         if (cursor == kReset)
             return "Put every input back to its default.";
         const Slot& s = slots[cursor];
@@ -577,8 +542,8 @@ struct Menu : Rml::EventListener {
             // A laser's click arrives as the menus' A too (xr_pointer.c).
             if (pointerWas)
                 break;
-            if (id_of(target, "item-", index)) {
-                pick(index);
+            if (list.clicked(target) >= 0) {
+                pick(list.clicked(target));
             } else if (id_of(target, "slot-", index)) {
                 if (listFor >= 0 && listFor != index)
                     listFor = -1;
@@ -587,14 +552,13 @@ struct Menu : Rml::EventListener {
                 listFor = -1;
                 cursor = kReset;
                 reset();
-            } else if (listFor >= 0 && !id_of(target, "list", index)) {
+            } else if (listFor >= 0 && !list.contains(target)) {
                 back(); // a click beside the list closes it
             }
             break;
         case Rml::EventId::Mouseover:
-            if (listFor >= 0 && id_of(target, "item-", index) && index != itemCursor) {
-                itemCursor = index;
-                refresh_list();
+            if (listFor >= 0 && list.hover(target)) {
+                // the list follows the pointer
             } else if (listFor < 0 && id_of(target, "slot-", index) && index != cursor &&
                        slots[index].input != kFixed)
             {
@@ -622,10 +586,7 @@ struct Menu : Rml::EventListener {
             device = now;
             build();
         }
-        if (listFor >= 0 && listAge < kListPop) {
-            listAge++;
-            pop_list();
-        }
+        list.update();
 #ifdef AURORA_ENABLE_OPENXR
         // The lasers: the mouse on the screen.
         float px = 0.f, py = 0.f;
