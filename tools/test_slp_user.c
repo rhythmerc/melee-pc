@@ -31,18 +31,77 @@ bool pc_slippi_http_get(const char* url, const char* bearer, char* out, size_t c
     }
     return false;
 }
+/* A scripted fake of the account endpoints, answered by URL from its state,
+ * so the setup steps run with no network. */
+static struct {
+    bool verified;
+    int rules;
+    bool code;
+    int sent;
+    int calls;
+    char last_body[2048];
+    char last_bearer[64];
+} fake;
+
+static void reply(char* out, size_t cap, int* status, int code, const char* body) {
+    snprintf(out, cap, "%s", body);
+    *status = code;
+}
+
 bool pc_slippi_http_post_json(const char* url, const char* body, const char* bearer, char* out,
                               size_t cap, int* status) {
-    (void)url;
-    (void)body;
-    (void)bearer;
-    if (out != NULL && cap > 0) {
+    fake.calls++;
+    snprintf(fake.last_body, sizeof fake.last_body, "%s", body != NULL ? body : "");
+    snprintf(fake.last_bearer, sizeof fake.last_bearer, "%s", bearer != NULL ? bearer : "");
+    char buf[1024];
+    if (strstr(url, "accounts:signInWithPassword") != NULL) {
+        if (strstr(body, "\"password\":\"right\"") == NULL) {
+            reply(out, cap, status, 400, "{\"error\":{\"code\":400,\"message\":\"INVALID_LOGIN_CREDENTIALS\"}}");
+        } else {
+            reply(out, cap, status, 200, "{\"idToken\":\"id1\",\"refreshToken\":\"r1\",\"localId\":\"uid1\"}");
+        }
+    } else if (strstr(url, "/v1/token") != NULL) {
+        reply(out, cap, status, 200, "{\"id_token\":\"id2\",\"refresh_token\":\"r2\",\"user_id\":\"uid1\"}");
+    } else if (strstr(url, "accounts:lookup") != NULL) {
+        snprintf(buf, sizeof buf, "{\"users\":[{\"email\":\"a@b.c\",\"emailVerified\":%s}]}",
+                 fake.verified ? "true" : "false");
+        reply(out, cap, status, 200, buf);
+    } else if (strstr(url, "accounts:sendOobCode") != NULL) {
+        fake.sent++;
+        reply(out, cap, status, 200, "{\"email\":\"a@b.c\"}");
+    } else if (strstr(url, "createUserNew") != NULL) {
+        if (strstr(body, "\"email\":\"taken@b.c\"") != NULL) {
+            reply(out, cap, status, 400,
+                  "{\"error\":{\"message\":\"The email address is already in use\",\"status\":\"ALREADY_EXISTS\"}}");
+        } else {
+            reply(out, cap, status, 200, "{\"result\":{}}");
+        }
+    } else if (strstr(url, "example.test/gql") != NULL) {
+        if (strstr(body, "userAcceptRules") != NULL) {
+            fake.rules = 1;
+            reply(out, cap, status, 200, "{\"data\":{\"userAcceptRules\":{\"fbUid\":\"uid1\",\"rulesAccepted\":1}}}");
+        } else if (strstr(body, "userInitNetplay") != NULL) {
+            if (strstr(body, "\"codeStart\":\"BAD\"") != NULL) {
+                reply(out, cap, status, 200, "{\"errors\":[{\"message\":\"That code is not allowed\"}],\"data\":null}");
+            } else {
+                fake.code = true;
+                reply(out, cap, status, 200, "{\"data\":{\"userInitNetplay\":{\"fbUid\":\"uid1\"}}}");
+            }
+        } else {
+            snprintf(buf, sizeof buf,
+                     "{\"data\":{\"getUser\":{\"fbUid\":\"uid1\",\"displayName\":\"Dummy Rules\","
+                     "\"connectCode\":%s,\"private\":%s,\"rulesAccepted\":%d},"
+                     "\"getLatestDolphin\":{\"version\":\"3.6.4\"}}}",
+                     fake.code ? "{\"code\":\"DUMM#123\"}" : "null",
+                     fake.code ? "{\"playKey\":\"pk\"}" : "null", fake.rules);
+            reply(out, cap, status, 200, buf);
+        }
+    } else {
         out[0] = '\0';
-    }
-    if (status != NULL) {
         *status = 0;
+        return false;
     }
-    return false;
+    return true;
 }
 
 static void test_parse_real(void) {
@@ -211,6 +270,126 @@ static void test_connect_codes(void) {
     assert(out[0] == '\0');
 }
 
+static void setup_env(void) {
+    setenv("MELEE_SLIPPI_FIREBASE_KEY", "k", 1);
+    setenv("MELEE_SLIPPI_GRAPHQL_ENDPOINT", "https://example.test/gql", 1);
+    unsetenv("MELEE_SLIPPI_AUTH_HOST");
+    static char dir[] = "/tmp/slp_setup_test_XXXXXX";
+    static bool made;
+    if (!made) {
+        assert(mkdtemp(dir) != NULL);
+        made = true;
+    }
+    setenv("MELEE_SLIPPI_DIR", dir, 1);
+    memset(&fake, 0, sizeof fake);
+}
+
+/* A new account walks every step in the Launcher's order: email, rules, code. */
+static void test_setup_steps(void) {
+    setup_env();
+    PcSlippiSetup s;
+    PcSlippiSetupStep step;
+    PcSlippiAccount a;
+    char err[160];
+    assert(!pc_slippi_setup_sign_in(&s, "a@b.c", "wrong", err, sizeof err));
+    assert(strcmp(err, "Wrong email or password") == 0);
+    bool in = pc_slippi_setup_sign_in(&s, "a@b.c", "right", err, sizeof err);
+    if (!in) fprintf(stderr, "sign-in: %s\n", err);
+    assert(in);
+    assert(strcmp(s.uid, "uid1") == 0);
+    assert(strstr(fake.last_body, "right") != NULL); /* sent, and not kept: */
+    assert(strstr((const char*)&s, "right") == NULL);
+
+    assert(pc_slippi_setup_check(&s, &step, &a, err, sizeof err));
+    assert(step == PC_SLIPPI_SETUP_VERIFY_EMAIL);
+    assert(strcmp(s.id_token, "id2") == 0); /* refreshed first */
+    assert(strcmp(s.display_name, "Dummy Rules") == 0);
+    assert(pc_slippi_setup_send_verification(&s, err, sizeof err));
+    assert(fake.sent == 1 && strstr(fake.last_body, "VERIFY_EMAIL") != NULL);
+
+    fake.verified = true;
+    assert(pc_slippi_setup_check(&s, &step, &a, err, sizeof err));
+    assert(step == PC_SLIPPI_SETUP_RULES);
+    assert(pc_slippi_setup_accept_rules(&s, err, sizeof err));
+    assert(strstr(fake.last_body, "\"num\":1") != NULL);
+    assert(strcmp(fake.last_bearer, "id2") == 0);
+
+    assert(pc_slippi_setup_check(&s, &step, &a, err, sizeof err));
+    assert(step == PC_SLIPPI_SETUP_CONNECT_CODE);
+    assert(!pc_slippi_setup_choose_code(&s, "A", err, sizeof err)); /* refused before any request */
+    assert(!pc_slippi_setup_choose_code(&s, "BAD", err, sizeof err));
+    assert(strcmp(err, "That code is not allowed") == 0);
+    assert(pc_slippi_setup_choose_code(&s, "DUMM", err, sizeof err));
+
+    assert(pc_slippi_setup_check(&s, &step, &a, err, sizeof err));
+    assert(step == PC_SLIPPI_SETUP_DONE);
+    assert(a.logged_in && strcmp(a.connect_code, "DUMM#123") == 0 && strcmp(a.play_key, "pk") == 0);
+    PcSlippiAccount stored;
+    assert(pc_slippi_account_load(&stored, false));
+    assert(strcmp(stored.connect_code, "DUMM#123") == 0);
+    pc_slippi_setup_end(&s);
+    assert(s.id_token[0] == '\0' && s.refresh_token[0] == '\0');
+}
+
+/* An account that can already play signs in as before, even unverified; one
+ * missing only the rules (the reported player) goes straight to them. */
+static void test_setup_existing(void) {
+    setup_env();
+    fake.code = true;
+    fake.rules = 1;
+    PcSlippiAccount a;
+    char err[160];
+    assert(pc_slippi_account_login("a@b.c", "right", &a, err, sizeof err));
+    assert(strcmp(a.connect_code, "DUMM#123") == 0);
+
+    fake.rules = 0;
+    assert(!pc_slippi_account_login("a@b.c", "right", &a, err, sizeof err));
+    assert(strstr(err, "Online Mode") != NULL);
+    fake.verified = true;
+    PcSlippiSetup s;
+    PcSlippiSetupStep step;
+    assert(pc_slippi_setup_sign_in(&s, "a@b.c", "right", err, sizeof err));
+    assert(pc_slippi_setup_check(&s, &step, &a, err, sizeof err));
+    assert(step == PC_SLIPPI_SETUP_RULES);
+}
+
+static void test_setup_register(void) {
+    setup_env();
+    PcSlippiSetup s;
+    char err[160];
+    assert(!pc_slippi_setup_register(&s, "", "a@b.c", "right", err, sizeof err));
+    assert(!pc_slippi_setup_register(&s, "sixteen chars xx", "a@b.c", "right", err, sizeof err));
+    assert(!pc_slippi_setup_register(&s, "Name", "taken@b.c", "right", err, sizeof err));
+    assert(strcmp(err, "The email address is already in use") == 0);
+    assert(pc_slippi_setup_register(&s, "Dummy Rules", "a@b.c", "right", err, sizeof err));
+    assert(strcmp(s.uid, "uid1") == 0);
+}
+
+static void test_setup_reset(void) {
+    setup_env();
+    char err[160];
+    assert(!pc_slippi_setup_send_password_reset("", err, sizeof err));
+    assert(fake.calls == 0);
+    assert(pc_slippi_setup_send_password_reset("a@b.c", err, sizeof err));
+    assert(strstr(fake.last_body, "PASSWORD_RESET") != NULL && strstr(fake.last_body, "a@b.c") != NULL);
+}
+
+static void test_setup_names(void) {
+    char tag[8];
+    assert(pc_slippi_display_name_valid("Player One"));
+    assert(pc_slippi_display_name_valid("x"));
+    assert(!pc_slippi_display_name_valid("back\\slash"));
+    assert(!pc_slippi_display_name_valid("tick`"));
+    assert(!pc_slippi_display_name_valid("0123456789abcdef"));
+    assert(pc_slippi_code_start_valid("AB") && pc_slippi_code_start_valid("DUMM"));
+    assert(!pc_slippi_code_start_valid("A") && !pc_slippi_code_start_valid("ABCDE"));
+    assert(!pc_slippi_code_start_valid("ab") && !pc_slippi_code_start_valid("A1"));
+    pc_slippi_code_start_suggest("dummy-rules", tag, sizeof tag);
+    assert(strcmp(tag, "DUMM") == 0);
+    pc_slippi_code_start_suggest("x1-y", tag, sizeof tag);
+    assert(strcmp(tag, "XY") == 0);
+}
+
 int main(void) {
     test_connect_codes();
     test_discover_appimage_dir();
@@ -220,6 +399,11 @@ int main(void) {
     test_round_trip();
     test_hostile();
     test_login_unconfigured();
+    test_setup_names();
+    test_setup_steps();
+    test_setup_existing();
+    test_setup_register();
+    test_setup_reset();
     printf("slp_user: all tests passed\n");
     return 0;
 }

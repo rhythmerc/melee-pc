@@ -128,12 +128,64 @@ bool pc_http_post(const char* url, const char* content_type, const char* body, s
 bool pc_slippi_account_login_available(void);
 
 /* Log in with a Slippi (Firebase) email/password and fetch the account fields.
- * This is blocking (two HTTPS round trips), so call it off the main thread.
+ * This is blocking (several HTTPS round trips), so call it off the main thread.
  * Returns true and fills `out` on success; on failure returns false and writes
  * a human-readable reason into `err` (up to err_cap). On success the account is
- * saved to our store. See docs/slippi-migration-plan.md for the two calls. */
+ * saved to our store. An account that still needs setting up (below) fails
+ * with a message pointing at the game's Slippi pages. */
 bool pc_slippi_account_login(const char* email, const char* password, PcSlippiAccount* out,
                              char* err, size_t err_cap);
+
+/* ---- account setup ----------------------------------------------------
+ * What the Slippi Launcher's quick start does, for a player with no Launcher:
+ * make an account, then, only for what is missing, verify the email, accept
+ * Slippi's online rules and choose a connect code. Every call is blocking
+ * HTTPS (run it off the main thread) and returns false with a reason in `err`.
+ * The session holds the Firebase tokens between steps, in memory only; the
+ * password is never kept. pc_slippi_setup_end wipes it. */
+
+/* Slippi's current rules version (the Launcher's currentRulesVersion). */
+#define PC_SLIPPI_RULES_VERSION 1
+
+typedef enum PcSlippiSetupStep {
+    PC_SLIPPI_SETUP_DONE,         /* playable; the account is saved */
+    PC_SLIPPI_SETUP_VERIFY_EMAIL, /* the email address is not verified */
+    PC_SLIPPI_SETUP_RULES,        /* the rules are not accepted */
+    PC_SLIPPI_SETUP_CONNECT_CODE, /* no connect code yet */
+} PcSlippiSetupStep;
+
+typedef struct PcSlippiSetup {
+    char uid[PC_SLIPPI_UID_MAX];
+    char id_token[4096];
+    char refresh_token[1024];
+    char email[256];
+    char display_name[PC_SLIPPI_DISPLAY_NAME_MAX];
+    bool email_verified;
+} PcSlippiSetup;
+
+bool pc_slippi_setup_sign_in(PcSlippiSetup* s, const char* email, const char* password, char* err,
+                             size_t cap);
+/* Make an account with the Launcher's sign-up function, then sign in. */
+bool pc_slippi_setup_register(PcSlippiSetup* s, const char* name, const char* email, const char* password,
+                              char* err, size_t cap);
+/* Fresh tokens and the account's state: the next step, or DONE with the
+ * account saved and in `out`. */
+bool pc_slippi_setup_check(PcSlippiSetup* s, PcSlippiSetupStep* step, PcSlippiAccount* out, char* err,
+                           size_t cap);
+bool pc_slippi_setup_send_verification(PcSlippiSetup* s, char* err, size_t cap);
+/* Slippi's password reset email, to `email`; no session needed. */
+bool pc_slippi_setup_send_password_reset(const char* email, char* err, size_t cap);
+bool pc_slippi_setup_accept_rules(PcSlippiSetup* s, char* err, size_t cap);
+/* `tag` is the code's start, 2-4 capitals; Slippi adds the "#123". */
+bool pc_slippi_setup_choose_code(PcSlippiSetup* s, const char* tag, char* err, size_t cap);
+void pc_slippi_setup_end(PcSlippiSetup* s);
+
+/* The Launcher's rules for a display name (1-15 printable characters, no \
+ * or `) and a code's start (2-4 of A-Z), and its suggested start: the name's
+ * first four letters, upper-cased. */
+bool pc_slippi_display_name_valid(const char* name);
+bool pc_slippi_code_start_valid(const char* tag);
+void pc_slippi_code_start_suggest(const char* display_name, char* out, size_t cap);
 
 #ifdef __cplusplus
 }

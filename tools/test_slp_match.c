@@ -124,7 +124,23 @@ static void test_local_peer(void) {
     assert(!pc_slippi_ticket_local(40000, 40001, 2, 5, &t));
 }
 
+/* The server's error replies, as the CSS shows them (48 characters). The
+ * rules one came from a player's log (2026-10-24). */
+static void test_server_errors(void) {
+    char out[96];
+    server_error_text("Please restart Slippi Launcher to accept rules. Update launcher if needed", "", out,
+                      sizeof out);
+    assert(strstr(out, "rules") != NULL && strlen(out) <= 48);
+    server_error_text("Please restart Slippi Launcher", "", out, sizeof out);
+    assert(strstr(out, "Update Xelee") != NULL);
+    server_error_text("Please update", "9.9.9", out, sizeof out);
+    assert(strstr(out, "9.9.9") != NULL);
+    server_error_text("Some other problem", "", out, sizeof out);
+    assert(strcmp(out, "Some other problem") == 0);
+}
+
 int main(void) {
+    test_server_errors();
     test_parse_two();
     test_same_nat_uses_lan();
     test_default_stages();

@@ -447,11 +447,17 @@ static int semver_compare(const char* a, const char* b) {
 
 /* The text shown for a matchmaking server error. An outdated client is told to
  * restart or update the Slippi Launcher, sometimes with the latestVersion it
- * needs, which means nothing in Xelee, so those errors get our own text. The
- * reply itself, with the server's words, is in the log. */
+ * needs, which means nothing in Xelee, so those errors get our own text. An
+ * account that has not accepted Slippi's rules gets the same "restart Slippi
+ * Launcher" wording ("...to accept rules. Update launcher if needed"); signing
+ * in again shows the rules (src/pc/slippi_menu.cpp), so that one says so, in
+ * the 48 characters the CSS shows. The reply itself, with the server's words,
+ * is in the log. */
 static void server_error_text(const char* err, const char* latest, char* out, size_t cap) {
     bool restart = SDL_strcasestr(err, "restart") != NULL && SDL_strcasestr(err, "launcher") != NULL;
-    if (latest[0] >= '0' && latest[0] <= '9' && semver_compare(latest, PC_SLIPPI_SEMVER) > 0) {
+    if (SDL_strcasestr(err, "accept rules") != NULL) {
+        snprintf(out, cap, "Accept Slippi's rules: Logout, then Login");
+    } else if (latest[0] >= '0' && latest[0] <= '9' && semver_compare(latest, PC_SLIPPI_SEMVER) > 0) {
         snprintf(out, cap, "Slippi needs version %.12s. Update Xelee.", latest);
     } else if (restart || SDL_strcasestr(err, "update") != NULL) {
         snprintf(out, cap, "Slippi rejected this version. Update Xelee.");
